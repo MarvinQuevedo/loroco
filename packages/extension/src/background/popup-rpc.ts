@@ -126,6 +126,11 @@ export async function handlePopupMessage(
             cat_metadata: metadata,
             nfts: projectedNfts,
             nfts_synced_at: store.nfts_synced_at ?? null,
+            // Surface the hardened-path map so the popup can detect when
+            // a discovered NFT/CAT was received at a hardened derivation
+            // (the engine's transfer_nft/send_cat only handle unhardened
+            // paths today — see App.tsx NftDetail.transfer for the gate).
+            hardened_phs: store.hardened_phs ?? {},
           },
         };
       }

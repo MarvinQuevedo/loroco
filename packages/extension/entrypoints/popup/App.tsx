@@ -228,6 +228,14 @@ export function App() {
           Loroco
         </span>
         {view.kind === "home" && !showApproval && (
+          <HeaderWalletChip
+            wallet={view.wallet}
+            wallets={view.wallets}
+            onSwitchWallet={switchWallet}
+            onAddWallet={startAddWallet}
+          />
+        )}
+        {view.kind === "home" && !showApproval && (
           <div className="header-actions">
             <button
               className="icon-btn"
@@ -978,6 +986,101 @@ async function persistAndActivate(
   });
 }
 
+function HeaderWalletChip({
+  wallet,
+  wallets,
+  onSwitchWallet,
+  onAddWallet,
+}: {
+  wallet: StoredWallet;
+  wallets: StoredWallet[];
+  onSwitchWallet: (fp: number) => void | Promise<void>;
+  onAddWallet: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (!t.closest(".wallet-chip")) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const pick = (fp: number) => {
+    setOpen(false);
+    if (fp !== wallet.fingerprint) void onSwitchWallet(fp);
+  };
+
+  return (
+    <div className={"wallet-chip" + (open ? " open" : "")}>
+      <button
+        type="button"
+        className="wallet-chip-btn"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        title={
+          wallet.label === `Wallet ${wallet.fingerprint}`
+            ? `Wallet ${wallet.fingerprint}`
+            : `${wallet.label} · ${wallet.fingerprint}`
+        }
+      >
+        <span className="wallet-chip-fp">{wallet.fingerprint}</span>
+        <span className="wallet-chip-chev" aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div className="wallet-chip-popover" role="menu">
+          <ul className="wallet-chip-list">
+            {wallets.map((w) => {
+              const isActive = w.fingerprint === wallet.fingerprint;
+              return (
+                <li key={w.fingerprint}>
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={isActive}
+                    className={"wallet-chip-item" + (isActive ? " active" : "")}
+                    onClick={() => pick(w.fingerprint)}
+                  >
+                    <span className="wallet-chip-item-dot" aria-hidden>
+                      {isActive ? "●" : "○"}
+                    </span>
+                    <span className="wallet-chip-item-label">
+                      {w.label === `Wallet ${w.fingerprint}` ? `Wallet` : w.label}
+                    </span>
+                    <span className="wallet-chip-item-fp">{w.fingerprint}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <button
+            type="button"
+            className="wallet-chip-add"
+            onClick={() => {
+              setOpen(false);
+              onAddWallet();
+            }}
+          >
+            + Add another wallet
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LockScreen({
   wallet,
   wallets,
@@ -1271,26 +1374,6 @@ function HomeScreen({
                 </span>
               )}
             </h1>
-            <div className="wallet-bar-subline">
-              {wallets.length > 1 ? (
-                <select
-                  className="wallet-switcher"
-                  value={wallet.fingerprint}
-                  onChange={(e) => void onSwitchWallet(Number(e.target.value))}
-                  title="Switch wallet"
-                >
-                  {wallets.map((w) => (
-                    <option key={w.fingerprint} value={w.fingerprint}>
-                      {w.label === `Wallet ${w.fingerprint}`
-                        ? ` ${w.fingerprint}`
-                        : `${w.label} ·  ${w.fingerprint}`}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <span className="muted small">{walletDisplayLine(wallet)}</span>
-              )}
-            </div>
           </div>
           <SyncBadge sync={sync} telemetry={coinTelemetry} />
         </div>
@@ -1886,16 +1969,6 @@ function formatUsd(n: number): string {
   if (n >= 1) return n.toFixed(2);
   if (n >= 0.01) return n.toFixed(4);
   return n.toFixed(6);
-}
-
-/** Header line that shows a meaningful label without duplicating the fp. */
-function walletDisplayLine(w: StoredWallet): string {
-  const fpStr = w.fingerprint.toString();
-  const defaultLabel = `Wallet ${fpStr}`;
-  if (!w.label || w.label === defaultLabel) {
-    return ` ${fpStr}`;
-  }
-  return `${w.label} ·  ${fpStr}`;
 }
 
 function HomeTab({
@@ -2652,19 +2725,44 @@ function NftDetail({
     setSendError(null);
     setSent(null);
     try {
-      // Find OUR derivation index for the NFT's p2_puzzle_hash.
+      // First, check if the NFT lives at a HARDENED derivation. The
+      // engine's transfer_nft only signs with unhardened-derived keys
+      // today, so we have to bail out clearly instead of silently
+      // failing further down.
+      const nftPh = nft.p2_puzzle_hash.toLowerCase();
+      const hardenedMap = snapshot?.hardened_phs ?? {};
+      // Try both 0x-prefixed and stripped to be tolerant of either key shape.
+      const hardenedIdx =
+        hardenedMap[nftPh] ??
+        hardenedMap[nftPh.startsWith("0x") ? nftPh.slice(2) : `0x${nftPh}`];
+      if (hardenedIdx !== undefined) {
+        setSendError(
+          `This NFT was received at a hardened derivation (index ${hardenedIdx}). ` +
+            `The wallet engine's transfer_nft only signs with unhardened-derived ` +
+            `keys today, so this transfer can't be completed from Loroco yet.`,
+        );
+        return;
+      }
+
+      // Then search unhardened derivations. 200 covers most legitimate
+      // wallets — the earlier 50-cap was too tight for users who'd
+      // generated a lot of receive addresses.
       const derived = await callEngine<{
         addresses: { index: number; puzzle_hash: string }[];
       }>("derive_addresses", {
         fingerprint: wallet.fingerprint,
         start: 0,
-        count: 50,
+        count: 200,
         testnet: false,
       });
-      const own = derived.addresses.find((a) => a.puzzle_hash === nft.p2_puzzle_hash);
+      const own = derived.addresses.find(
+        (a) => a.puzzle_hash.toLowerCase() === nftPh,
+      );
       if (!own) {
         setSendError(
-          "Couldn't find this NFT's p2 puzzle hash in your first 50 derivations.",
+          `Couldn't find this NFT's p2 puzzle hash (${nft.p2_puzzle_hash}) ` +
+            `in either your first 200 unhardened derivations or your cached ` +
+            `hardened paths. Try syncing again, or report this NFT for debugging.`,
         );
         return;
       }

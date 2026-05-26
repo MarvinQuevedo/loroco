@@ -132,6 +132,14 @@ export interface CoinSnapshot {
   cat_metadata?: Record<string, DexieCatMetadata>;
   nfts?: Record<string, NftView>;
   nfts_synced_at?: number | null;
+  /**
+   * Puzzle-hash → derivation-index map for hardened paths the wallet
+   * cached during unlock. `hardened_phs[ph.toLowerCase()]` is the
+   * derivation index. Used by NftDetail.transfer to detect when an NFT
+   * sits at a hardened path (which the engine's transfer_nft can't
+   * sign yet).
+   */
+  hardened_phs?: Record<string, number>;
 }
 
 export async function getCoinSnapshot(fingerprint: number): Promise<CoinSnapshot> {
