@@ -109,6 +109,36 @@ export function App() {
       }
     };
   }, []);
+
+  // Adaptive toolbar icon — Chrome doesn't auto-swap manifest icons by
+  // OS theme. The popup is the only place we can call matchMedia, so we
+  // detect the theme here (every time the popup opens) and tell the SW
+  // which icon set to use. White silhouette for dark Chrome, black for
+  // light Chrome. The CSS in styles.css handles the same swap for
+  // in-popup logos via `filter: invert(1)`.
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = (dark: boolean) => {
+      const dir = dark ? "icon" : "icon-light";
+      try {
+        chrome.action.setIcon({
+          path: {
+            16: `${dir}/16.png`,
+            32: `${dir}/32.png`,
+            48: `${dir}/48.png`,
+            128: `${dir}/128.png`,
+          },
+        });
+      } catch {
+        // ignore — older Chromes or denied paths
+      }
+    };
+    apply(mq.matches);
+    const handler = (e: MediaQueryListEvent) => apply(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
   // dApp approval queue. When non-empty, the inline ApprovalScreen takes over
   // the popup body until the user approves/rejects. Polled on mount + every
   // 1s while the popup is open so a fresh request arriving from another tab
