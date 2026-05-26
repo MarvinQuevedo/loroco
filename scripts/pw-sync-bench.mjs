@@ -93,9 +93,30 @@ try {
   const popup = await ctx.newPage();
   await popup.setViewportSize({ width: 380, height: 680 });
   popup.on("pageerror", (e) => log("popup pageerror:", e.message));
+  popup.on("console", (m) => {
+    const t = m.text();
+    if (/popup-heartbeat|error/i.test(t)) {
+      log(`popup-console[${m.type()}]:`, t.slice(0, 160));
+    }
+  });
   await popup.goto(`chrome-extension://${extId}/popup.html`);
   await popup.waitForLoadState("domcontentloaded");
   await wait(800);
+
+  // If SIDECAR env var is set, turn on the local peer-sync daemon route in
+  // the extension's settings. The extension persists this in
+  // chrome.storage.local under "settings.sidecar"; coin-sync.ts checks it
+  // each tick and falls back to coinset on any sidecar failure.
+  if (process.env.SIDECAR === "1") {
+    await popup.evaluate(async () => {
+      await chrome.runtime.sendMessage({
+        from: "popup",
+        kind: "set-sidecar-settings",
+        patch: { enabled: true, url: "http://127.0.0.1:8765" },
+      });
+    });
+    log("sidecar route ENABLED for this bench");
+  }
 
   if (/Import|Create/i.test(await popup.locator("body").innerText())) {
     log("importing mnemonic");
@@ -103,7 +124,7 @@ try {
     if (await importBtn.isVisible().catch(() => false)) await importBtn.click();
     await wait(400);
     await popup.locator("textarea").first().fill(MNEMONIC);
-    await popup.locator("input[type='password']").first().fill("bench-pw");
+    await popup.locator("input[type='password']").first().fill("marvin");
     await popup.locator("button", { hasText: /^Continue$/ }).first().click();
     await wait(3500);
   } else {
@@ -147,22 +168,17 @@ try {
   let prevDetail = { xch: "", cats: "", nfts: "" };
   const benchStart = Date.now();
 
-  // 600 × 500ms = 5 minutes max. Refresh-now button gets re-pressed if no
-  // tick has fired in 60s (SW alarms can drift on Chrome that's been idle).
+  // Up to 20 minutes wallclock (2400 × 500ms). The SW dies at ~60s in MV3,
+  // re-spawns on alarm, picks up cursors and continues. We poll silently
+  // through any blips (the popup may briefly become unresponsive when the
+  // SW recycles).
   let lastForcedAt = Date.now();
-  let consecutiveBlips = 0;
-  for (let i = 0; i < 600; i += 1) {
+  for (let i = 0; i < 2400; i += 1) {
     const t = await fetchTelemetry();
     if (!t) {
-      consecutiveBlips += 1;
-      if (consecutiveBlips > 10) {
-        log("popup unresponsive for 10 consecutive polls — bailing");
-        break;
-      }
       await wait(500);
       continue;
     }
-    consecutiveBlips = 0;
 
     const s = t.stage;
     if (s !== prevStage) {

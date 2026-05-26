@@ -95,10 +95,11 @@ export function App() {
       if (!port) connect();
       try {
         port?.postMessage({ ping: Date.now() });
+        console.log("[popup-heartbeat]", new Date().toISOString());
       } catch {
         port = null;
       }
-    }, 20_000);
+    }, 5_000);
     return () => {
       if (intervalId) clearInterval(intervalId);
       try {
@@ -568,6 +569,81 @@ function ApprovalSummary({ request }: { request: PendingApproval }) {
       );
     }
 
+    case "walletWatchAsset": {
+      const opts = (params?.options as { assetId?: string; symbol?: string; logo?: string } | undefined) ?? {};
+      return (
+        <div className="result">
+          <p className="muted small">
+            This site wants the wallet to track a new asset so you can see its
+            balance + send it from the Send tab.
+          </p>
+          <div>
+            <span className="muted">symbol</span>
+            <code>{String(opts.symbol ?? "(unknown)")}</code>
+          </div>
+          <div>
+            <span className="muted">asset id</span>
+            <code>{String(opts.assetId ?? "")}</code>
+          </div>
+          {opts.logo && (
+            <div>
+              <span className="muted">logo</span>
+              <code>{String(opts.logo)}</code>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    case "walletSwitchChain": {
+      const chainId = params?.chainId as string | undefined;
+      return (
+        <div className="result">
+          <p className="muted small">
+            This site wants to switch the wallet's active network.
+          </p>
+          <div>
+            <span className="muted">requested chain</span>
+            <code>{String(chainId ?? "")}</code>
+          </div>
+          <p className="muted small">
+            Loroco only supports <strong>mainnet</strong> today — any other
+            value will be rejected even if you approve.
+          </p>
+        </div>
+      );
+    }
+
+    case "sendTransaction": {
+      const sb = params?.spendBundle as { coin_spends?: unknown[] } | undefined;
+      const spendCount = Array.isArray(sb?.coin_spends) ? sb!.coin_spends.length : 0;
+      return (
+        <div className="result">
+          <p className="muted small">
+            This site asks the wallet to broadcast a pre-built spend bundle to
+            the network. You will sign nothing — but you will publish it.
+          </p>
+          <div>
+            <span className="muted">coin spends</span>
+            <code>{spendCount}</code>
+          </div>
+        </div>
+      );
+    }
+
+    case "signCoinSpends": {
+      const cs = (params?.coinSpends as unknown[] | undefined) ?? [];
+      return (
+        <div className="result">
+          <p className="muted small">
+            This site asks the wallet to sign {cs.length} coin spend
+            {cs.length === 1 ? "" : "s"}. Signing means the spends become
+            broadcastable — only approve if you trust the site.
+          </p>
+        </div>
+      );
+    }
+
     case "createOffer": {
       const offerAssets = (params?.offerAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
       const requestAssets = (params?.requestAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
@@ -866,6 +942,38 @@ function LockScreen({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingForget, setConfirmingForget] = useState(false);
+
+  const forget = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await removeWallet(wallet.fingerprint);
+      // Pick another wallet if there's one left; otherwise the parent will
+      // route back to onboarding next render.
+      const remaining = wallets.filter((w) => w.fingerprint !== wallet.fingerprint);
+      if (remaining.length > 0) {
+        await onSwitchWallet(remaining[0]!.fingerprint);
+      } else {
+        // No more wallets — clear active state so the popup re-renders into
+        // the onboarding screen on the next read.
+        await chrome.storage.session.remove("activeFingerprint");
+        await chrome.runtime.sendMessage({
+          from: "popup",
+          kind: "set-active-wallet",
+          walletId: null,
+        });
+        // Hard reload so the parent re-fetches the wallet list (which is
+        // now empty) and routes to onboarding.
+        window.location.reload();
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+      setConfirmingForget(false);
+    }
+  };
 
   const unlock = async () => {
     setBusy(true);
@@ -938,6 +1046,46 @@ function LockScreen({
       <button onClick={unlock} disabled={busy || !password}>
         {busy ? "Unlocking…" : "Unlock"}
       </button>
+
+      <div className="lock-forget">
+        {!confirmingForget && (
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => setConfirmingForget(true)}
+            disabled={busy}
+          >
+            Forgot password? Remove this wallet
+          </button>
+        )}
+        {confirmingForget && (
+          <>
+            <p className="muted small">
+              This deletes the encrypted seed for{" "}
+              <strong>{wallet.label === `Wallet ${wallet.fingerprint}` ? `fp ${wallet.fingerprint}` : wallet.label}</strong>{" "}
+              from this browser. Make sure you have your recovery phrase before continuing.
+            </p>
+            <div className="row">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setConfirmingForget(false)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void forget()}
+                disabled={busy}
+              >
+                {busy ? "Removing…" : "Remove wallet"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </section>
   );
 }
@@ -978,6 +1126,12 @@ function HomeScreen({
   const [balanceError, setBalanceError] = useState<string | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [xchPrice, setXchPrice] = useState<number | null>(null);
+  // Mojos straight from the local coin store. This is the source of truth
+  // for total XCH balance because it includes coins received on hardened
+  // addresses + coins matched by hint — both of which `get_address_balance`
+  // misses (that endpoint scans only unhardened receive PHs via coinset).
+  const [storeMojos, setStoreMojos] = useState<string | null>(null);
+  const [storeCoinCount, setStoreCoinCount] = useState<number | null>(null);
 
   const refreshSync = async () => {
     try {
@@ -992,6 +1146,17 @@ function HomeScreen({
   const refreshBalance = async () => {
     setBalanceLoading(true);
     try {
+      // Source 1: the local coin store snapshot — fast, complete, includes
+      // hint-matched coins. This drives the header balance display.
+      try {
+        const snap = await getCoinSnapshot(wallet.fingerprint);
+        setStoreMojos(snap.unspent_mojos);
+        setStoreCoinCount(snap.unspent_count);
+      } catch {
+        // ignore — fall back to get_address_balance below
+      }
+      // Source 2: per-address breakdown (still used by the Receive tab to
+      // show unhardened addresses with their balances).
       const res = await callEngine<BalanceInfo>("get_address_balance", {
         fingerprint: wallet.fingerprint,
         start: 0,
@@ -1031,43 +1196,84 @@ function HomeScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet.fingerprint]);
 
+  // Show the compact balance row only on tabs that aren't already showing
+  // it themselves (Settings has its own scrollable surface).
+  const showBalanceBar = tab !== "settings";
+
   return (
-    <section className="screen">
-      <div className="wallet-bar">
-        <div>
-          <h1 className="balance">
-            {balance ? `${balance.total_unspent_xch} XCH` : balanceLoading ? "…" : "0.0000 XCH"}
-          </h1>
-          <div className="wallet-bar-subline">
-            {xchPrice && balance && (
-              <span className="usd-total">
-                ≈ ${formatUsd(parseFloat(balance.total_unspent_xch || "0") * xchPrice)}
-              </span>
-            )}
-            {wallets.length > 1 ? (
-              <select
-                className="wallet-switcher"
-                value={wallet.fingerprint}
-                onChange={(e) => void onSwitchWallet(Number(e.target.value))}
-                title="Switch wallet"
-              >
-                {wallets.map((w) => (
-                  <option key={w.fingerprint} value={w.fingerprint}>
-                    {w.label === `Wallet ${w.fingerprint}`
-                      ? `fp ${w.fingerprint}`
-                      : `${w.label} · fp ${w.fingerprint}`}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <span className="muted">{walletDisplayLine(wallet)}</span>
-            )}
+    <section className="screen has-bottom-nav">
+      {showBalanceBar && (
+        <div className="wallet-bar">
+          <div className="wallet-bar-main">
+            <h1 className="balance">
+              {storeMojos != null
+                ? `${mojosToXch(storeMojos)} XCH`
+                : balance
+                  ? `${balance.total_unspent_xch} XCH`
+                  : balanceLoading
+                    ? "…"
+                    : "0.0000 XCH"}
+              {xchPrice && storeMojos != null && (
+                <span className="balance-usd">
+                  ≈ ${formatUsd(
+                    (Number(BigInt(storeMojos)) / 1_000_000_000_000) * xchPrice,
+                  )}
+                </span>
+              )}
+            </h1>
+            <div className="wallet-bar-subline">
+              {wallets.length > 1 ? (
+                <select
+                  className="wallet-switcher"
+                  value={wallet.fingerprint}
+                  onChange={(e) => void onSwitchWallet(Number(e.target.value))}
+                  title="Switch wallet"
+                >
+                  {wallets.map((w) => (
+                    <option key={w.fingerprint} value={w.fingerprint}>
+                      {w.label === `Wallet ${w.fingerprint}`
+                        ? `fp ${w.fingerprint}`
+                        : `${w.label} · fp ${w.fingerprint}`}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="muted small">{walletDisplayLine(wallet)}</span>
+              )}
+            </div>
           </div>
+          <SyncBadge sync={sync} telemetry={coinTelemetry} />
         </div>
-        <SyncBadge sync={sync} telemetry={coinTelemetry} />
+      )}
+
+      <div className="tab-content-wrap">
+        {tab === "home" && (
+          <HomeTab
+            balance={balance}
+            balanceError={balanceError}
+            onRefresh={() => void refreshBalance()}
+            wallet={wallet}
+            xchPrice={xchPrice}
+          />
+        )}
+        {tab === "send" && <SendTab wallet={wallet} balance={balance} />}
+        {tab === "receive" && <ReceiveTab wallet={wallet} />}
+        {tab === "nfts" && <NftsTab wallet={wallet} />}
+        {tab === "activity" && <ActivityTab wallet={wallet} xchPrice={xchPrice} />}
+        {tab === "dev" && <DevTab wallet={wallet} />}
+        {tab === "settings" && (
+          <SettingsTab
+            wallet={wallet}
+            wallets={wallets}
+            sync={sync}
+            onLock={onLock}
+            onSwitchWallet={onSwitchWallet}
+            onAddWallet={onAddWallet}
+          />
+        )}
       </div>
 
-      <nav className="tabs">
+      <nav className="tabs tabs-bottom">
         <button
           className={tab === "home" ? "tab active" : "tab"}
           onClick={() => setTab("home")}
@@ -1114,31 +1320,6 @@ function HomeScreen({
           <span className="tab-label">Activity</span>
         </button>
       </nav>
-
-      {tab === "home" && (
-        <HomeTab
-          balance={balance}
-          balanceError={balanceError}
-          onRefresh={() => void refreshBalance()}
-          wallet={wallet}
-          xchPrice={xchPrice}
-        />
-      )}
-      {tab === "send" && <SendTab wallet={wallet} balance={balance} />}
-      {tab === "receive" && <ReceiveTab wallet={wallet} />}
-      {tab === "nfts" && <NftsTab wallet={wallet} />}
-      {tab === "activity" && <ActivityTab wallet={wallet} xchPrice={xchPrice} />}
-      {tab === "dev" && <DevTab wallet={wallet} />}
-      {tab === "settings" && (
-        <SettingsTab
-          wallet={wallet}
-          wallets={wallets}
-          sync={sync}
-          onLock={onLock}
-          onSwitchWallet={onSwitchWallet}
-          onAddWallet={onAddWallet}
-        />
-      )}
     </section>
   );
 }
@@ -1706,7 +1887,12 @@ function HomeTab({
     ? Object.values(snapshot.nfts).filter((n) => !n.spent).length
     : 0;
   const metadata = snapshot?.cat_metadata ?? {};
-  const xchAmount = balance ? parseFloat(balance.total_unspent_xch || "0") : 0;
+  // Pull XCH balance from the local coin store snapshot — it includes
+  // hint-matched + hardened-derived coins that get_address_balance misses.
+  const xchMojosStr = snapshot?.unspent_mojos ?? "0";
+  const xchDisplay = mojosToXch(xchMojosStr);
+  const xchUnspentCount = snapshot?.unspent_count ?? balance?.unspent_coin_count ?? 0;
+  const xchAmount = Number(BigInt(xchMojosStr)) / 1_000_000_000_000;
   const xchUsdValue = xchPrice ? xchAmount * xchPrice : null;
 
   return (
@@ -1718,12 +1904,12 @@ function HomeTab({
           <div className="asset-meta">
             <div className="asset-name">Chia</div>
             <div className="muted small">
-              {balance?.unspent_coin_count ?? 0} coins
+              {xchUnspentCount} coin{xchUnspentCount === 1 ? "" : "s"}
               {xchPrice ? ` · $${xchPrice.toFixed(4)}/XCH` : ""}
             </div>
           </div>
           <div className="asset-balance">
-            <div>{balance?.total_unspent_xch ?? "—"}</div>
+            <div>{xchDisplay}</div>
             <div className="muted small">
               {xchUsdValue != null ? `≈ $${formatUsd(xchUsdValue)}` : "XCH"}
             </div>

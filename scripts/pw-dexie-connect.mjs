@@ -53,7 +53,7 @@ try {
     if (await importBtn.isVisible().catch(() => false)) await importBtn.click();
     await wait(400);
     await popup.locator("textarea").first().fill(MNEMONIC);
-    await popup.locator("input[type='password']").first().fill("ozone-test-pw");
+    await popup.locator("input[type='password']").first().fill("marvin");
     await popup.locator("button", { hasText: /^Continue$/ }).first().click();
     await wait(3500);
   }

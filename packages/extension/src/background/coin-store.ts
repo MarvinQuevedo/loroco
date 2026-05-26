@@ -109,6 +109,38 @@ export interface CoinStore {
    * so without this set we miss ~6 of 7 NFTs on a real-world wallet.
    */
   hardened_phs?: Record<string, number>;
+  /**
+   * Two-phase sync — Phase 1 (hint fetch) deposits raw candidates here so
+   * SW death doesn't lose work. Phase 2 (parse) drains the queue. If SW
+   * dies mid-parse, candidates stay enqueued for the next tick. Keyed by
+   * coin_id so we naturally deduplicate.
+   */
+  pending_nft_candidates?: Record<string, RawNftCandidate>;
+  pending_cat_candidates?: Record<string, RawCatCandidate>;
+}
+
+/** Raw NFT candidate as returned by `nft_scan_hints` — awaiting parse. */
+export interface RawNftCandidate {
+  hint: string;
+  coin: { parent_coin_info: string; puzzle_hash: string; amount: string };
+  coin_id: string;
+  confirmed_block_index: number;
+  spent: boolean;
+  spent_block_index: number;
+  derivation_index: number;
+  derivation_kind: "hardened" | "unhardened";
+}
+
+/** Raw CAT candidate as returned by `cat_scan_hints` — awaiting parse. */
+export interface RawCatCandidate {
+  hint: string;
+  coin: { parent_coin_info: string; puzzle_hash: string; amount: string };
+  coin_id: string;
+  confirmed_block_index: number;
+  spent: boolean;
+  spent_block_index: number;
+  derivation_index: number;
+  derivation_kind: "hardened" | "unhardened";
 }
 
 const empty = (): CoinStore => ({
@@ -120,6 +152,8 @@ const empty = (): CoinStore => ({
   cat_hint_heights: {},
   nft_hint_heights: {},
   hardened_phs: {},
+  pending_nft_candidates: {},
+  pending_cat_candidates: {},
 });
 
 export async function readCoinStore(fingerprint: number): Promise<CoinStore> {

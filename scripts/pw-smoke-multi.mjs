@@ -80,7 +80,7 @@ try {
   await popup.locator("button", { hasText: /Import mnemonic/i }).first().click();
   await wait(400);
   await popup.locator("textarea").first().fill(MNEMONIC_24);
-  await popup.locator("input[type='password']").first().fill("ozone-test-pw");
+  await popup.locator("input[type='password']").first().fill("marvin");
   await popup.screenshot({ path: `${SHOT_DIR}/01-import-mnemonic.png` });
   await popup.locator("button", { hasText: /^Continue$/ }).first().click();
   await wait(3000);
@@ -109,7 +109,7 @@ try {
   await wait(400);
   const randomSk = randomBlsSk();
   await popup.locator("textarea").first().fill(randomSk);
-  await popup.locator("input[type='password']").first().fill("ozone-test-pw");
+  await popup.locator("input[type='password']").first().fill("marvin");
   await popup.screenshot({ path: `${SHOT_DIR}/04-import-key.png` });
   await popup.locator("button", { hasText: /^Continue$/ }).first().click();
   await wait(3000);

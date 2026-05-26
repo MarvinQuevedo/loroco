@@ -62,7 +62,7 @@ try {
   if (/Unlock/i.test(bodyText) && !/Import existing/i.test(bodyText)) {
     log("locked wallet — unlocking");
     const pwd = popup.locator("input[type='password']").first();
-    await pwd.fill("ozone-test-pw");
+    await pwd.fill("marvin");
     const unlockBtn = popup.locator("button", { hasText: /^Unlock$/ }).first();
     await unlockBtn.click();
     await wait(3000);
@@ -86,7 +86,7 @@ try {
 
     // Set the password
     const pwdInput = popup.locator("input[type='password']").first();
-    await pwdInput.fill("ozone-test-pw");
+    await pwdInput.fill("marvin");
     await popup.screenshot({ path: `${SHOT_DIR}/02-mnemonic-typed.png` });
 
     // Continue

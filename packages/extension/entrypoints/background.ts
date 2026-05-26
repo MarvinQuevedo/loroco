@@ -18,6 +18,23 @@ import { ensurePermissions, requireConnected } from "../src/background/permissio
 export default defineBackground(() => {
   console.log("[Loroco] background starting");
 
+  // Silent SW killers: an uncaught error inside an async chain (e.g. a
+  // wasm-bindgen JsValue rejection that isn't caught) terminates the SW
+  // without any visible log. Wire up self.onerror + onunhandledrejection
+  // so we get a console.error trail BEFORE the SW dies. Critical for
+  // diagnosing sync-time bugs.
+  self.addEventListener("error", (e) => {
+    console.error("[Loroco/onerror]", e.message, e.filename, e.lineno, e.error);
+  });
+  self.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason as unknown;
+    const msg =
+      r instanceof Error ? `${r.name}: ${r.message}\n${r.stack ?? ""}`
+      : typeof r === "string" ? r
+      : JSON.stringify(r);
+    console.error("[Loroco/unhandledrejection]", msg.slice(0, 500));
+  });
+
   // Restore the active wallet from session storage (survives SW death but not
   // browser close). Setting walletId triggers IdbStorage open on the next
   // engine call.
@@ -28,16 +45,32 @@ export default defineBackground(() => {
     }
   });
 
-  // Keep-alive + periodic sync trigger
+  // Periodic sync triggers + SW keep-alive.
+  //
+  // MV3 SW idle timeout is ~30s. `chrome.alarms` clamps periodInMinutes to a
+  // 30s minimum in some Chrome builds, which is exactly the idle threshold —
+  // a race we can't win with a periodic alarm. Instead we use the canonical
+  // recursive pattern: one-shot delay alarms, re-armed from inside the
+  // handler. Each fire awaits a chrome.* API which bumps SW lifetime by
+  // ~30s, then schedules the next fire at 20s — comfortably under the cap.
   chrome.alarms.create("sync", { periodInMinutes: 0.5 });
   chrome.alarms.create("coin-sync", { periodInMinutes: 0.5 });
-  chrome.alarms.create("keepalive", { periodInMinutes: 0.25 });
+  chrome.alarms.create("keepalive", { delayInMinutes: 20 / 60 });
 
-  chrome.alarms.onAlarm.addListener((alarm) => {
+  chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === "sync") {
       void startSyncLoop();
     } else if (alarm.name === "coin-sync") {
       void tickCoinSync();
+    } else if (alarm.name === "keepalive") {
+      // Re-arm FIRST so a future panic in getPlatformInfo can't break the
+      // chain. Then await the chrome.* call — the await is what extends
+      // the SW lifetime by another ~30s.
+      chrome.alarms.create("keepalive", { delayInMinutes: 20 / 60 });
+      try {
+        await chrome.runtime.getPlatformInfo();
+      } catch {}
+      console.log("[Loroco/keepalive]", new Date().toISOString());
     }
   });
 

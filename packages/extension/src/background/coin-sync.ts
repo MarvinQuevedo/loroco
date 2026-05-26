@@ -20,6 +20,8 @@ import { callEngine } from "./engine.js";
 import {
   type CoinRecord,
   type NftView,
+  type RawCatCandidate,
+  type RawNftCandidate,
   readCoinStore,
   writeCoinStore,
 } from "./coin-store.js";
@@ -39,7 +41,15 @@ import {
 // headroom; XCH stays a single batched call, CAT/NFT chunk at SCAN_CHUNK_PHS.
 const DERIVE_COUNT = 200;
 const REORG_WINDOW = 32;
-const MAX_TICK_MS = 120_000;
+// MV3 service workers have a HARD 5-minute (300s) limit per event handler —
+// once exceeded Chrome terminates the SW even if it's actively making
+// chrome.* calls. coinset.org rate-limits us to ~1 request/second per
+// connection; a fresh-wallet sync (40 NFT chunks × 10 PHs + 40 CAT chunks ×
+// 10 PHs = 800 requests) easily blows past 5 min. The fix is to bail each
+// tick at well-under the limit and trust the alarm to fire the next tick
+// 30s later — cursors persist per-chunk so resumption is free. 90s gives
+// us comfortable headroom and 2–4 ticks finish a deep fresh-wallet sync.
+const MAX_TICK_MS = 90_000;
 const SCAN_TIMEOUT_MS = 30_000;
 // NFT parent-spend decoding is slower than CAT lineage parsing — every
 // candidate hint round-trips coinset for puzzle_reveal + solution and runs
@@ -219,6 +229,10 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
   running = true;
   const startedAt = Date.now();
   const deadline = startedAt + MAX_TICK_MS;
+  // The global "keepalive" alarm (background.ts) fires every 25s and bumps
+  // the SW lifetime via chrome.runtime.getPlatformInfo, so we don't need a
+  // local setInterval here. setInterval inside a SW is unreliable anyway:
+  // it dies with the SW and can't restart itself.
   try {
     const wallet = await loadActiveWallet();
     if (!wallet) {
@@ -368,15 +382,82 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
     }
 
     // 4. Merge.
+    //
+    // When the scan went through the sidecar (P2P subscribe_puzzles), the
+    // returned coin_states already include EVERY coin where the receive_ph
+    // matched either puzzle_hash (pure XCH) OR hint (NFT/CAT received at
+    // that address). We partition them here:
+    //   - puzzle_hash ∈ receive_phs → XCH, goes into store.coins
+    //   - puzzle_hash ∉ receive_phs → NFT/CAT candidate, deposit into the
+    //     pending queues so Phase 2 can classify them. This lets us SKIP
+    //     the whole NFT/CAT Phase 1 hint sweep (which used to be 40 chunks
+    //     × coinset.org per stage) — the P2P scan already found them.
+    //
+    // Normalize hex (sidecar strips 0x, derive_addresses may or may not).
+    const normPh = (s: string) =>
+      s.startsWith("0x") ? s.slice(2).toLowerCase() : s.toLowerCase();
+    const receivePhSet = new Set(allPhs.map(normPh));
     let newCoins = 0;
+    let sidecarCandidates = 0;
+    const pendingNftPre: Record<string, RawNftCandidate> = {
+      ...(store.pending_nft_candidates ?? {}),
+    };
+    const pendingCatPre: Record<string, RawCatCandidate> = {
+      ...(store.pending_cat_candidates ?? {}),
+    };
     for (const rec of scan.coin_records) {
-      if (!(rec.coin_id in store.coins)) newCoins += 1;
-      store.coins[rec.coin_id] = rec;
+      const isXch = receivePhSet.has(normPh(rec.puzzle_hash));
+      if (isXch) {
+        if (!(rec.coin_id in store.coins)) newCoins += 1;
+        store.coins[rec.coin_id] = rec;
+      } else if (useSidecar && !rec.spent) {
+        // Hint-matched, unspent — feed to BOTH parse queues. Each parser
+        // ignores coins that don't match its primitive, so duplicating
+        // into both queues is safe (Phase 2 dedups by coin_id).
+        const candidate: RawNftCandidate = {
+          // Sidecar matched via P2P subscribe_puzzles which doesn't tell us
+          // WHICH receive_ph hinted the coin. The WASM parser only echoes
+          // hint back — it doesn't use it for parsing — so a zero-hint
+          // sentinel passes validation without affecting NFT/CAT detection.
+          hint: `0x${"00".repeat(32)}`,
+          coin: {
+            parent_coin_info: rec.parent_coin_info,
+            puzzle_hash: rec.puzzle_hash,
+            amount: rec.amount,
+          },
+          coin_id: rec.coin_id,
+          confirmed_block_index: rec.confirmed_block_index,
+          spent: rec.spent,
+          spent_block_index: rec.spent_block_index,
+          derivation_index: 0,
+          derivation_kind: "unhardened",
+        };
+        pendingNftPre[rec.coin_id] = candidate;
+        pendingCatPre[rec.coin_id] = candidate;
+        sidecarCandidates += 1;
+      }
     }
     for (const ph of allPhs) {
       store.ph_heights[ph] = scan.peak_height;
     }
     store.last_synced_height = scan.peak_height;
+    if (useSidecar && sidecarCandidates > 0) {
+      store.pending_nft_candidates = pendingNftPre;
+      store.pending_cat_candidates = pendingCatPre;
+      // Pre-advance the NFT/CAT hint cursors to peak — the sidecar already
+      // covered the full receive_ph set, so Phase 1 has nothing to do.
+      const nftHintHeights = { ...(store.nft_hint_heights ?? {}) };
+      const catHintHeights = { ...(store.cat_hint_heights ?? {}) };
+      for (const ph of allPhs) {
+        nftHintHeights[ph] = scan.peak_height;
+        catHintHeights[ph] = scan.peak_height;
+      }
+      store.nft_hint_heights = nftHintHeights;
+      store.cat_hint_heights = catHintHeights;
+      console.log(
+        `[coin-sync] sidecar discovered ${sidecarCandidates} hint candidates — skipping Phase 1`,
+      );
+    }
 
     // Persist after step 4 so the UI sees XCH/Activity even if the CAT/NFT
     // scans below time out or the SW dies mid-flight.
@@ -451,19 +532,37 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
     // OOM-crash the WASM module on a single huge hint response — running
     // them first would hide NFTs behind that risk. Order: XCH → NFTs → CATs.
 
-    // 6a. NFT scan — chunked by inner_ph; per-chunk persistence.
+    // 6a. NFT scan — TWO-PHASE pipeline:
+    //   Phase 1 (fast): nft_scan_hints fills `pending_nft_candidates` with
+    //                   raw coin records per PH. Cursors + queue persist
+    //                   every chunk so SW death never throws away network
+    //                   work.
+    //   Phase 2 (slow): nft_parse_candidates drains the queue in batches,
+    //                   fetching parent spends + parsing NFTs. Each batch
+    //                   that succeeds is removed from the queue and the
+    //                   parsed NFTs land in store.nfts. SW death only
+    //                   forfeits an in-flight batch.
     await writeTelemetry({ stage: "nfts" });
     const nftsMap: Record<string, NftView> = { ...(store.nfts ?? {}) };
     const nftsHintHeights: Record<string, number> = { ...(store.nft_hint_heights ?? {}) };
+    const pendingNfts: Record<string, RawNftCandidate> = {
+      ...(store.pending_nft_candidates ?? {}),
+    };
     const nftTotalChunks = Math.ceil(DERIVE_COUNT / SCAN_CHUNK_PHS);
     let nftChunksDone = 0;
     const nftsHasCursors = Object.keys(nftsHintHeights).length === addresses.length;
+    // When sidecar did the hint discovery this tick (sidecarCandidates > 0
+    // AND cursors at peak), Phase 1 has nothing to add and should skip
+    // straight to Phase 2 parsing.
+    const sidecarHandledNftHints = useSidecar && sidecarCandidates > 0;
     const nftsStale =
-      opts.force ||
-      nftsHasCursors ||
-      !store.nfts_synced_at ||
-      Date.now() - store.nfts_synced_at > CAT_NFT_REFRESH_INTERVAL_MS;
-    if (!nftsStale) {
+      !sidecarHandledNftHints &&
+      (opts.force ||
+        nftsHasCursors ||
+        !store.nfts_synced_at ||
+        Date.now() - store.nfts_synced_at > CAT_NFT_REFRESH_INTERVAL_MS);
+    if (!nftsStale && Object.keys(pendingNfts).length === 0) {
+      // Nothing to refresh AND nothing queued to parse.
       await patchStageProgress("nfts", {
         done: nftTotalChunks,
         total: nftTotalChunks,
@@ -479,109 +578,146 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       detail: null,
       started_at: Date.now(),
     });
-    for (let start = 0; start < DERIVE_COUNT; start += SCAN_CHUNK_PHS) {
-      if (Date.now() > deadline) break;
-      const count = Math.min(SCAN_CHUNK_PHS, DERIVE_COUNT - start);
-      const chunkHints: Record<string, number> = {};
-      let minHintHeight: number | null = null;
-      for (let i = 0; i < count; i += 1) {
-        const ph = allPhs[start + i]!;
-        const cursor = nftsHintHeights[ph];
-        if (typeof cursor === "number") {
-          const startH = Math.max(0, cursor - REORG_WINDOW);
-          chunkHints[ph] = startH;
-          if (minHintHeight == null || startH < minHintHeight) minHintHeight = startH;
-        }
-      }
-      await patchStageProgress("nfts", {
-        detail:
-          minHintHeight != null
-            ? `addrs ${start}..${start + count - 1} · from #${minHintHeight.toLocaleString()}`
-            : `addrs ${start}..${start + count - 1} · full sweep`,
-        block_from: minHintHeight,
-      });
-      try {
-        const nftRes = await withTimeout(
-          callEngine<{
-            nfts: NftView[];
-            peak_height: number | null;
-            failed_hints?: string[];
-          }>("scan_nfts", {
-            master_public_key: masterPk,
-            start,
-            count,
-            testnet: false,
-            endpoint: "mainnet",
-            hint_start_heights: chunkHints,
-            // Distribute hardened PHs one-per-chunk so chunk 0 isn't a
-            // 50-PH monster. Each chunk gets the hardened entries at the
-            // matching derivation slice — i.e. chunk `start` gets
-            // `hardenedSorted[start..start+count]`. After we exhaust the
-            // hardened list (if it's shorter than unhardened range) the
-            // remaining chunks just scan their 1 unhardened PH.
-            extra_inner_phs: hardenedSorted.slice(start, start + count),
-          }),
-          NFT_SCAN_TIMEOUT_MS,
-          `scan_nfts[${start}..${start + count}]`,
-        );
-        const failedSet = new Set(nftRes.failed_hints ?? []);
-        if (typeof nftRes.peak_height === "number") {
-          for (let i = 0; i < count; i += 1) {
-            const ph = allPhs[start + i]!;
-            if (!failedSet.has(ph)) nftsHintHeights[ph] = nftRes.peak_height;
+
+    // ── Phase 2 (drain pending) runs BEFORE Phase 1. See CAT stage below
+    //    for the rationale: on coinset's rate-limited backend Phase 1 eats
+    //    the whole tick budget, leaving the queue stuck forever otherwise.
+    const NFT_PARSE_BATCH = 5;
+    const drainNftQueue = async () => {
+      let pendingArr = Object.values(pendingNfts);
+      while (pendingArr.length > 0 && Date.now() < deadline) {
+        const batch = pendingArr.slice(0, NFT_PARSE_BATCH);
+        await patchStageProgress("nfts", {
+          detail: `parsing ${batch.length} of ${pendingArr.length} pending`,
+        });
+        try {
+          const parseRes = await withTimeout(
+            callEngine<{
+              nfts: NftView[];
+              unparseable_coin_ids?: string[];
+            }>("nft_parse_candidates", {
+              endpoint: "mainnet",
+              candidates: batch,
+            }),
+            NFT_SCAN_TIMEOUT_MS,
+            `nft_parse_candidates(${batch.length})`,
+          );
+          for (const n of parseRes.nfts) {
+            const existing = nftsMap[n.launcher_id];
+            if (
+              !existing ||
+              n.confirmed_block_index >= existing.confirmed_block_index
+            ) {
+              nftsMap[n.launcher_id] = n;
+            }
           }
-        }
-        if (failedSet.size > 0) {
-          await patchStageProgress("nfts", {
-            last_warning: `coinset blip — ${failedSet.size} hint(s) will retry next tick`,
-          });
-        }
-        let chunkAdded = false;
-        for (const n of nftRes.nfts) {
-          const existing = nftsMap[n.launcher_id];
-          if (
-            !existing ||
-            n.confirmed_block_index >= existing.confirmed_block_index
-          ) {
-            nftsMap[n.launcher_id] = n;
-            chunkAdded = true;
+          for (const c of batch) delete pendingNfts[c.coin_id];
+          for (const id of parseRes.unparseable_coin_ids ?? []) {
+            delete pendingNfts[id];
           }
-        }
-        nftChunksDone += 1;
-        // Persist the full store only when this chunk added NFTs. Writing
-        // the entire store every chunk (40 times in ~15s on a deep wallet)
-        // saturated chrome.storage.local and triggered SW crashes mid-scan.
-        // Cursors advance even on empty chunks, but they're tiny and stored
-        // separately at the END of the loop — losing them on crash only
-        // costs one re-scan per affected PH, which is cheap.
-        if (chunkAdded) {
           store.nfts = nftsMap;
           store.nfts_synced_at = Date.now();
+          store.pending_nft_candidates = pendingNfts;
+          await writeCoinStore(wallet.fingerprint, store);
+          await patchStageProgress("nfts", {
+            found: Object.values(nftsMap).filter((n) => !n.spent).length,
+          });
+        } catch (err) {
+          console.warn("[Loroco] NFT parse batch failed:", (err as Error).message);
+          await patchStageProgress("nfts", {
+            last_warning: `parse: ${(err as Error).message}`,
+          });
+          break;
+        }
+        pendingArr = Object.values(pendingNfts);
+      }
+    };
+
+    await drainNftQueue();
+
+    // ── Phase 1: hint sweep → enqueue raw candidates ────────────────────
+    if (nftsStale) {
+      for (let start = 0; start < DERIVE_COUNT; start += SCAN_CHUNK_PHS) {
+        if (Date.now() > deadline) break;
+        const count = Math.min(SCAN_CHUNK_PHS, DERIVE_COUNT - start);
+        const chunkHints: Record<string, number> = {};
+        let minHintHeight: number | null = null;
+        for (let i = 0; i < count; i += 1) {
+          const ph = allPhs[start + i]!;
+          const cursor = nftsHintHeights[ph];
+          if (typeof cursor === "number") {
+            const startH = Math.max(0, cursor - REORG_WINDOW);
+            chunkHints[ph] = startH;
+            if (minHintHeight == null || startH < minHintHeight) minHintHeight = startH;
+          }
+        }
+        await patchStageProgress("nfts", {
+          detail:
+            minHintHeight != null
+              ? `hints ${start}..${start + count - 1} · from #${minHintHeight.toLocaleString()}`
+              : `hints ${start}..${start + count - 1} · full sweep`,
+          block_from: minHintHeight,
+        });
+        try {
+          const hintRes = await withTimeout(
+            callEngine<{
+              candidates: RawNftCandidate[];
+              peak_height: number | null;
+              failed_hints?: string[];
+            }>("nft_scan_hints", {
+              master_public_key: masterPk,
+              start,
+              count,
+              testnet: false,
+              endpoint: "mainnet",
+              hint_start_heights: chunkHints,
+              extra_inner_phs: hardenedSorted.slice(start, start + count),
+            }),
+            SCAN_TIMEOUT_MS,
+            `nft_scan_hints[${start}..${start + count}]`,
+          );
+          const failedSet = new Set(hintRes.failed_hints ?? []);
+          for (const c of hintRes.candidates) pendingNfts[c.coin_id] = c;
+          if (typeof hintRes.peak_height === "number") {
+            for (let i = 0; i < count; i += 1) {
+              const ph = allPhs[start + i]!;
+              if (!failedSet.has(ph)) nftsHintHeights[ph] = hintRes.peak_height;
+            }
+          }
+          if (failedSet.size > 0) {
+            await patchStageProgress("nfts", {
+              last_warning: `coinset blip — ${failedSet.size} hint(s) will retry next tick`,
+            });
+          }
+          nftChunksDone += 1;
+          store.pending_nft_candidates = pendingNfts;
           store.nft_hint_heights = nftsHintHeights;
           await writeCoinStore(wallet.fingerprint, store);
+        } catch (err) {
+          console.warn("[Loroco] NFT hint chunk failed:", (err as Error).message);
+          await patchStageProgress("nfts", {
+            last_warning: (err as Error).message,
+          });
         }
-      } catch (err) {
-        console.warn("[Loroco] NFT chunk failed:", (err as Error).message);
         await patchStageProgress("nfts", {
-          last_warning: (err as Error).message,
+          done: nftChunksDone,
+          total: nftTotalChunks,
+          found: Object.values(nftsMap).filter((n) => !n.spent).length,
         });
       }
+    } else {
+      nftChunksDone = nftTotalChunks;
       await patchStageProgress("nfts", {
         done: nftChunksDone,
         total: nftTotalChunks,
-        found: Object.values(nftsMap).filter((n) => !n.spent).length,
       });
     }
-    if (nftChunksDone > 0) {
-      store.nfts = nftsMap;
-      store.nfts_synced_at = Date.now();
-      store.nft_hint_heights = nftsHintHeights;
-      await writeCoinStore(wallet.fingerprint, store);
-    }
-    } // end of nftsStale branch
 
-    // 6b. Discover CATs by hint matching, chunked across inner_phs so a
-    //     single slow batch doesn't block the whole tick.
+    // Drain anything Phase 1 just added.
+    await drainNftQueue();
+    } // end of nftsStale-OR-pending branch
+
+    // 6b. CAT scan — same TWO-PHASE pipeline as NFTs.
     type CatRecord = {
       asset_id: string;
       total_unspent_mojos: string;
@@ -601,23 +737,22 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       }>;
     };
     const catsMap: Record<string, CatRecord> = { ...(store.cats ?? {}) };
+    const catsHintHeights: Record<string, number> = { ...(store.cat_hint_heights ?? {}) };
+    const pendingCats: Record<string, RawCatCandidate> = {
+      ...(store.pending_cat_candidates ?? {}),
+    };
     const catTotalChunks = Math.ceil(DERIVE_COUNT / SCAN_CHUNK_PHS);
     let catChunksDone = 0;
-    // With the incremental hint cursor in place, we no longer need the 5-min
-    // staleness gate as load-bearing — every tick can run cheaply because we
-    // ask coinset only for NEW hint matches since the per-PH cursor. The gate
-    // still helps if the cursor is empty (first-time scan), so we keep it.
-    const catsHintHeights: Record<string, number> = { ...(store.cat_hint_heights ?? {}) };
     const catsHasCursors = Object.keys(catsHintHeights).length === addresses.length;
+    // Sidecar already swept hints for us — skip Phase 1.
+    const sidecarHandledCatHints = useSidecar && sidecarCandidates > 0;
     const catsStale =
-      opts.force ||
-      catsHasCursors || // cursors → always run, it's cheap
-      !store.cats_synced_at ||
-      Date.now() - store.cats_synced_at > CAT_NFT_REFRESH_INTERVAL_MS;
-    if (!catsStale) {
-      // Skip — recent enough. Report stage progress as "done" using the
-      // chunks we'd have run, so the badge shows ✓ instead of pretending we
-      // never scanned.
+      !sidecarHandledCatHints &&
+      (opts.force ||
+        catsHasCursors ||
+        !store.cats_synced_at ||
+        Date.now() - store.cats_synced_at > CAT_NFT_REFRESH_INTERVAL_MS);
+    if (!catsStale && Object.keys(pendingCats).length === 0) {
       await patchStageProgress("cats", {
         done: catTotalChunks,
         total: catTotalChunks,
@@ -633,129 +768,170 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       detail: null,
       started_at: Date.now(),
     });
-    for (let start = 0; start < DERIVE_COUNT; start += SCAN_CHUNK_PHS) {
-      if (Date.now() > deadline) break;
-      const count = Math.min(SCAN_CHUNK_PHS, DERIVE_COUNT - start);
-      // Build hint_start_heights for the PHs in this chunk. Format: lowercase
-      // 0x-prefixed hex keys — matches what the Rust side does with
-      // `format!("0x{}", hex::encode(hint))`.
-      const chunkHints: Record<string, number> = {};
-      let minHintHeight: number | null = null;
-      for (let i = 0; i < count; i += 1) {
-        const ph = allPhs[start + i]!;
-        const cursor = catsHintHeights[ph];
-        if (typeof cursor === "number") {
-          const startH = Math.max(0, cursor - REORG_WINDOW);
-          chunkHints[ph] = startH;
-          if (minHintHeight == null || startH < minHintHeight) minHintHeight = startH;
+
+    // ── Phase 2 (drain pending) runs BEFORE Phase 1 (hint sweep). ───────
+    //
+    // Order matters: on rate-limited backends (coinset.org) Phase 1 can eat
+    // the entire tick budget and never reach Phase 2, leaving the pending
+    // queue stuck across ticks forever. By draining first we guarantee
+    // forward progress on parsing; new candidates Phase 1 finds this tick
+    // get parsed on the NEXT tick. The per-chunk persistence in Phase 1
+    // means nothing is lost.
+    const CAT_PARSE_BATCH = 5;
+    const drainCatQueue = async () => {
+      let pendingCatArr = Object.values(pendingCats);
+      while (pendingCatArr.length > 0 && Date.now() < deadline) {
+        const batch = pendingCatArr.slice(0, CAT_PARSE_BATCH);
+        await patchStageProgress("cats", {
+          detail: `parsing ${batch.length} of ${pendingCatArr.length} pending`,
+        });
+        try {
+          const parseRes = await withTimeout(
+            callEngine<{
+              cats: CatRecord[];
+              unparseable_coin_ids?: string[];
+            }>("cat_parse_candidates", {
+              endpoint: "mainnet",
+              candidates: batch,
+            }),
+            SCAN_TIMEOUT_MS,
+            `cat_parse_candidates(${batch.length})`,
+          );
+          for (const c of parseRes.cats) {
+            const existing = catsMap[c.asset_id];
+            if (existing) {
+              const seen = new Set(existing.coins.map((x) => x.coin_id));
+              for (const coin of c.coins) {
+                if (!seen.has(coin.coin_id)) existing.coins.push(coin);
+              }
+            } else {
+              catsMap[c.asset_id] = c;
+            }
+            const bucket = catsMap[c.asset_id]!;
+            if (bucket.coins.length > 200) {
+              const unspent = bucket.coins.filter((x) => !x.spent);
+              const recentSpent = bucket.coins
+                .filter((x) => x.spent)
+                .sort((a, b) => b.spent_block_index - a.spent_block_index)
+                .slice(0, 50);
+              bucket.coins = [...unspent, ...recentSpent];
+              bucket.unspent_coin_count = unspent.length;
+              let total = 0n;
+              for (const u of unspent) total += BigInt(u.amount);
+              bucket.total_unspent_mojos = total.toString();
+            }
+          }
+          for (const c of batch) delete pendingCats[c.coin_id];
+          for (const id of parseRes.unparseable_coin_ids ?? []) {
+            delete pendingCats[id];
+          }
+          store.cats = catsMap;
+          store.cats_synced_at = Date.now();
+          store.pending_cat_candidates = pendingCats;
+          await writeCoinStore(wallet.fingerprint, store);
+          await patchStageProgress("cats", {
+            found: Object.keys(catsMap).length,
+          });
+        } catch (err) {
+          console.warn("[Loroco] CAT parse batch failed:", (err as Error).message);
+          await patchStageProgress("cats", {
+            last_warning: `parse: ${(err as Error).message}`,
+          });
+          break;
         }
+        pendingCatArr = Object.values(pendingCats);
       }
-      await patchStageProgress("cats", {
-        detail:
-          minHintHeight != null
-            ? `addrs ${start}..${start + count - 1} · from #${minHintHeight.toLocaleString()}`
-            : `addrs ${start}..${start + count - 1} · full sweep`,
-        block_from: minHintHeight,
-      });
-      try {
-        const catRes = await withTimeout(
-          callEngine<{
-            cats: CatRecord[];
-            peak_height: number | null;
-            failed_hints?: string[];
-          }>("scan_cats", {
-            master_public_key: masterPk,
-            start,
-            count,
-            testnet: false,
-            endpoint: "mainnet",
-            hint_start_heights: chunkHints,
-            // Distribute hardened PHs one-per-chunk so chunk 0 isn't a
-            // 50-PH monster. Each chunk gets the hardened entries at the
-            // matching derivation slice — i.e. chunk `start` gets
-            // `hardenedSorted[start..start+count]`. After we exhaust the
-            // hardened list (if it's shorter than unhardened range) the
-            // remaining chunks just scan their 1 unhardened PH.
-            extra_inner_phs: hardenedSorted.slice(start, start + count),
-          }),
-          SCAN_TIMEOUT_MS,
-          `scan_cats[${start}..${start + count}]`,
-        );
-        // Advance the per-PH cursors for this chunk to peak_height — but
-        // ONLY for PHs whose hint queries actually succeeded. PHs in
-        // failed_hints stay at their old cursor so the next tick retries.
-        const failedSet = new Set(catRes.failed_hints ?? []);
-        if (typeof catRes.peak_height === "number") {
-          for (let i = 0; i < count; i += 1) {
-            const ph = allPhs[start + i]!;
-            if (!failedSet.has(ph)) catsHintHeights[ph] = catRes.peak_height;
+    };
+
+    await drainCatQueue();
+
+    // ── Phase 1: hint sweep → enqueue raw CAT candidates ────────────────
+    if (catsStale) {
+      for (let start = 0; start < DERIVE_COUNT; start += SCAN_CHUNK_PHS) {
+        if (Date.now() > deadline) break;
+        const count = Math.min(SCAN_CHUNK_PHS, DERIVE_COUNT - start);
+        const chunkHints: Record<string, number> = {};
+        let minHintHeight: number | null = null;
+        for (let i = 0; i < count; i += 1) {
+          const ph = allPhs[start + i]!;
+          const cursor = catsHintHeights[ph];
+          if (typeof cursor === "number") {
+            const startH = Math.max(0, cursor - REORG_WINDOW);
+            chunkHints[ph] = startH;
+            if (minHintHeight == null || startH < minHintHeight) minHintHeight = startH;
           }
         }
-        if (failedSet.size > 0) {
+        await patchStageProgress("cats", {
+          detail:
+            minHintHeight != null
+              ? `hints ${start}..${start + count - 1} · from #${minHintHeight.toLocaleString()}`
+              : `hints ${start}..${start + count - 1} · full sweep`,
+          block_from: minHintHeight,
+        });
+        try {
+          const hintRes = await withTimeout(
+            callEngine<{
+              candidates: RawCatCandidate[];
+              peak_height: number | null;
+              failed_hints?: string[];
+            }>("cat_scan_hints", {
+              master_public_key: masterPk,
+              start,
+              count,
+              testnet: false,
+              endpoint: "mainnet",
+              hint_start_heights: chunkHints,
+              extra_inner_phs: hardenedSorted.slice(start, start + count),
+            }),
+            SCAN_TIMEOUT_MS,
+            `cat_scan_hints[${start}..${start + count}]`,
+          );
+          const failedSet = new Set(hintRes.failed_hints ?? []);
+          for (const c of hintRes.candidates) pendingCats[c.coin_id] = c;
+          if (typeof hintRes.peak_height === "number") {
+            for (let i = 0; i < count; i += 1) {
+              const ph = allPhs[start + i]!;
+              if (!failedSet.has(ph)) catsHintHeights[ph] = hintRes.peak_height;
+            }
+          }
+          if (failedSet.size > 0) {
+            await patchStageProgress("cats", {
+              last_warning: `coinset blip — ${failedSet.size} hint(s) will retry next tick`,
+            });
+          }
+          catChunksDone += 1;
+          store.pending_cat_candidates = pendingCats;
+          store.cat_hint_heights = catsHintHeights;
+          await writeCoinStore(wallet.fingerprint, store);
+        } catch (err) {
+          console.warn("[Loroco] CAT hint chunk failed:", (err as Error).message);
           await patchStageProgress("cats", {
-            last_warning: `coinset blip — ${failedSet.size} hint(s) will retry next tick`,
+            last_warning: (err as Error).message,
           });
         }
-        for (const c of catRes.cats) {
-          const existing = catsMap[c.asset_id];
-          if (existing) {
-            // Merge coin sets from this chunk into the asset bucket.
-            const seen = new Set(existing.coins.map((x) => x.coin_id));
-            for (const coin of c.coins) {
-              if (!seen.has(coin.coin_id)) existing.coins.push(coin);
-            }
-          } else {
-            catsMap[c.asset_id] = c;
-          }
-          // Cap per-asset coin retention so wallets with deep CAT history
-          // don't grow chrome.storage.local unbounded (a 47-asset wallet
-          // with thousands of historical coins blew past the popup's
-          // message-passing budget and crashed the renderer). Keep every
-          // unspent + the 50 most recent spent per asset.
-          const bucket = catsMap[c.asset_id]!;
-          if (bucket.coins.length > 200) {
-            const unspent = bucket.coins.filter((x) => !x.spent);
-            const recentSpent = bucket.coins
-              .filter((x) => x.spent)
-              .sort((a, b) => b.spent_block_index - a.spent_block_index)
-              .slice(0, 50);
-            bucket.coins = [...unspent, ...recentSpent];
-            bucket.unspent_coin_count = unspent.length;
-            // Recompute the unspent total in case we dropped any.
-            let total = 0n;
-            for (const u of unspent) total += BigInt(u.amount);
-            bucket.total_unspent_mojos = total.toString();
-          }
-        }
-        catChunksDone += 1;
-        // Persist after EVERY successful chunk so a mid-loop WASM crash
-        // (deep-history wallets OOM the module while decoding a giant
-        // coinset response) doesn't lose chunks 0..N-1. Without this, the
-        // next tick restarts from genesis on every PH.
-        store.cats = catsMap;
-        store.cats_synced_at = Date.now();
-        store.cat_hint_heights = catsHintHeights;
-        await writeCoinStore(wallet.fingerprint, store);
-      } catch (err) {
-        console.warn("[Loroco] CAT chunk failed:", (err as Error).message);
         await patchStageProgress("cats", {
-          last_warning: (err as Error).message,
+          done: catChunksDone,
+          total: catTotalChunks,
+          found: Object.keys(catsMap).length,
         });
-        // Continue to the next chunk — partial progress is still useful.
       }
+    } else {
+      catChunksDone = catTotalChunks;
       await patchStageProgress("cats", {
         done: catChunksDone,
         total: catTotalChunks,
-        found: Object.keys(catsMap).length,
       });
     }
+
+    // Drain anything Phase 1 just added (best-effort — bails on deadline).
+    await drainCatQueue();
     if (catChunksDone > 0) {
       const assetIds = Object.keys(catsMap);
       if (assetIds.length > 0) {
         void resolveCatMetadata(assetIds).catch(() => {});
       }
     }
-    } // end of catsStale branch
+    } // end of catsStale-OR-pending branch
 
     // Count "full sync" relative to whether each scan ran. If the throttle
     // skipped a section, the existing freshness is still valid, so treat
@@ -785,6 +961,7 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       last_error: (err as Error).message,
     });
   } finally {
+    void chrome.action.setBadgeText({ text: "" }).catch(() => {});
     running = false;
   }
 }

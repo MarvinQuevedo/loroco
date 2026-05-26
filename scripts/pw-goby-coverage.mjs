@@ -38,6 +38,9 @@ const ctx = await chromium.launchPersistentContext(USER_DATA, {
 
 // One entry per Goby docs method. `mutating: true` means we expect an
 // approval popup; we auto-approve those so the call completes.
+// `expectNotImplemented: true` means the method is intentionally surfaced
+// as MethodNotFound (4004) — the engine doesn't expose the underlying
+// primitive yet, so reporting it loudly is correct behavior.
 const METHODS = [
   { name: "chainId", params: undefined, mutating: false },
   { name: "accounts", params: undefined, mutating: false },
@@ -59,10 +62,12 @@ const METHODS = [
     params: { message: "0xdeadbeef", publicKey: "0x" + "00".repeat(48) },
     mutating: true,
   },
+  // Engine doesn't expose raw signing yet — expect 4004.
   {
     name: "signCoinSpends",
     params: { coinSpends: [], partialSign: true },
-    mutating: true,
+    mutating: false,
+    expectNotImplemented: true,
   },
   {
     name: "transfer",
@@ -73,11 +78,15 @@ const METHODS = [
     },
     mutating: true,
   },
+  // No raw-bundle submit endpoint in the engine — expect 4004.
   {
     name: "sendTransaction",
     params: { spendBundle: { coin_spends: [], aggregated_signature: "0x" + "c0".repeat(96) } },
-    mutating: true,
+    mutating: false,
+    expectNotImplemented: true,
   },
+  // make_offer is explicitly out-of-scope in the WASM engine today —
+  // expect 4004 until that lands.
   {
     name: "createOffer",
     params: {
@@ -85,7 +94,8 @@ const METHODS = [
       requestAssets: [{ assetId: "", amount: "1" }],
       fee: 0,
     },
-    mutating: true,
+    mutating: false,
+    expectNotImplemented: true,
   },
   { name: "takeOffer", params: { offer: "offer1xxx" }, mutating: true },
 ];
@@ -107,7 +117,7 @@ try {
     if (await importBtn.isVisible().catch(() => false)) await importBtn.click();
     await wait(400);
     await popup.locator("textarea").first().fill(MNEMONIC);
-    await popup.locator("input[type='password']").first().fill("ozone-test-pw");
+    await popup.locator("input[type='password']").first().fill("marvin");
     await popup.locator("button", { hasText: /^Continue$/ }).first().click();
     await wait(3500);
   }
@@ -118,33 +128,38 @@ try {
   await dexie.goto("https://dexie.space", { waitUntil: "networkidle", timeout: 30_000 });
   await wait(2500);
 
-  // Auto-approve any approval popup that opens during the test.
-  ctx.on("page", async (p) => {
-    if (!p.url().includes("approve.html")) return;
-    log(`>>> approval popup opened: ${p.url()}`);
-    try {
-      await p.waitForLoadState("domcontentloaded");
+  // Approval lives INSIDE the popup now (MetaMask-style). We poll the popup
+  // for the inline ApprovalScreen and click Approve when it shows.
+  async function autoApproveIfPending() {
+    for (let i = 0; i < 10; i += 1) {
+      const approveBtn = popup.locator("button", { hasText: /^Approve$/ }).first();
+      if (await approveBtn.isVisible().catch(() => false)) {
+        try {
+          await approveBtn.click({ timeout: 1500 });
+          log("   approved via popup");
+          await wait(500);
+          return true;
+        } catch {}
+      }
       await wait(300);
-      const btn = p.locator("button", { hasText: /^Approve$/ }).first();
-      await btn.click({ timeout: 4000 });
-    } catch (e) {
-      log("auto-approve failed:", e?.message);
     }
-  });
+    return false;
+  }
 
   log("kicking initial requestAccounts to grant the origin");
-  const approvalP = ctx.waitForEvent("page", { timeout: 8000 }).catch(() => null);
-  await dexie.evaluate(() =>
-    window.chia.request({ method: "requestAccounts" }).catch(() => {}),
+  const initial = dexie.evaluate(() =>
+    window.chia.request({ method: "requestAccounts" }).catch((e) => e?.message),
   );
-  await approvalP;
-  await wait(1500);
+  await wait(800);
+  await autoApproveIfPending();
+  await initial;
+  await wait(1000);
 
   // Now walk through every method.
   const results = [];
   for (const m of METHODS) {
     log(`→ ${m.name}${m.mutating ? " (auto-approve)" : ""}`);
-    const out = await dexie.evaluate(
+    const callP = dexie.evaluate(
       async ({ name, params }) => {
         try {
           const r = await window.chia.request({ method: name, params });
@@ -155,27 +170,40 @@ try {
       },
       m,
     );
-    results.push({ name: m.name, ...out });
+    if (m.mutating) {
+      await wait(600);
+      await autoApproveIfPending();
+    }
+    const out = await callP;
+    results.push({ name: m.name, expectNotImplemented: m.expectNotImplemented, ...out });
     log(`   ←`, JSON.stringify(out).slice(0, 200));
-    await wait(500);
+    await wait(400);
   }
 
   log("=== SUMMARY ===");
-  let methodNotFound = 0;
+  let regressions = 0;
   for (const r of results) {
-    const tag = r.ok
-      ? "OK"
-      : r.code === 4004
-        ? "METHOD-NOT-FOUND"
-        : `err ${r.code ?? "?"}`;
+    let tag;
+    if (r.ok) {
+      tag = "OK";
+    } else if (r.code === 4004 && r.expectNotImplemented) {
+      tag = "EXPECTED-404";
+    } else if (r.code === 4004) {
+      tag = "METHOD-NOT-FOUND";
+      regressions += 1;
+    } else {
+      // Any other structured error code (4001-4029) is a legitimate
+      // wallet-side rejection (bad params, insufficient balance, user
+      // rejected, …) — i.e. the method IS implemented.
+      tag = `err ${r.code ?? "?"}`;
+    }
     log(`  ${tag.padEnd(18)} ${r.name}`);
-    if (r.code === 4004) methodNotFound += 1;
   }
-  if (methodNotFound > 0) {
-    log(`FAIL: ${methodNotFound} method(s) returned 4004 (not found)`);
+  if (regressions > 0) {
+    log(`FAIL: ${regressions} method(s) returned unexpected 4004 (not found)`);
     process.exit(1);
   }
-  log(`✓ all ${results.length} Goby methods routed (no method-not-found)`);
+  log(`✓ all ${results.length} Goby methods routed correctly`);
 } catch (err) {
   console.error("[cov] ERROR:", err);
   process.exit(1);

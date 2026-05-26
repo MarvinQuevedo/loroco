@@ -67,12 +67,12 @@ try {
       await wait(400);
     }
     await popup.locator("textarea").first().fill(MNEMONIC);
-    await popup.locator("input[type='password']").first().fill("ozone-test-pw");
+    await popup.locator("input[type='password']").first().fill("marvin");
     await popup.locator("button", { hasText: /^Continue$/ }).first().click();
     await wait(4000);
   } else if (/Unlock/i.test(bodyText)) {
     log("unlocking");
-    await popup.locator("input[type='password']").first().fill("ozone-test-pw");
+    await popup.locator("input[type='password']").first().fill("marvin");
     await popup.locator("button", { hasText: /^Unlock$/ }).first().click();
     await wait(2500);
   }
