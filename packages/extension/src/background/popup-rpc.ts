@@ -29,7 +29,13 @@ export type PopupRpcMessage =
   | { from: "popup"; kind: "list-connections" }
   | { from: "popup"; kind: "revoke-connection"; origin: string }
   | { from: "popup"; kind: "list-pending-approvals" }
-  | { from: "popup"; kind: "decide-approval"; id: string; approved: boolean }
+  | {
+      from: "popup";
+      kind: "decide-approval";
+      id: string;
+      approved: boolean;
+      overrides?: Record<string, unknown>;
+    }
   | { from: "popup"; kind: "get-sidecar-settings" }
   | { from: "popup"; kind: "set-sidecar-settings"; patch: Partial<SidecarSettings> }
   | { from: "popup"; kind: "probe-sidecar"; url?: string }
@@ -177,7 +183,7 @@ export async function handlePopupMessage(
         return { ok: true, value: listPending() };
       }
       case "decide-approval": {
-        const ok = decidePending(msg.id, msg.approved);
+        const ok = decidePending(msg.id, msg.approved, msg.overrides);
         return { ok: true, value: ok };
       }
       case "get-sidecar-settings": {

@@ -245,8 +245,18 @@ export async function listPendingApprovals(): Promise<PendingApproval[]> {
   return (res.value as PendingApproval[]) ?? [];
 }
 
-export async function decideApproval(id: string, approved: boolean): Promise<void> {
-  const msg: PopupRpcMessage = { from: "popup", kind: "decide-approval", id, approved };
+export async function decideApproval(
+  id: string,
+  approved: boolean,
+  overrides?: Record<string, unknown>,
+): Promise<void> {
+  const msg: PopupRpcMessage = {
+    from: "popup",
+    kind: "decide-approval",
+    id,
+    approved,
+    ...(overrides ? { overrides } : {}),
+  };
   const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
   if (!res.ok) throw new Error(res.error.message);
 }

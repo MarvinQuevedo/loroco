@@ -190,8 +190,8 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
 
   async connect(origin, params) {
     void params;
-    const approved = await requestApproval(origin, "connect", params);
-    if (!approved) throw Errors.userRejected();
+    const decision = await requestApproval(origin, "connect", params);
+    if (!decision.approved) throw Errors.userRejected();
     await grantConnection(origin);
     return true;
   },
@@ -199,8 +199,8 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
   // Goby-legacy entry-point pair.
   async requestAccounts(origin) {
     if (!(await isConnected(origin))) {
-      const approved = await requestApproval(origin, "requestAccounts", undefined);
-      if (!approved) throw Errors.userRejected();
+      const decision = await requestApproval(origin, "requestAccounts", undefined);
+      if (!decision.approved) throw Errors.userRejected();
       await grantConnection(origin);
     }
     const addrs = await deriveAddresses(ACCOUNTS_COUNT);
@@ -1054,13 +1054,24 @@ export async function handleRpc<M extends ChiaMethod>(
 ): Promise<ChiaMethodMap[M]["result"]> {
   // Approval gate for methods that mutate state, sign things, or transmit.
   // `connect` / `requestAccounts` pop their own approval inside the handler.
+  let effectiveParams = params;
   if (APPROVAL_REQUIRED.has(method)) {
-    const approved = await requestApproval(origin, method, params);
-    if (!approved) throw Errors.userRejected();
+    const decision = await requestApproval(origin, method, params);
+    if (!decision.approved) throw Errors.userRejected();
+    // Merge any per-method overrides the user supplied via the approval UI
+    // (e.g. fee picker for createOffer) on top of the dApp's original params.
+    if (decision.overrides && typeof params === "object" && params != null) {
+      effectiveParams = {
+        ...(params as Record<string, unknown>),
+        ...decision.overrides,
+      } as ChiaMethodMap[M]["params"];
+    } else if (decision.overrides) {
+      effectiveParams = decision.overrides as ChiaMethodMap[M]["params"];
+    }
   }
 
   const handler = handlers[method] as Handler<M> | undefined;
-  if (handler) return handler(origin, params);
+  if (handler) return handler(origin, effectiveParams);
 
   throw Errors.methodNotFound(method);
 }

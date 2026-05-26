@@ -1253,6 +1253,32 @@ button.sync-refresh:disabled {
   color: var(--text-strong);
 }
 
+.fee-override {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--ozone-radius-md);
+  margin: 10px 0;
+}
+
+.fee-override input[type="number"] {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--ozone-radius-sm, 6px);
+  background: var(--bg);
+  color: var(--text-strong);
+}
+
+.fee-override code {
+  background: transparent;
+  color: var(--text-strong);
+}
+
 details > summary {
   cursor: pointer;
   color: var(--text-mute);

@@ -142,9 +142,13 @@ export function App() {
     };
   }, []);
 
-  const decide = async (id: string, approved: boolean) => {
+  const decide = async (
+    id: string,
+    approved: boolean,
+    overrides?: Record<string, unknown>,
+  ) => {
     try {
-      await decideApproval(id, approved);
+      await decideApproval(id, approved, overrides);
     } finally {
       setPending((p) => p.filter((r) => r.id !== id));
     }
@@ -316,15 +320,37 @@ function ApprovalScreen({
 }: {
   request: PendingApproval;
   queueSize: number;
-  onDecide: (id: string, approved: boolean) => void | Promise<void>;
+  onDecide: (
+    id: string,
+    approved: boolean,
+    overrides?: Record<string, unknown>,
+  ) => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  // Per-method override state. `createOffer` lets the user override the fee
+  // a dApp proposed (Goby's combined-swap default of ~100M+ mojos is rarely
+  // what the user wants — most XCH transfers need 0 or 5_000_000 mojos).
+  const initialFee =
+    request.method === "createOffer" || request.method === "takeOffer"
+      ? String(
+          (request.params as { fee?: string | number } | null)?.fee ?? "0",
+        )
+      : null;
+  const [feeOverride, setFeeOverride] = useState<string | null>(initialFee);
 
   const decide = async (approved: boolean) => {
     if (busy) return;
     setBusy(approved ? "approve" : "reject");
     try {
-      await onDecide(request.id, approved);
+      const overrides: Record<string, unknown> = {};
+      if (approved && feeOverride !== null && feeOverride !== initialFee) {
+        overrides.fee = feeOverride;
+      }
+      await onDecide(
+        request.id,
+        approved,
+        Object.keys(overrides).length > 0 ? overrides : undefined,
+      );
     } finally {
       setBusy(null);
     }
@@ -343,6 +369,29 @@ function ApprovalScreen({
       </p>
 
       <ApprovalSummary request={request} />
+
+      {feeOverride !== null && (
+        <div className="fee-override">
+          <label htmlFor="fee-mojos" className="muted small">
+            Fee (mojos) — dApp suggested <code>{initialFee}</code>:
+          </label>
+          <input
+            id="fee-mojos"
+            type="number"
+            min="0"
+            step="1"
+            value={feeOverride}
+            onChange={(e) => setFeeOverride(e.target.value)}
+            disabled={busy !== null}
+          />
+          {feeOverride !== initialFee && (
+            <p className="muted small">
+              You're overriding the fee. The dApp may reject the offer if it
+              expected a higher fee — try the suggested value first if unsure.
+            </p>
+          )}
+        </div>
+      )}
 
       <details>
         <summary>Raw params</summary>

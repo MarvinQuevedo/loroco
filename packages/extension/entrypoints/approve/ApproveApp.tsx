@@ -11,8 +11,17 @@ async function fetchPending(): Promise<PendingRequest | null> {
   return res.request;
 }
 
-async function decide(approved: boolean): Promise<void> {
-  const msg: ApprovalMessage = { from: "approval", kind: "decide", id: REQUEST_ID, approved };
+async function decide(
+  approved: boolean,
+  overrides?: Record<string, unknown>,
+): Promise<void> {
+  const msg: ApprovalMessage = {
+    from: "approval",
+    kind: "decide",
+    id: REQUEST_ID,
+    approved,
+    ...(overrides ? { overrides } : {}),
+  };
   await chrome.runtime.sendMessage(msg);
   window.close();
 }
