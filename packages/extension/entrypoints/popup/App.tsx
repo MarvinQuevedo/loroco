@@ -222,7 +222,10 @@ export function App() {
   return (
     <div className="ozone-popup">
       <header className="ozone-header">
-        <span className="ozone-logo">Loroco</span>
+        <span className="ozone-logo">
+          <img src="/icon/48.png" alt="" className="ozone-logo-mark" />
+          Loroco
+        </span>
         {view.kind === "home" && !showApproval && (
           <div className="header-actions">
             <button
@@ -706,6 +709,7 @@ function OnboardingScreen({
   if (mode === "choose") {
     return (
       <section className="screen">
+        <img src="/icon/128.png" alt="" className="screen-logo" />
         <h1>Welcome to Loroco</h1>
         <p className="muted">A Chia wallet for your browser. Choose how to get started.</p>
         {error && <p className="error">{error}</p>}
@@ -897,6 +901,7 @@ function LockScreen({
 
   return (
     <section className="screen">
+      <img src="/icon/128.png" alt="" className="screen-logo" />
       <h1>Unlock</h1>
       {wallets.length > 1 ? (
         <label className="field">

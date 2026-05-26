@@ -112,21 +112,21 @@ body {
 }
 
 .ozone-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 700;
   font-size: 16px;
   letter-spacing: -0.02em;
   color: var(--text-strong);
 }
 
-.ozone-logo::before {
-  content: "";
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  margin-right: 8px;
-  border-radius: 50%;
-  background: var(--ozone-primary);
-  vertical-align: middle;
+.ozone-logo-mark {
+  width: 24px;
+  height: 24px;
+  display: block;
+  flex: 0 0 auto;
+  object-fit: contain;
 }
 
 .ozone-meta {
@@ -147,6 +147,14 @@ main {
   flex-direction: column;
   gap: var(--space-4);
   flex: 1;
+}
+
+.screen-logo {
+  align-self: center;
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+  margin-bottom: calc(var(--space-2) * -1);
 }
 
 .screen h1 {
