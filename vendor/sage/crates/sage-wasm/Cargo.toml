@@ -1,0 +1,50 @@
+[package]
+name = "sage-wasm"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "WASM bindings for the Sage wallet engine."
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doc = false
+
+# Build is only meaningful on wasm32-unknown-unknown; native targets can still
+# `cargo check` this crate but the wasm-bindgen exports won't be useful.
+[dependencies]
+sage-api = { workspace = true }
+sage-config = { workspace = true }
+sage-keychain = { workspace = true }
+chia-wallet-sdk = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+bip39 = { workspace = true, features = ["rand"] }
+tracing = { workspace = true }
+
+# wasm-bindgen stack
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+console_error_panic_hook = "0.1"
+serde-wasm-bindgen = "0.6"
+
+# wasm32-only RNG plumbing (matches what chia-wallet-sdk needs)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# Native: include sage-wallet for engine logic.
+# wasm32 also includes it but with `coinset-sync` and without `peer-client`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sage-wallet = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.sage-wallet]
+workspace = true
+features = ["coinset-sync"]

@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.output/
+.wxt/
+*.tsbuildinfo
+.DS_Store
+
+# Rust build artifacts inside the embedded sage tree.
+vendor/sage/target/
+
+# Local test secrets — used by scripts/pw-* benchmarks. NEVER commit.
+.env
+.env.local
+
+# WASM build outputs (regenerated via pnpm wasm:build)
+packages/wallet-wasm/*.wasm
+packages/wallet-wasm/sage_wasm.js
+packages/wallet-wasm/sage_wasm.d.ts
+packages/wallet-wasm/sage_wasm_bg.wasm.d.ts
+packages/wallet-wasm/.gitignore
+!packages/wallet-wasm/package.json
+!packages/wallet-wasm/README.md

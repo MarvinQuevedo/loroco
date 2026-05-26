@@ -1,0 +1,22 @@
+# Worktree-local cargo config.
+#
+# Lives in the outer worktree (not the vendored sage submodule) so it doesn't
+# pollute upstream Sage. Cargo picks up `.cargo/config.toml` from the
+# invocation directory walking up to the filesystem root, so any cargo
+# invocation under this repo (including subdirs like `vendor/sage`) will
+# respect these settings.
+
+# ─── wasm32-unknown-unknown ────────────────────────────────────────────────
+# Used by the wasm:build script (sage compiled to WASM via wasm-pack).
+
+[target.wasm32-unknown-unknown]
+# Use rust-lld (default for wasm32) as the linker; using brew clang as the
+# linker causes "relocation cannot be used against symbol; recompile with -fPIC"
+# errors. brew LLVM is still consumed via CC_wasm32_unknown_unknown env (set
+# at cargo invocation time) for any C deps that `cc-rs` needs to build for wasm.
+rustflags = [
+    # getrandom 0.3 requires explicit backend selection on wasm32-unknown-unknown.
+    # `wasm_js` routes randomness through crypto.getRandomValues() (available in
+    # browsers and Node.js).
+    "--cfg", "getrandom_backend=\"wasm_js\"",
+]

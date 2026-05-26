@@ -1,0 +1,716 @@
+use std::time::Duration;
+
+use chia_wallet_sdk::{
+    chia::puzzle_types::nft::NftMetadata,
+    driver::{MetadataUpdate, UriKind},
+    prelude::*,
+};
+use itertools::Itertools;
+use sage_api::{
+    AddNftUri, AssignNftsToDid, AutoCombineCat, AutoCombineCatResponse, AutoCombineXch,
+    AutoCombineXchResponse, BulkMintNfts, BulkMintNftsResponse, BulkSendCat, BulkSendXch, Combine,
+    CreateDid, ExerciseOptions, FinalizeClawback, IssueCat, MintOption, MintOptionResponse,
+    MultiSend, NftUriKind, NormalizeDids, OptionAsset, RequiredSignatureJson, RequiredSignatures,
+    RequiredSignaturesResponse, SendCat, SendXch, SignCoinSpends, SignCoinSpendsResponse, Split,
+    SubmitTransaction, SubmitTransactionResponse, SubmitWithSignatures,
+    SubmitWithSignaturesResponse, TransactionResponse, TransferDids, TransferNfts, TransferOptions,
+    ViewCoinSpends, ViewCoinSpendsResponse,
+};
+use sage_assets::fetch_uris_without_hash;
+use sage_database::{Asset, AssetKind};
+use sage_wallet::{MultiSendPayment, WalletError, WalletNftMint, WalletOptionMint};
+use tokio::time::timeout;
+
+use crate::{
+    ConfirmationInfo, Error, Result, Sage, json_bundle, json_spend, parse_amount, parse_asset_id,
+    parse_coin_ids, parse_did_id, parse_hash, parse_memos, parse_nft_id, parse_option_id,
+    parse_signature, rust_bundle, rust_spend,
+};
+
+impl Sage {
+    pub async fn send_xch(&self, req: SendXch) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let puzzle_hash = self.parse_address(req.address)?;
+        let amount = parse_amount(req.amount)?;
+        let fee = parse_amount(req.fee)?;
+        let memos = parse_memos(req.memos)?;
+
+        let coin_spends = wallet
+            .send_xch(vec![(puzzle_hash, amount)], fee, memos, req.clawback)
+            .await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn bulk_send_xch(&self, req: BulkSendXch) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+
+        let amount = parse_amount(req.amount)?;
+
+        let mut amounts = Vec::with_capacity(req.addresses.len());
+
+        for address in req.addresses {
+            amounts.push((self.parse_address(address)?, amount));
+        }
+
+        let fee = parse_amount(req.fee)?;
+        let memos = parse_memos(req.memos)?;
+
+        let coin_spends = wallet.send_xch(amounts, fee, memos, None).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn combine(&self, req: Combine) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let fee = parse_amount(req.fee)?;
+        let coin_ids = parse_coin_ids(req.coin_ids)?;
+
+        let coin_spends = wallet.combine(coin_ids, fee).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn auto_combine_xch(&self, req: AutoCombineXch) -> Result<AutoCombineXchResponse> {
+        let wallet = self.wallet()?;
+        let fee = parse_amount(req.fee)?;
+        let max_amount = req.max_coin_amount.map(parse_amount).transpose()?;
+
+        let coins = wallet
+            .db
+            .selectable_xch_coins()
+            .await?
+            .into_iter()
+            .filter(|coin| {
+                let Some(max_amount) = max_amount else {
+                    return true;
+                };
+                coin.amount <= max_amount
+            })
+            .sorted_by_key(|coin| coin.amount)
+            .take(req.max_coins as usize)
+            .collect_vec();
+
+        let coin_ids = coins
+            .iter()
+            .map(|coin| hex::encode(coin.coin_id()))
+            .collect_vec();
+
+        let coin_spends = wallet
+            .combine(coins.iter().map(Coin::coin_id).collect(), fee)
+            .await?;
+        let response = self.transact(coin_spends, req.auto_submit).await?;
+
+        Ok(AutoCombineXchResponse {
+            coin_ids,
+            summary: response.summary,
+            coin_spends: response.coin_spends,
+        })
+    }
+
+    pub async fn split(&self, req: Split) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let fee = parse_amount(req.fee)?;
+        let coin_ids = parse_coin_ids(req.coin_ids)?;
+
+        let coin_spends = wallet
+            .split(coin_ids, req.output_count as usize, fee)
+            .await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn auto_combine_cat(&self, req: AutoCombineCat) -> Result<AutoCombineCatResponse> {
+        let wallet = self.wallet()?;
+        let fee = parse_amount(req.fee)?;
+        let asset_id = parse_asset_id(req.asset_id)?;
+        let max_amount = req.max_coin_amount.map(parse_amount).transpose()?;
+
+        let cats = wallet
+            .db
+            .selectable_cat_coins(asset_id)
+            .await?
+            .into_iter()
+            .filter(|cat| {
+                let Some(max_amount) = max_amount else {
+                    return true;
+                };
+                cat.coin.amount <= max_amount
+            })
+            .sorted_by_key(|cat| cat.coin.amount)
+            .take(req.max_coins as usize)
+            .collect_vec();
+
+        let coin_ids = cats
+            .iter()
+            .map(|cat| hex::encode(cat.coin.coin_id()))
+            .collect_vec();
+
+        let coin_spends = wallet
+            .combine(cats.iter().map(|row| row.coin.coin_id()).collect(), fee)
+            .await?;
+        let response = self.transact(coin_spends, req.auto_submit).await?;
+
+        Ok(AutoCombineCatResponse {
+            coin_ids,
+            summary: response.summary,
+            coin_spends: response.coin_spends,
+        })
+    }
+
+    pub async fn issue_cat(&self, req: IssueCat) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let amount = parse_amount(req.amount)?;
+        let fee = parse_amount(req.fee)?;
+
+        let (coin_spends, asset_id) = wallet.issue_cat(amount, fee, None).await?;
+        let mut tx = wallet.db.tx().await?;
+
+        tx.insert_asset(Asset {
+            hash: asset_id,
+            name: Some(req.name),
+            ticker: Some(req.ticker),
+            precision: 3,
+            icon_url: None,
+            description: None,
+            is_sensitive_content: false,
+            is_visible: true,
+            hidden_puzzle_hash: None,
+            kind: AssetKind::Token,
+        })
+        .await?;
+        tx.commit().await?;
+
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn send_cat(&self, req: SendCat) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let asset_id = parse_asset_id(req.asset_id)?;
+        let puzzle_hash = self.parse_address(req.address)?;
+        let amount = parse_amount(req.amount)?;
+        let fee = parse_amount(req.fee)?;
+        let memos = parse_memos(req.memos)?;
+
+        let coin_spends = wallet
+            .send_cat(
+                asset_id,
+                vec![(puzzle_hash, amount)],
+                fee,
+                req.include_hint,
+                memos,
+                req.clawback,
+            )
+            .await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn bulk_send_cat(&self, req: BulkSendCat) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let asset_id = parse_asset_id(req.asset_id)?;
+
+        let amount = parse_amount(req.amount)?;
+
+        let mut amounts = Vec::with_capacity(req.addresses.len());
+
+        for address in req.addresses {
+            amounts.push((self.parse_address(address)?, amount));
+        }
+
+        let fee = parse_amount(req.fee)?;
+        let memos = parse_memos(req.memos)?;
+
+        let coin_spends = wallet
+            .send_cat(asset_id, amounts, fee, req.include_hint, memos, None)
+            .await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn multi_send(&self, req: MultiSend) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+
+        let mut payments = Vec::with_capacity(req.payments.len());
+
+        for payment in req.payments {
+            let asset_id = if let Some(asset_id) = payment.asset_id {
+                Some(parse_asset_id(asset_id)?)
+            } else {
+                None
+            };
+            let amount = parse_amount(payment.amount)?;
+            let puzzle_hash = self.parse_address(payment.address)?;
+            let memos = parse_memos(payment.memos)?;
+
+            payments.push(MultiSendPayment {
+                asset_id,
+                amount,
+                puzzle_hash,
+                memos,
+            });
+        }
+
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet.multi_send(payments, fee).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn create_did(&self, req: CreateDid) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let fee = parse_amount(req.fee)?;
+
+        let (coin_spends, did) = wallet.create_did(fee).await?;
+
+        wallet
+            .db
+            .insert_asset(Asset {
+                name: Some(req.name.clone()),
+                ticker: None,
+                precision: 1,
+                hash: did.info.launcher_id,
+                icon_url: None,
+                description: None,
+                is_sensitive_content: false,
+                is_visible: true,
+                hidden_puzzle_hash: None,
+                kind: AssetKind::Did,
+            })
+            .await?;
+
+        self.transact_with(coin_spends, req.auto_submit, ConfirmationInfo::default())
+            .await
+    }
+
+    pub async fn bulk_mint_nfts(&self, req: BulkMintNfts) -> Result<BulkMintNftsResponse> {
+        let wallet = self.wallet()?;
+        let fee = parse_amount(req.fee)?;
+        let did_id = parse_did_id(req.did_id)?;
+
+        let mut mints = Vec::with_capacity(req.mints.len());
+        let mut info = ConfirmationInfo::default();
+
+        for item in req.mints {
+            mints.push(self.convert_nft_mint(item, &mut info).await?);
+        }
+
+        let (coin_spends, nfts) = wallet.bulk_mint_nfts(fee, did_id, mints).await?;
+
+        let mut nft_ids = Vec::with_capacity(nfts.len());
+
+        for nft in nfts {
+            nft_ids.push(Address::new(nft.info.launcher_id, "nft".to_string()).encode()?);
+        }
+
+        let response = self
+            .transact_with(coin_spends, req.auto_submit, info)
+            .await?;
+
+        Ok(BulkMintNftsResponse {
+            nft_ids,
+            summary: response.summary,
+            coin_spends: response.coin_spends,
+        })
+    }
+
+    pub async fn transfer_nfts(&self, req: TransferNfts) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let nft_ids = req
+            .nft_ids
+            .into_iter()
+            .map(parse_nft_id)
+            .collect::<Result<Vec<_>>>()?;
+        let puzzle_hash = self.parse_address(req.address)?;
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet
+            .transfer_nfts(nft_ids, puzzle_hash, fee, req.clawback)
+            .await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn add_nft_uri(&self, req: AddNftUri) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let nft_id = parse_nft_id(req.nft_id)?;
+        let fee = parse_amount(req.fee)?;
+
+        let uri = match req.kind {
+            NftUriKind::Data => MetadataUpdate {
+                kind: UriKind::Data,
+                uri: req.uri,
+            },
+            NftUriKind::Metadata => MetadataUpdate {
+                kind: UriKind::Metadata,
+                uri: req.uri,
+            },
+            NftUriKind::License => MetadataUpdate {
+                kind: UriKind::License,
+                uri: req.uri,
+            },
+        };
+
+        let coin_spends = wallet.add_nft_uri(nft_id, fee, uri).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn assign_nfts_to_did(&self, req: AssignNftsToDid) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let nft_ids = req
+            .nft_ids
+            .into_iter()
+            .map(parse_nft_id)
+            .collect::<Result<Vec<_>>>()?;
+        let did_id = req.did_id.map(parse_did_id).transpose()?;
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet.assign_nfts(nft_ids, did_id, fee).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn transfer_dids(&self, req: TransferDids) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let did_ids = req
+            .did_ids
+            .into_iter()
+            .map(parse_did_id)
+            .collect::<Result<Vec<_>>>()?;
+        let puzzle_hash = self.parse_address(req.address)?;
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet
+            .transfer_dids(did_ids, puzzle_hash, fee, req.clawback)
+            .await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn normalize_dids(&self, req: NormalizeDids) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let did_ids = req
+            .did_ids
+            .into_iter()
+            .map(parse_did_id)
+            .collect::<Result<Vec<_>>>()?;
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet.normalize_dids(did_ids, fee).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn mint_option(&self, req: MintOption) -> Result<MintOptionResponse> {
+        let wallet = self.wallet()?;
+        let fee = parse_amount(req.fee)?;
+
+        let underlying_type = self.parse_option_asset(req.underlying).await?;
+        let strike_type = self.parse_option_asset(req.strike).await?;
+
+        let (coin_spends, option) = wallet
+            .mint_option(
+                WalletOptionMint {
+                    expiration_seconds: req.expiration_seconds,
+                    underlying_type,
+                    strike_type,
+                },
+                fee,
+            )
+            .await?;
+
+        let response = self.transact(coin_spends, req.auto_submit).await?;
+
+        Ok(MintOptionResponse {
+            option_id: Address::new(option.info.launcher_id, "option".to_string()).encode()?,
+            summary: response.summary,
+            coin_spends: response.coin_spends,
+        })
+    }
+
+    async fn parse_option_asset(&self, asset: OptionAsset) -> Result<OptionType> {
+        let amount = asset
+            .amount
+            .to_u64()
+            .ok_or(Error::InvalidCoinAmount(asset.amount.to_string()))?;
+
+        let Some(asset_id) = asset.asset_id else {
+            return Ok(OptionType::Xch { amount });
+        };
+
+        let wallet = self.wallet()?;
+
+        let asset_id = parse_asset_id(asset_id)?;
+
+        self.cache_cat(asset_id, None).await?;
+
+        let hidden_puzzle_hash = wallet
+            .db
+            .existing_hidden_puzzle_hash(asset_id)
+            .await?
+            .unwrap_or_default();
+
+        Ok(if let Some(hidden_puzzle_hash) = hidden_puzzle_hash {
+            OptionType::RevocableCat {
+                asset_id,
+                hidden_puzzle_hash,
+                amount,
+            }
+        } else {
+            OptionType::Cat { asset_id, amount }
+        })
+    }
+
+    pub async fn transfer_options(&self, req: TransferOptions) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let option_ids = req
+            .option_ids
+            .into_iter()
+            .map(parse_option_id)
+            .collect::<Result<Vec<_>>>()?;
+        let puzzle_hash = self.parse_address(req.address)?;
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet
+            .transfer_options(option_ids, puzzle_hash, fee, req.clawback)
+            .await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn exercise_options(&self, req: ExerciseOptions) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let option_ids = req
+            .option_ids
+            .into_iter()
+            .map(parse_option_id)
+            .collect::<Result<Vec<_>>>()?;
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet.exercise_options(option_ids, fee).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn finalize_clawback(&self, req: FinalizeClawback) -> Result<TransactionResponse> {
+        let wallet = self.wallet()?;
+        let coin_ids = parse_coin_ids(req.coin_ids)?;
+        let fee = parse_amount(req.fee)?;
+
+        let coin_spends = wallet.finalize_clawback(coin_ids, fee).await?;
+        self.transact(coin_spends, req.auto_submit).await
+    }
+
+    pub async fn sign_coin_spends(&self, req: SignCoinSpends) -> Result<SignCoinSpendsResponse> {
+        let coin_spends = req
+            .coin_spends
+            .into_iter()
+            .map(rust_spend)
+            .collect::<Result<Vec<_>>>()?;
+        let spend_bundle = self.sign(coin_spends, req.partial).await?;
+        let json_bundle = json_bundle(&spend_bundle);
+
+        if req.auto_submit {
+            self.submit(spend_bundle).await?;
+        }
+
+        Ok(SignCoinSpendsResponse {
+            spend_bundle: json_bundle,
+        })
+    }
+
+    pub async fn view_coin_spends(&self, req: ViewCoinSpends) -> Result<ViewCoinSpendsResponse> {
+        let coin_spends = req
+            .coin_spends
+            .into_iter()
+            .map(rust_spend)
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(ViewCoinSpendsResponse {
+            summary: self
+                .summarize(coin_spends, ConfirmationInfo::default())
+                .await?,
+        })
+    }
+
+    /// Compute the AGG_SIG messages an external signer must produce for the
+    /// given coin spends, without signing in-process. This drives hardware /
+    /// external-signer wallets (e.g. Tangem cards, which spend the
+    /// `p2_delegated_conditions` / "arbor" puzzle): the returned messages are
+    /// consensus-correct, so the caller signs them with the card and then
+    /// aggregates+broadcasts via [`Self::submit_with_signatures`].
+    pub async fn required_signatures(
+        &self,
+        req: RequiredSignatures,
+    ) -> Result<RequiredSignaturesResponse> {
+        let coin_spends = req
+            .coin_spends
+            .into_iter()
+            .map(rust_spend)
+            .collect::<Result<Vec<_>>>()?;
+
+        let constants = AggSigConstants::new(self.network().agg_sig_me());
+
+        let required =
+            RequiredSignature::from_coin_spends(&mut Allocator::new(), &coin_spends, &constants)
+                .map_err(|e| Error::Wallet(WalletError::Signer(e)))?;
+
+        let mut signatures = Vec::new();
+
+        for required in required {
+            let RequiredSignature::Bls(required) = required else {
+                continue;
+            };
+
+            signatures.push(RequiredSignatureJson {
+                public_key: format!("0x{}", hex::encode(required.public_key.to_bytes())),
+                message: format!("0x{}", hex::encode(required.message())),
+            });
+        }
+
+        Ok(RequiredSignaturesResponse { signatures })
+    }
+
+    /// Aggregate externally produced BLS signatures into a spend bundle for the
+    /// given coin spends, and optionally broadcast it. Pairs with
+    /// [`Self::required_signatures`].
+    pub async fn submit_with_signatures(
+        &self,
+        req: SubmitWithSignatures,
+    ) -> Result<SubmitWithSignaturesResponse> {
+        let coin_spends = req
+            .coin_spends
+            .into_iter()
+            .map(rust_spend)
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut aggregated_signature = Signature::default();
+        for signature in req.signatures {
+            aggregated_signature += &parse_signature(signature)?;
+        }
+
+        let spend_bundle = SpendBundle::new(coin_spends, aggregated_signature);
+
+        if req.auto_submit {
+            self.submit(spend_bundle.clone()).await?;
+        }
+
+        Ok(SubmitWithSignaturesResponse {
+            spend_bundle: json_bundle(&spend_bundle),
+        })
+    }
+
+    pub async fn submit_transaction(
+        &self,
+        req: SubmitTransaction,
+    ) -> Result<SubmitTransactionResponse> {
+        let spend_bundle = rust_bundle(req.spend_bundle)?;
+        self.submit(spend_bundle).await?;
+
+        Ok(SubmitTransactionResponse {})
+    }
+
+    pub(crate) async fn transact(
+        &self,
+        coin_spends: Vec<CoinSpend>,
+        auto_submit: bool,
+    ) -> Result<TransactionResponse> {
+        self.transact_with(coin_spends, auto_submit, ConfirmationInfo::default())
+            .await
+    }
+
+    pub(crate) async fn transact_with(
+        &self,
+        coin_spends: Vec<CoinSpend>,
+        auto_submit: bool,
+        info: ConfirmationInfo,
+    ) -> Result<TransactionResponse> {
+        if auto_submit {
+            let spend_bundle = self.sign(coin_spends.clone(), false).await?;
+            self.submit(spend_bundle).await?;
+        }
+
+        let json_spends = coin_spends.iter().map(json_spend).collect();
+
+        Ok(TransactionResponse {
+            summary: self.summarize(coin_spends, info).await?,
+            coin_spends: json_spends,
+        })
+    }
+
+    pub(crate) async fn convert_nft_mint(
+        &self,
+        item: sage_api::NftMint,
+        info: &mut ConfirmationInfo,
+    ) -> Result<WalletNftMint> {
+        let testnet = self.network().genesis_challenge == TESTNET11_CONSTANTS.genesis_challenge;
+
+        let royalty_puzzle_hash = item
+            .royalty_address
+            .map(|address| self.parse_address(address))
+            .transpose()?;
+
+        let royalty_ten_thousandths = item.royalty_ten_thousandths;
+
+        let data_hash = if let Some(data_hash) = item.data_hash {
+            Some(parse_hash(data_hash)?)
+        } else if item.data_uris.is_empty() {
+            None
+        } else {
+            let data = timeout(
+                Duration::from_secs(10),
+                fetch_uris_without_hash(item.data_uris.clone(), testnet),
+            )
+            .await??;
+
+            let hash = data.hash;
+            info.nft_data.insert(hash, data);
+
+            Some(hash)
+        };
+
+        let metadata_hash = if let Some(metadata_hash) = item.metadata_hash {
+            Some(parse_hash(metadata_hash)?)
+        } else if item.metadata_uris.is_empty() {
+            None
+        } else {
+            let metadata = timeout(
+                Duration::from_secs(10),
+                fetch_uris_without_hash(item.metadata_uris.clone(), testnet),
+            )
+            .await??;
+
+            let hash = metadata.hash;
+            info.nft_data.insert(hash, metadata);
+
+            Some(hash)
+        };
+
+        let license_hash = if let Some(license_hash) = item.license_hash {
+            Some(parse_hash(license_hash)?)
+        } else if item.license_uris.is_empty() {
+            None
+        } else {
+            let data = timeout(
+                Duration::from_secs(10),
+                fetch_uris_without_hash(item.license_uris.clone(), testnet),
+            )
+            .await??;
+
+            let hash = data.hash;
+            info.nft_data.insert(hash, data);
+
+            Some(hash)
+        };
+
+        let p2_puzzle_hash = if let Some(address) = item.address {
+            Some(self.parse_address(address)?)
+        } else {
+            None
+        };
+
+        Ok(WalletNftMint {
+            metadata: NftMetadata {
+                edition_number: item.edition_number.unwrap_or(1) as u64,
+                edition_total: item.edition_total.unwrap_or(1) as u64,
+                data_uris: item.data_uris,
+                data_hash,
+                metadata_uris: item.metadata_uris,
+                metadata_hash,
+                license_uris: item.license_uris,
+                license_hash,
+            },
+            p2_puzzle_hash,
+            royalty_puzzle_hash,
+            royalty_basis_points: royalty_ten_thousandths,
+        })
+    }
+}

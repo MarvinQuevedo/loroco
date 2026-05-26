@@ -1,0 +1,77 @@
+[package]
+name = "sage-wallet"
+version = "0.12.10"
+edition = "2024"
+license = "Apache-2.0"
+description = "The driver code and sync logic for Sage wallet."
+authors = ["Rigidity <me@rigidnetwork.com>"]
+homepage = "https://github.com/rigidity/sage"
+repository = "https://github.com/rigidity/sage"
+readme = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables HTTP-based sync against a Chia full-node RPC provider (api.coinset.org
+# by default). Used by the browser-extension target where peer P2P TLS is not
+# available. Native targets (desktop / mobile) keep the default empty feature
+# set and continue using peer-based sync.
+coinset-sync = []
+
+[dependencies]
+# chia-wallet-sdk pulled with no features here; native/wasm32 split below
+# adds `peer-client` only on native, since wasm32 cannot link tokio-net.
+chia-wallet-sdk = { workspace = true }
+chia_streamable_macro = { workspace = true }
+chia-traits = { workspace = true }
+chia-sha2 = { workspace = true }
+# sage-database with no default features (no sqlx/sqlite). Native re-enables
+# the `sqlite` feature below via target-conditional override.
+sage-database = { workspace = true, default-features = false }
+sage-assets = { workspace = true }
+sage-config = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+itertools = { workspace = true }
+futures-util = { workspace = true }
+futures-lite = { workspace = true }
+# On native, reqwest uses rustls (which pulls aws-lc-rs + mio + tokio-net).
+# On wasm32 we strip TLS — the browser's fetch() handles HTTPS, and we don't
+# want mio/tokio-net (incompatible with wasm32-unknown-unknown).
+indexmap = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+
+# ─── Native-only deps ──────────────────────────────────────────────────────
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native unlocks the P2P peer client (Peer, PeerOptions used by WalletPeer).
+chia-wallet-sdk = { workspace = true, features = ["peer-client"] }
+# Native re-enables the SQLite-backed Storage in sage-database.
+sage-database = { workspace = true, features = ["sqlite"] }
+# Full reqwest with rustls — keeps the existing native behavior (peer P2P
+# auxiliary HTTP + TLS-fronted Chia full-node RPC).
+reqwest = { workspace = true, default-features = false, features = ["http2", "rustls-tls-webpki-roots", "json"] }
+
+# ─── wasm32 deps ───────────────────────────────────────────────────────────
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Bare reqwest on wasm32: no rustls, no http2, no native TLS. Reqwest's
+# wasm32 backend goes through the browser's `fetch()` automatically, and
+# the browser is the one doing TLS.
+reqwest = { workspace = true, default-features = false, features = ["json"] }
+# getrandom 0.3 needs both the `wasm_js` feature AND a matching `--cfg
+# getrandom_backend="wasm_js"` rustflag (set in `.cargo/config.toml` at
+# the worktree root). This routes randomness through the browser's
+# `crypto.getRandomValues()` (available in browsers and Node.js).
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio"] }
+test-log = { workspace = true, features = ["trace"] }
+tokio = { workspace = true }
+hex-literal = { workspace = true }

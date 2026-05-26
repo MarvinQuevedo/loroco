@@ -1,0 +1,4 @@
+[submodule "vendor/chia-wallet-sdk"]
+	path = vendor/chia-wallet-sdk
+	url = https://github.com/MarvinQuevedo/chia-wallet-sdk.git
+	branch = feat/peer-client-feature

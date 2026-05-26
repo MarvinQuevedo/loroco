@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT hidden_puzzle_hash FROM assets WHERE hash = ?\n        AND EXISTS (SELECT 1 FROM coins WHERE coins.asset_id = assets.id)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "hidden_puzzle_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "2486ee5a7c2f9d63fdb46dad9a46d776c8d530569cbf50e6bedd6cfc3cf649ec"
+}

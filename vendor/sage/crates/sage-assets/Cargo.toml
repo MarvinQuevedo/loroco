@@ -1,0 +1,37 @@
+[package]
+name = "sage-assets"
+version = "0.12.10"
+edition = "2024"
+license = "Apache-2.0"
+description = "Fetches non-critical data from various APIs for use in Sage wallet."
+authors = ["Rigidity <me@rigidnetwork.com>"]
+homepage = "https://github.com/rigidity/sage"
+repository = "https://github.com/rigidity/sage"
+readme = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+chia-wallet-sdk = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+num-bigint = { workspace = true, features = ["serde"] }
+reqwest = { workspace = true }
+futures-lite = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+mime-sniffer = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+base64 = { workspace = true }
+
+# Image/webp processing for NFT thumbnails. Native only — both deps have C
+# components (libwebp-sys, image's optional decoders) that don't compile to
+# wasm32-unknown-unknown. In the browser, thumbnail generation is handled by
+# the host page (canvas / OffscreenCanvas) instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+image = { workspace = true }
+webp = { workspace = true }

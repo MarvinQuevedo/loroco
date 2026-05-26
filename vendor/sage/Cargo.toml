@@ -1,0 +1,166 @@
+[workspace.package]
+readme = "README.md"
+keywords = ["chia", "wallet", "blockchain", "crypto"]
+categories = ["cryptography::cryptocurrencies"]
+
+[workspace]
+members = ["crates/*", "crates/sage-api/macro"]
+exclude = ["src-tauri", "tauri-plugin-sage"]
+resolver = "2"
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+rust_2021_compatibility = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+non_ascii_idents = "deny"
+unused_extern_crates = "deny"
+trivial_numeric_casts = "deny"
+unreachable_pub = "allow"
+unreachable_code = "warn"
+unreachable_patterns = "warn"
+dead_code = "warn"
+deprecated = "deny"
+deprecated_in_future = "deny"
+missing_debug_implementations = "warn"
+missing_copy_implementations = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)'] }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+cargo = { level = "allow", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+too_many_lines = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+used_underscore_binding = "allow"
+unwrap_used = "allow"
+wildcard_imports = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+result_large_err = "allow"
+
+[workspace.dependencies]
+sage = { path = "./crates/sage" }
+sage-api = { path = "./crates/sage-api" }
+sage-api-macro = { path = "./crates/sage-api/macro" }
+sage-client = { path = "./crates/sage-client" }
+sage-config = { path = "./crates/sage-config" }
+sage-database = { path = "./crates/sage-database", default-features = false }
+sage-keychain = { path = "./crates/sage-keychain" }
+sage-wallet = { path = "./crates/sage-wallet" }
+sage-assets = { path = "./crates/sage-assets" }
+sage-rpc = { path = "./crates/sage-rpc" }
+
+# Serialization
+serde = "1.0.204"
+serde_with = "3.9.0"
+serde_json = "1.0.122"
+bincode = "1.3.3"
+toml = "0.8.19"
+hex = "0.4.3"
+base64 = "0.22.1"
+
+# Tauri
+tauri = "2.10.2"
+tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-opener = "2.5.3"
+tauri-plugin-os = "2.3.2"
+tauri-plugin-window-state = "2.4.1"
+tauri-plugin-barcode-scanner = "2.4.4"
+tauri-plugin-biometric = "2.3.2"
+tauri-plugin-safe-area-insets = "0.1.0"
+tauri-plugin-sage = { path = "./tauri-plugin-sage" }
+tauri-build = "2.5.5"
+tauri-plugin = "2.5.3"
+
+# Specta
+specta = "2.0.0-rc.22"
+specta-typescript = "0.0.9"
+tauri-specta = "2.0.0-rc.21"
+
+# OpenAPI
+utoipa = "5.2.0"
+
+# Chia
+# Note: `rustls` and `peer-simulator` features are intentionally NOT enabled at
+# the workspace level. They're requested locally by crates that need them
+# (sage requests `rustls` for its native peer client; sage-rpc requests
+# `peer-simulator` for tests). Keeping them off here is what lets sage-wallet
+# build for `wasm32-unknown-unknown` — the `rustls` feature pulls in
+# aws-lc-sys which is not WASM-compatible.
+chia-wallet-sdk = { version = "0.33.0", default-features = false, features = ["offer-compression"] }
+chia_streamable_macro = "0.36.1"
+chia-traits = "0.36.1"
+chia-sha2 = "0.36.1"
+bip39 = "2.0.0"
+bech32 = "0.9.1"
+rand = "0.8.5"
+rand_chacha = "0.3.1"
+aes-gcm = "0.10.3"
+argon2 = "0.5.3"
+
+# Async
+tokio = "1.39.2"
+futures-util = "0.3.30"
+futures-lite = "2.3.0"
+sqlx = "0.8.0"
+reqwest = { version = "0.12.22", default-features = false }
+
+# Utilities
+indexmap = "2.3.0"
+itertools = "0.13.0"
+anyhow = "1.0.86"
+thiserror = "1.0.63"
+hex-literal = "0.4.1"
+glob = "0.3.1"
+num-bigint = "0.4.6"
+mime-sniffer = "0.1.3"
+image = "0.25.5"
+webp = "0.3.0"
+expect-test = "1.5.1"
+
+# Macros
+convert_case = "0.8.0"
+quote = "1.0.38"
+proc-macro2 = "1.0.93"
+syn = "2.0"
+
+# Tracing
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+tracing-appender = "0.2.3"
+log = "0.4.22"
+test-log = "0.2.16"
+
+# CLI
+dirs = "5.0.1"
+axum = "0.7.9"
+axum-server = "0.7.1"
+rustls = "0.23.17"
+rustls-pemfile = "2.2.0"
+clap = "4.5.21"
+
+# Testing
+tempfile = "3.25.0"
+tower = "0.5.3"
+
+# Override chia-wallet-sdk with our local fork. The fork makes chia-sdk-client
+# (and friends) optional behind a `peer-client` feature, which is what lets
+# sage-wallet build for wasm32-unknown-unknown without dragging in tokio-net.
+# See /Users/marvin/Projects/Ozone/sage-web/vendor/chia-wallet-sdk/.
+[patch.crates-io]
+chia-wallet-sdk = { path = "../chia-wallet-sdk" }
+chia-sdk-client = { path = "../chia-wallet-sdk/crates/chia-sdk-client" }
+chia-sdk-coinset = { path = "../chia-wallet-sdk/crates/chia-sdk-coinset" }
+chia-sdk-driver = { path = "../chia-wallet-sdk/crates/chia-sdk-driver" }
+chia-sdk-signer = { path = "../chia-wallet-sdk/crates/chia-sdk-signer" }
+chia-sdk-types = { path = "../chia-wallet-sdk/crates/chia-sdk-types" }
+chia-sdk-utils = { path = "../chia-wallet-sdk/crates/chia-sdk-utils" }
+chia-sdk-test = { path = "../chia-wallet-sdk/crates/chia-sdk-test" }

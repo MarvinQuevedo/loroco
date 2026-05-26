@@ -1,0 +1,26 @@
+{
+  "name": "ozone-web-extension",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Ozone — Chia browser extension wallet (Goby-compatible, coinset.org sync)",
+  "type": "module",
+  "scripts": {
+    "wasm:build": "CC_wasm32_unknown_unknown=/usr/local/opt/llvm/bin/clang AR_wasm32_unknown_unknown=/usr/local/opt/llvm/bin/llvm-ar wasm-pack build vendor/sage/crates/sage-wasm --target web --out-dir ../../../../packages/wallet-wasm --release && pnpm wasm:fix-pkg-name",
+    "wasm:build:dev": "CC_wasm32_unknown_unknown=/usr/local/opt/llvm/bin/clang AR_wasm32_unknown_unknown=/usr/local/opt/llvm/bin/llvm-ar wasm-pack build vendor/sage/crates/sage-wasm --target web --out-dir ../../../../packages/wallet-wasm --dev && pnpm wasm:fix-pkg-name",
+    "wasm:fix-pkg-name": "node -e \"const fs=require('fs');const p='packages/wallet-wasm/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.name='@ozone/wallet-wasm';j.private=true;fs.writeFileSync(p, JSON.stringify(j,null,2)+'\\n');\"",
+    "dev": "pnpm --filter @ozone/extension dev",
+    "build": "pnpm wasm:build && pnpm --filter @ozone/extension build",
+    "zip": "pnpm --filter @ozone/extension zip",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "playwright": "^1.60.0",
+    "typescript": "^5.6.3"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22"
+  }
+}
