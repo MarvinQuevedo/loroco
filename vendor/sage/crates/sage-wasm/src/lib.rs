@@ -120,6 +120,9 @@ pub enum EngineError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 impl EngineError {
@@ -130,6 +133,7 @@ impl EngineError {
             Self::MethodNotFound(_) => 4004,
             Self::NotImplemented(_) => 4999,
             Self::Internal(_) => 4500,
+            Self::Unauthorized(_) => 4001,
         }
     }
 }

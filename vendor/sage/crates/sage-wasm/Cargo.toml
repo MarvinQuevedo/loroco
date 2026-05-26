@@ -26,6 +26,8 @@ thiserror = { workspace = true }
 hex = { workspace = true }
 bip39 = { workspace = true, features = ["rand"] }
 tracing = { workspace = true }
+futures-util = { workspace = true }
+indexmap = { workspace = true }
 
 # wasm-bindgen stack
 wasm-bindgen = "0.2"

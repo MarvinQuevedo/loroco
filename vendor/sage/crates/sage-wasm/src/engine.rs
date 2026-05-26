@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bip39::Mnemonic;
 use chia_wallet_sdk::{
     chia::{
-        bls::{master_to_wallet_unhardened, PublicKey, SecretKey, Signature, sign},
+        bls::{master_to_wallet_hardened, master_to_wallet_unhardened, PublicKey, SecretKey, Signature, sign},
         puzzle_types::{standard::StandardArgs, DeriveSynthetic},
     },
     coinset::{ChiaRpcClient, CoinsetClient},
@@ -27,6 +27,23 @@ use chia_wallet_sdk::{
 use sage_keychain::Keychain;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
+
+/// Direct console.log helper — tracing::* in this crate is a stub, so we
+/// route diagnostic breadcrumbs through web_sys when we need to track
+/// per-PH progress through scan_nfts / scan_cats. Visible in the SW
+/// console; captured by `sw.on("console", ...)` in playwright benches.
+fn wlog(msg: &str) {
+    web_sys::console::log_1(&JsValue::from_str(msg));
+}
+
+/// Current size of the wasm linear memory, in bytes. wasm32 can only GROW —
+/// it never shrinks even after dropping allocations — so if this number
+/// climbs monotonically across chunks we have a leak (or a peak that keeps
+/// growing). Used to instrument scan_nfts / scan_cats for memory diagnosis.
+fn wasm_memory_bytes() -> usize {
+    let pages = core::arch::wasm32::memory_size(0);
+    pages.saturating_mul(64 * 1024)
+}
 
 use crate::{storage_bridge::JsStorage, EngineError};
 
@@ -103,6 +120,7 @@ impl SageEngine {
             "login" => self.login(params_json).await,
             "logout" => self.logout(params_json).await,
             "import_key" => self.import_key(params_json).await,
+            "import_secret_key" => self.import_secret_key(params_json).await,
             "generate_mnemonic" => self.generate_mnemonic(params_json).await,
             "get_keys" => self.get_keys(params_json).await,
             "get_key" => self.get_key(params_json).await,
@@ -125,6 +143,7 @@ impl SageEngine {
             .to_string()),
             "derive_address" => self.derive_address(params_json).await,
             "derive_addresses" => self.derive_addresses(params_json).await,
+            "derive_addresses_hardened" => self.derive_addresses_hardened(params_json).await,
             "decode_address" => self.check_address(params_json).await,
             "validate_mnemonic" => self.validate_mnemonic(params_json).await,
             "import_mnemonic" => self.import_key(params_json).await,
@@ -141,9 +160,1094 @@ impl SageEngine {
             "send_xch" => self.send_xch(params_json).await,
             "scan_cats" => self.scan_cats(params_json).await,
             "scan_nfts" => self.scan_nfts(params_json).await,
+            // ─── Split phase-1/phase-2 scans (Chrome MV3 SW lifetime) ────
+            // The legacy scan_* endpoints do hint-fetch + parent-fetch +
+            // CLVM parse in one call, which exceeds the 60s service-worker
+            // cap for wallets with deep history. The split lets JS persist
+            // raw candidates between SW lifecycles and parse them later.
+            "nft_scan_hints" => self.nft_scan_hints(params_json).await,
+            "nft_parse_candidates" => self.nft_parse_candidates(params_json).await,
+            "cat_scan_hints" => self.cat_scan_hints(params_json).await,
+            "cat_parse_candidates" => self.cat_parse_candidates(params_json).await,
+            "send_cat" => self.send_cat(params_json).await,
+            "transfer_nft" => self.transfer_nft(params_json).await,
+            "decode_offer" => self.decode_offer(params_json).await,
+            "take_offer" => self.take_offer(params_json).await,
 
             other => Err(EngineError::NotImplemented(other.to_string())),
         }
+    }
+
+    /// Send a CAT — build a SpendBundle from one or more input CAT coins,
+    /// sign every required AGG_SIG, and push it via coinset.
+    ///
+    /// JS does coin selection (against `chrome.storage.local["coins.<fp>"].cats`)
+    /// and hands the engine the full per-coin info we captured in scan_cats:
+    /// puzzle_hash, inner_puzzle_hash, lineage_proof, derivation_index.
+    ///
+    /// Params:
+    /// ```
+    /// {
+    ///   fingerprint: u32,
+    ///   asset_id: "0x<tail_hash>",
+    ///   recipient_address: "xch1...",
+    ///   amount_mojos: "1000",
+    ///   fee_mojos: "0",
+    ///   input_coins: [{
+    ///     parent_coin_info: "0x...",
+    ///     puzzle_hash: "0x...",          // outer CAT puzzle hash
+    ///     amount: "5000",
+    ///     inner_puzzle_hash: "0x...",    // OUR p2 inner ph
+    ///     derivation_index: u32,
+    ///     lineage_proof: {
+    ///       parent_name, inner_puzzle_hash, amount
+    ///     }
+    ///   }],
+    ///   change_index: u32,
+    ///   endpoint?, broadcast? (default true)
+    /// }
+    /// ```
+    async fn send_cat(&self, params_json: &str) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{
+            chia::{
+                bls::{sign, Signature},
+                consensus::consensus_constants::ConsensusConstants,
+                protocol::SpendBundle,
+                puzzle_types::LineageProof,
+            },
+            driver::{Cat, CatInfo, CatSpend, SpendContext, StandardLayer},
+            signer::{AggSigConstants, RequiredBlsSignature, RequiredSignature},
+            types::MAINNET_CONSTANTS,
+        };
+
+        #[derive(Deserialize)]
+        struct LineageJson {
+            parent_name: String,
+            inner_puzzle_hash: String,
+            amount: String,
+        }
+        #[derive(Deserialize)]
+        struct InputCoinJson {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+            inner_puzzle_hash: String,
+            #[serde(default)]
+            hidden_puzzle_hash: Option<String>,
+            derivation_index: u32,
+            lineage_proof: LineageJson,
+        }
+        #[derive(Deserialize)]
+        struct Req {
+            fingerprint: u32,
+            asset_id: String,
+            recipient_address: String,
+            amount_mojos: String,
+            #[serde(default = "default_zero_mojos_cat")]
+            fee_mojos: String,
+            input_coins: Vec<InputCoinJson>,
+            #[serde(default)]
+            change_index: u32,
+            #[serde(default)]
+            endpoint: Option<String>,
+            #[serde(default = "default_true_cat")]
+            broadcast: bool,
+        }
+        fn default_zero_mojos_cat() -> String {
+            "0".to_string()
+        }
+        fn default_true_cat() -> bool {
+            true
+        }
+
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let amount: u64 = req
+            .amount_mojos
+            .parse()
+            .map_err(|_| EngineError::InvalidParams("amount_mojos must be u64".to_string()))?;
+        let fee: u64 = req
+            .fee_mojos
+            .parse()
+            .map_err(|_| EngineError::InvalidParams("fee_mojos must be u64".to_string()))?;
+        if amount == 0 {
+            return Err(EngineError::InvalidParams(
+                "amount_mojos must be > 0".to_string(),
+            ));
+        }
+        if req.input_coins.is_empty() {
+            return Err(EngineError::InvalidParams("input_coins is empty".to_string()));
+        }
+        if req.input_coins.len() > 25 {
+            return Err(EngineError::InvalidParams(format!(
+                "too many input_coins ({}), max 25 for a CAT send",
+                req.input_coins.len()
+            )));
+        }
+
+        let asset_id = parse_bytes32(&req.asset_id)?;
+        let recipient = Address::decode(req.recipient_address.trim())
+            .map_err(|e| EngineError::InvalidParams(format!("recipient: {e}")))?;
+        let recipient_inner_ph = recipient.puzzle_hash;
+
+        // 1. Reconstruct each input Cat + derive its synthetic SK
+        let master_sk = self.unlocked_sk(req.fingerprint)?;
+        struct ParsedInput {
+            cat: Cat,
+            sk: SecretKey,
+            pk: PublicKey,
+        }
+        let mut parsed: Vec<ParsedInput> = Vec::with_capacity(req.input_coins.len());
+        let mut total_input: u64 = 0;
+        for c in &req.input_coins {
+            let amt: u64 = c
+                .amount
+                .parse()
+                .map_err(|_| EngineError::InvalidParams("input amount u64".to_string()))?;
+            total_input = total_input
+                .checked_add(amt)
+                .ok_or_else(|| EngineError::InvalidParams("input sum overflow".to_string()))?;
+            let parent = parse_bytes32(&c.parent_coin_info)?;
+            let outer_ph = parse_bytes32(&c.puzzle_hash)?;
+            let inner_ph = parse_bytes32(&c.inner_puzzle_hash)?;
+            let hidden_ph = c
+                .hidden_puzzle_hash
+                .as_deref()
+                .map(parse_bytes32)
+                .transpose()?;
+            let lineage_parent_name = parse_bytes32(&c.lineage_proof.parent_name)?;
+            let lineage_inner_ph = parse_bytes32(&c.lineage_proof.inner_puzzle_hash)?;
+            let lineage_amount: u64 = c
+                .lineage_proof
+                .amount
+                .parse()
+                .map_err(|_| EngineError::InvalidParams("lineage amount u64".to_string()))?;
+
+            // Verify we own this inner_ph at derivation_index
+            let intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+            let synthetic_sk = intermediate.derive_synthetic();
+            let synthetic_pk = synthetic_sk.public_key();
+            let derived_inner: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
+            if derived_inner != inner_ph {
+                return Err(EngineError::InvalidParams(format!(
+                    "input inner_puzzle_hash {} doesn't match derivation_index {}",
+                    hex::encode(inner_ph),
+                    c.derivation_index
+                )));
+            }
+
+            let cat = Cat {
+                coin: Coin::new(parent, outer_ph, amt),
+                lineage_proof: Some(LineageProof {
+                    parent_parent_coin_info: lineage_parent_name,
+                    parent_inner_puzzle_hash: lineage_inner_ph,
+                    parent_amount: lineage_amount,
+                }),
+                info: CatInfo {
+                    asset_id,
+                    hidden_puzzle_hash: hidden_ph,
+                    p2_puzzle_hash: inner_ph,
+                },
+            };
+            parsed.push(ParsedInput {
+                cat,
+                sk: synthetic_sk,
+                pk: synthetic_pk,
+            });
+        }
+
+        if total_input < amount {
+            return Err(EngineError::InvalidParams(format!(
+                "input CAT coins sum to {total_input} but {amount} needed (CAT amount)"
+            )));
+        }
+        let cat_change = total_input - amount;
+
+        // 2. Change p2 puzzle hash (derived from change_index)
+        let change_intermediate_sk = master_to_wallet_unhardened(&master_sk, req.change_index);
+        let change_synthetic_pk = change_intermediate_sk.derive_synthetic().public_key();
+        let change_inner_ph: Bytes32 =
+            StandardArgs::curry_tree_hash(change_synthetic_pk).into();
+
+        // 3. Build the inner spends. Cat::spend_all expects one CatSpend per
+        //    input, where the spend is the INNER puzzle's spend (the wrapping
+        //    cat layer is added by Cat::spend_all). For the standard p2 puzzle
+        //    that means StandardLayer::spend_with_conditions.
+        //
+        //    First CAT: outputs (recipient + change) + reserve_fee for XCH fee.
+        //    Tail CATs: no outputs.
+        let mut ctx = SpendContext::new();
+
+        let mut cat_spends: Vec<CatSpend> = Vec::with_capacity(parsed.len());
+        for (i, p) in parsed.iter().enumerate() {
+            let conditions = if i == 0 {
+                let mut c = Conditions::new().create_coin(
+                    recipient_inner_ph,
+                    amount,
+                    ctx.hint(recipient_inner_ph)
+                        .map_err(|e| EngineError::Internal(format!("hint memos: {e}")))?,
+                );
+                if fee > 0 {
+                    c = c.reserve_fee(fee);
+                }
+                if cat_change > 0 {
+                    c = c.create_coin(
+                        change_inner_ph,
+                        cat_change,
+                        ctx.hint(change_inner_ph)
+                            .map_err(|e| EngineError::Internal(format!("hint memos: {e}")))?,
+                    );
+                }
+                c
+            } else {
+                Conditions::new()
+            };
+
+            let inner_spend = StandardLayer::new(p.pk)
+                .spend_with_conditions(&mut ctx, conditions)
+                .map_err(|e| EngineError::Internal(format!("std spend_with_conditions: {e}")))?;
+            cat_spends.push(CatSpend::new(p.cat, inner_spend));
+        }
+
+        Cat::spend_all(&mut ctx, &cat_spends)
+            .map_err(|e| EngineError::Internal(format!("Cat::spend_all: {e}")))?;
+
+        let coin_spends = ctx.take();
+
+        // 4. Sign required AGG_SIGs against the right SK
+        let constants: &ConsensusConstants = &MAINNET_CONSTANTS;
+        let agg_sig_consts = AggSigConstants::new(constants.agg_sig_me_additional_data);
+        let required = RequiredSignature::from_coin_spends(
+            &mut ctx,
+            &coin_spends,
+            &agg_sig_consts,
+        )
+        .map_err(|e| EngineError::Internal(format!("required_signatures: {e}")))?;
+
+        let mut sks_by_pk: std::collections::HashMap<Vec<u8>, SecretKey> =
+            std::collections::HashMap::new();
+        for p in &parsed {
+            sks_by_pk.insert(p.pk.to_bytes().to_vec(), p.sk.clone());
+        }
+
+        let mut aggregated = Signature::default();
+        for req_sig in required {
+            match req_sig {
+                RequiredSignature::Bls(RequiredBlsSignature {
+                    public_key,
+                    raw_message,
+                    appended_info,
+                    domain_string,
+                }) => {
+                    let pk_bytes = public_key.to_bytes().to_vec();
+                    let sk = sks_by_pk.get(&pk_bytes).ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "no secret key for pubkey {}",
+                            hex::encode(&pk_bytes)
+                        ))
+                    })?;
+                    let mut msg = raw_message.to_vec();
+                    msg.extend_from_slice(&appended_info);
+                    if let Some(domain) = domain_string {
+                        msg.extend_from_slice(&domain);
+                    }
+                    aggregated.aggregate(&sign(sk, &msg));
+                }
+                RequiredSignature::Secp(_) => {
+                    return Err(EngineError::Internal(
+                        "SECP signatures not supported in send_cat".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let bundle = SpendBundle::new(coin_spends.clone(), aggregated);
+
+        // 5. Push (unless dry-run)
+        let mut status = "DRY_RUN".to_string();
+        let mut error: Option<String> = None;
+        if req.broadcast {
+            let client = make_client(req.endpoint.as_deref());
+            let res = client
+                .push_tx(bundle.clone())
+                .await
+                .map_err(|e| EngineError::Internal(format!("push_tx: {e}")))?;
+            status = res.status;
+            error = res.error;
+        }
+
+        let tx_id = bundle.name();
+        Ok(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode(tx_id)),
+            "status": status,
+            "error": error,
+            "spend_bundle": {
+                "coin_spends": coin_spends.iter().map(serialize_coin_spend).collect::<Vec<_>>(),
+                "aggregated_signature": format!("0x{}", hex::encode(bundle.aggregated_signature.to_bytes())),
+            },
+            "cat_change_mojos": cat_change.to_string(),
+            "input_count": req.input_coins.len(),
+            "total_input_mojos": total_input.to_string(),
+        })
+        .to_string())
+    }
+
+    /// Transfer an NFT to a new owner.
+    ///
+    /// We re-fetch the parent spend from coinset and reconstruct the `Nft`
+    /// via `Nft::parse_child` — that's the authoritative source for the
+    /// `Proof` / `NftInfo` (which we don't persist in the JS-side snapshot).
+    ///
+    /// Optional XCH fee: pass `fee_input_coins[]` in the same shape as
+    /// `send_xch.input_coins`. If `fee_mojos == 0`, omit them.
+    ///
+    /// Params:
+    /// ```
+    /// {
+    ///   fingerprint: u32,
+    ///   coin_id: "0x...",
+    ///   parent_coin_info: "0x...",
+    ///   recipient_address: "xch1...",
+    ///   derivation_index: u32,             // OUR index holding the NFT
+    ///   fee_mojos?: "0",
+    ///   fee_input_coins?: [{ parent_coin_info, puzzle_hash, amount,
+    ///                        derivation_index }],
+    ///   fee_change_index?: u32,
+    ///   endpoint?: "mainnet" | "testnet11" | "<url>",
+    ///   broadcast?: bool (default true),
+    /// }
+    /// ```
+    async fn transfer_nft(&self, params_json: &str) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{
+            chia::{
+                bls::{sign, Signature},
+                consensus::consensus_constants::ConsensusConstants,
+                protocol::SpendBundle,
+            },
+            clvmr::serde::node_from_bytes,
+            driver::{Nft, Puzzle, SpendContext, StandardLayer},
+            signer::{AggSigConstants, RequiredBlsSignature, RequiredSignature},
+            types::MAINNET_CONSTANTS,
+        };
+
+        #[derive(Deserialize)]
+        struct FeeCoinJson {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+            derivation_index: u32,
+        }
+        #[derive(Deserialize)]
+        struct Req {
+            fingerprint: u32,
+            coin_id: String,
+            #[serde(default)]
+            parent_coin_info: Option<String>,
+            recipient_address: String,
+            derivation_index: u32,
+            #[serde(default = "default_zero_mojos_nft")]
+            fee_mojos: String,
+            #[serde(default)]
+            fee_input_coins: Vec<FeeCoinJson>,
+            #[serde(default)]
+            fee_change_index: Option<u32>,
+            #[serde(default)]
+            endpoint: Option<String>,
+            #[serde(default = "default_true_nft")]
+            broadcast: bool,
+        }
+        fn default_zero_mojos_nft() -> String {
+            "0".to_string()
+        }
+        fn default_true_nft() -> bool {
+            true
+        }
+
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let fee: u64 = req
+            .fee_mojos
+            .parse()
+            .map_err(|_| EngineError::InvalidParams("fee_mojos u64".to_string()))?;
+        if fee > 0 && req.fee_input_coins.is_empty() {
+            return Err(EngineError::InvalidParams(
+                "fee_input_coins required when fee_mojos > 0".to_string(),
+            ));
+        }
+
+        let coin_id = parse_bytes32(&req.coin_id)?;
+        let recipient = Address::decode(req.recipient_address.trim())
+            .map_err(|e| EngineError::InvalidParams(format!("recipient: {e}")))?;
+        let recipient_ph = recipient.puzzle_hash;
+
+        // 1. Resolve the NFT's parent_coin_info, either from req or by
+        //    looking up the coin record on-chain.
+        let client = make_client(req.endpoint.as_deref());
+        let parent_id: Bytes32 = match req.parent_coin_info.as_deref() {
+            Some(s) => parse_bytes32(s)?,
+            None => {
+                let rec = client
+                    .get_coin_record_by_name(coin_id)
+                    .await
+                    .map_err(|e| EngineError::Internal(format!("coin lookup: {e}")))?
+                    .coin_record
+                    .ok_or_else(|| {
+                        EngineError::InvalidParams(format!(
+                            "coin {} not found",
+                            hex::encode(coin_id)
+                        ))
+                    })?;
+                rec.coin.parent_coin_info
+            }
+        };
+
+        // 2. Fetch the parent's spend to reconstruct the Nft via parse_child.
+        let parent_rec = client
+            .get_coin_record_by_name(parent_id)
+            .await
+            .map_err(|e| EngineError::Internal(format!("parent lookup: {e}")))?
+            .coin_record
+            .ok_or_else(|| {
+                EngineError::InvalidParams(format!(
+                    "parent coin {} not found",
+                    hex::encode(parent_id)
+                ))
+            })?;
+        if !parent_rec.spent {
+            return Err(EngineError::InvalidParams(
+                "parent coin not spent — NFT not yet on chain?".to_string(),
+            ));
+        }
+        let parent_spend_res = client
+            .get_puzzle_and_solution(parent_id, Some(parent_rec.spent_block_index))
+            .await
+            .map_err(|e| EngineError::Internal(format!("parent spend: {e}")))?;
+        let parent_spend = parent_spend_res
+            .coin_solution
+            .ok_or_else(|| EngineError::Internal("missing parent coin solution".to_string()))?;
+
+        let mut ctx = SpendContext::new();
+        let parent_puzzle_ptr = node_from_bytes(&mut *ctx, parent_spend.puzzle_reveal.as_ref())
+            .map_err(|e| EngineError::Internal(format!("parent puzzle parse: {e}")))?;
+        let parent_solution_ptr = node_from_bytes(&mut *ctx, parent_spend.solution.as_ref())
+            .map_err(|e| EngineError::Internal(format!("parent solution parse: {e}")))?;
+        let parent_puzzle = Puzzle::parse(&ctx, parent_puzzle_ptr);
+
+        let nft = Nft::parse_child(
+            &mut *ctx,
+            parent_spend.coin,
+            parent_puzzle,
+            parent_solution_ptr,
+        )
+        .map_err(|e| EngineError::Internal(format!("Nft::parse_child: {e}")))?
+        .ok_or_else(|| {
+            EngineError::Internal(
+                "parent didn't produce a parseable NFT child".to_string(),
+            )
+        })?;
+
+        if nft.coin.coin_id() != coin_id {
+            return Err(EngineError::Internal(format!(
+                "parent's NFT child coin {} != requested {}",
+                hex::encode(nft.coin.coin_id()),
+                hex::encode(coin_id)
+            )));
+        }
+
+        // 3. Verify we own the NFT's p2 inner puzzle.
+        let master_sk = self.unlocked_sk(req.fingerprint)?;
+        let our_intermediate = master_to_wallet_unhardened(&master_sk, req.derivation_index);
+        let our_synthetic = our_intermediate.derive_synthetic();
+        let our_pk = our_synthetic.public_key();
+        let our_inner_ph: Bytes32 = StandardArgs::curry_tree_hash(our_pk).into();
+        if our_inner_ph != nft.info.p2_puzzle_hash {
+            return Err(EngineError::InvalidParams(format!(
+                "derivation_index {} doesn't match NFT's p2_puzzle_hash {}",
+                req.derivation_index,
+                hex::encode(nft.info.p2_puzzle_hash)
+            )));
+        }
+
+        // 4. Build the inner spend that transfers + return the StandardLayer
+        //    to be used as the inner layer of Nft::transfer.
+        let standard_layer = StandardLayer::new(our_pk);
+        let extra_conditions = Conditions::new();
+        let _new_nft = nft
+            .transfer(&mut ctx, &standard_layer, recipient_ph, extra_conditions)
+            .map_err(|e| EngineError::Internal(format!("Nft::transfer: {e}")))?;
+
+        // 5. Pay the optional XCH fee.
+        struct FeeKey {
+            sk: SecretKey,
+            pk: PublicKey,
+        }
+        let mut fee_keys: Vec<FeeKey> = Vec::new();
+        if fee > 0 {
+            let total_in: u64 = req.fee_input_coins.iter().try_fold(0u64, |acc, c| {
+                let amt: u64 = c
+                    .amount
+                    .parse()
+                    .map_err(|_| EngineError::InvalidParams("fee coin amount u64".to_string()))?;
+                acc.checked_add(amt)
+                    .ok_or_else(|| EngineError::InvalidParams("fee sum overflow".to_string()))
+            })?;
+            if total_in < fee {
+                return Err(EngineError::InvalidParams(format!(
+                    "fee_input_coins sum {total_in} < fee {fee}"
+                )));
+            }
+            let change_index = req.fee_change_index.unwrap_or(req.derivation_index);
+            let change_intermediate = master_to_wallet_unhardened(&master_sk, change_index);
+            let change_pk = change_intermediate.derive_synthetic().public_key();
+            let change_ph: Bytes32 = StandardArgs::curry_tree_hash(change_pk).into();
+            let change = total_in - fee;
+
+            for (i, c) in req.fee_input_coins.iter().enumerate() {
+                let parent = parse_bytes32(&c.parent_coin_info)?;
+                let outer_ph = parse_bytes32(&c.puzzle_hash)?;
+                let amt: u64 = c.amount.parse().unwrap();
+                let coin = Coin::new(parent, outer_ph, amt);
+
+                let fee_intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+                let fee_synthetic = fee_intermediate.derive_synthetic();
+                let fee_pk = fee_synthetic.public_key();
+                let derived_ph: Bytes32 = StandardArgs::curry_tree_hash(fee_pk).into();
+                if derived_ph != outer_ph {
+                    return Err(EngineError::InvalidParams(format!(
+                        "fee_input_coins[{i}] puzzle_hash doesn't match derivation_index"
+                    )));
+                }
+
+                let conditions = if i == 0 {
+                    let mut c = Conditions::new().reserve_fee(fee);
+                    if change > 0 {
+                        c = c.create_coin(change_ph, change, ctx.hint(change_ph).unwrap());
+                    }
+                    c
+                } else {
+                    Conditions::new()
+                };
+                let p2_spend = StandardLayer::new(fee_pk)
+                    .spend_with_conditions(&mut ctx, conditions)
+                    .map_err(|e| {
+                        EngineError::Internal(format!("fee p2 spend: {e}"))
+                    })?;
+                ctx.spend(coin, p2_spend)
+                    .map_err(|e| EngineError::Internal(format!("fee spend: {e}")))?;
+                fee_keys.push(FeeKey {
+                    sk: fee_synthetic,
+                    pk: fee_pk,
+                });
+            }
+        }
+
+        let coin_spends = ctx.take();
+
+        // 6. Sign required AGG_SIGs.
+        let constants: &ConsensusConstants = &MAINNET_CONSTANTS;
+        let agg_sig_consts = AggSigConstants::new(constants.agg_sig_me_additional_data);
+        let required = RequiredSignature::from_coin_spends(
+            &mut ctx,
+            &coin_spends,
+            &agg_sig_consts,
+        )
+        .map_err(|e| EngineError::Internal(format!("required_signatures: {e}")))?;
+
+        let mut sks_by_pk: std::collections::HashMap<Vec<u8>, SecretKey> =
+            std::collections::HashMap::new();
+        sks_by_pk.insert(our_pk.to_bytes().to_vec(), our_synthetic.clone());
+        for k in &fee_keys {
+            sks_by_pk.insert(k.pk.to_bytes().to_vec(), k.sk.clone());
+        }
+
+        let mut aggregated = Signature::default();
+        for r in required {
+            match r {
+                RequiredSignature::Bls(RequiredBlsSignature {
+                    public_key,
+                    raw_message,
+                    appended_info,
+                    domain_string,
+                }) => {
+                    let pk_bytes = public_key.to_bytes().to_vec();
+                    let sk = sks_by_pk.get(&pk_bytes).ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "no secret key for pubkey {}",
+                            hex::encode(&pk_bytes)
+                        ))
+                    })?;
+                    let mut msg = raw_message.to_vec();
+                    msg.extend_from_slice(&appended_info);
+                    if let Some(domain) = domain_string {
+                        msg.extend_from_slice(&domain);
+                    }
+                    aggregated.aggregate(&sign(sk, &msg));
+                }
+                RequiredSignature::Secp(_) => {
+                    return Err(EngineError::Internal(
+                        "SECP not supported in transfer_nft".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let bundle = SpendBundle::new(coin_spends.clone(), aggregated);
+        let tx_id = bundle.name();
+
+        let mut status = "DRY_RUN".to_string();
+        let mut error: Option<String> = None;
+        if req.broadcast {
+            let res = client
+                .push_tx(bundle.clone())
+                .await
+                .map_err(|e| EngineError::Internal(format!("push_tx: {e}")))?;
+            status = res.status;
+            error = res.error;
+        }
+
+        Ok(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode(tx_id)),
+            "status": status,
+            "error": error,
+            "spend_bundle": {
+                "coin_spends": coin_spends.iter().map(serialize_coin_spend).collect::<Vec<_>>(),
+                "aggregated_signature": format!("0x{}", hex::encode(bundle.aggregated_signature.to_bytes())),
+            },
+            "launcher_id": format!("0x{}", hex::encode(nft.info.launcher_id)),
+            "recipient_puzzle_hash": format!("0x{}", hex::encode(recipient_ph)),
+        })
+        .to_string())
+    }
+
+    /// Decode an "offer1..." string into its component spends and an
+    /// arbitrage summary (what's offered, what's requested). Read-only —
+    /// no signing, no network. UI uses this to display an offer before
+    /// the user decides to accept it.
+    ///
+    /// Returns a JSON describing the offer's offered/requested coins +
+    /// amounts. Note that full make/take of offers (with royalty handling
+    /// and settlement-puzzle bookkeeping) is intentionally not yet
+    /// implemented; the JS side should treat this as a parse-only call.
+    async fn decode_offer(&self, params_json: &str) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{clvmr::Allocator, driver::{decode_offer, Offer}};
+
+        #[derive(Deserialize)]
+        struct Req {
+            offer: String,
+        }
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let bundle = decode_offer(req.offer.trim())
+            .map_err(|e| EngineError::InvalidParams(format!("decode_offer: {e}")))?;
+
+        let mut allocator = Allocator::new();
+        let offer = Offer::from_spend_bundle(&mut allocator, &bundle)
+            .map_err(|e| EngineError::Internal(format!("Offer::from_spend_bundle: {e}")))?;
+        let arb = offer.arbitrage();
+
+        // Summarise CAT amounts on each side.
+        let offered_cats: Vec<_> = arb
+            .offered
+            .cats
+            .iter()
+            .map(|(k, v)| {
+                serde_json::json!({
+                    "asset_id": format!("0x{}", hex::encode(k)),
+                    "amount": v.to_string(),
+                })
+            })
+            .collect();
+        let requested_cats: Vec<_> = arb
+            .requested
+            .cats
+            .iter()
+            .map(|(k, v)| {
+                serde_json::json!({
+                    "asset_id": format!("0x{}", hex::encode(k)),
+                    "amount": v.to_string(),
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "offered": {
+                "xch_mojos": arb.offered.xch.to_string(),
+                "cats": offered_cats,
+                "nft_launcher_ids": arb.offered.nfts.iter()
+                    .map(|l| format!("0x{}", hex::encode(l)))
+                    .collect::<Vec<_>>(),
+            },
+            "requested": {
+                "xch_mojos": arb.requested.xch.to_string(),
+                "cats": requested_cats,
+                "nft_launcher_ids": arb.requested.nfts.iter()
+                    .map(|l| format!("0x{}", hex::encode(l)))
+                    .collect::<Vec<_>>(),
+            },
+            "coin_spends_count": bundle.coin_spends.len(),
+            "offered_royalties": offer.requested_royalties().iter().map(|r| {
+                serde_json::json!({
+                    "nft_launcher_id": format!("0x{}", hex::encode(r.launcher_id)),
+                    "royalty_basis_points": r.basis_points,
+                    "royalty_puzzle_hash": format!("0x{}", hex::encode(r.puzzle_hash)),
+                })
+            }).collect::<Vec<_>>(),
+        })
+        .to_string())
+    }
+
+    /// Take an "offer1..." string by spending our own coins to fulfill the
+    /// requested payments + the offered side's settlement assertions.
+    ///
+    /// Uses the SDK's high-level `Spends` action system: we add our taker
+    /// inputs (XCH coins, optional CAT coins) alongside the offered coins,
+    /// apply the maker's requested payment actions, and let the SDK figure
+    /// out the change, royalties, and AGG_SIG bookkeeping. Royalty payouts
+    /// for offered NFTs are handled automatically through `apply`.
+    ///
+    /// Note: `make_offer` is intentionally out-of-scope here — it lives in
+    /// a separate endpoint to be added later. We also do *not* poll for
+    /// transaction confirmation: callers should reuse the existing
+    /// `check_coins_spent` flow that `send_xch` uses for status tracking.
+    ///
+    /// Params:
+    /// ```
+    /// {
+    ///   fingerprint: u32,
+    ///   offer: "offer1...",
+    ///   input_coins: [{ parent_coin_info, puzzle_hash, amount,
+    ///                   derivation_index }],
+    ///   input_cats?: [{ parent_coin_info, puzzle_hash, amount,
+    ///                   inner_puzzle_hash, derivation_index,
+    ///                   lineage_proof: { parent_name, inner_puzzle_hash, amount },
+    ///                   asset_id, hidden_puzzle_hash? }],
+    ///   fee_mojos?: "0",
+    ///   endpoint?: "mainnet"|"testnet11"|"<url>",
+    ///   broadcast?: bool (default true)
+    /// }
+    /// ```
+    async fn take_offer(&self, params_json: &str) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{
+            chia::{
+                bls::{sign, Signature},
+                consensus::consensus_constants::ConsensusConstants,
+                protocol::SpendBundle,
+                puzzle_types::LineageProof,
+            },
+            clvmr::Allocator,
+            driver::{
+                decode_offer, Action, Cat, CatInfo, Offer, Relation, SpendContext, Spends,
+            },
+            signer::{AggSigConstants, RequiredBlsSignature, RequiredSignature},
+            types::MAINNET_CONSTANTS,
+        };
+        use indexmap::IndexMap;
+
+        #[derive(Deserialize)]
+        struct InputCoinJson {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+            derivation_index: u32,
+        }
+        #[derive(Deserialize)]
+        struct LineageJson {
+            parent_name: String,
+            inner_puzzle_hash: String,
+            amount: String,
+        }
+        #[derive(Deserialize)]
+        struct InputCatJson {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+            inner_puzzle_hash: String,
+            derivation_index: u32,
+            lineage_proof: LineageJson,
+            asset_id: String,
+            #[serde(default)]
+            hidden_puzzle_hash: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Req {
+            fingerprint: u32,
+            offer: String,
+            #[serde(default)]
+            input_coins: Vec<InputCoinJson>,
+            #[serde(default)]
+            input_cats: Vec<InputCatJson>,
+            #[serde(default = "default_zero_mojos_take")]
+            fee_mojos: String,
+            #[serde(default)]
+            endpoint: Option<String>,
+            #[serde(default = "default_true_take")]
+            broadcast: bool,
+        }
+        fn default_zero_mojos_take() -> String {
+            "0".to_string()
+        }
+        fn default_true_take() -> bool {
+            true
+        }
+
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let fee: u64 = req
+            .fee_mojos
+            .parse()
+            .map_err(|_| EngineError::InvalidParams("fee_mojos must be u64".to_string()))?;
+
+        if req.input_coins.is_empty() && req.input_cats.is_empty() {
+            return Err(EngineError::InvalidParams(
+                "need at least one input coin or input cat".to_string(),
+            ));
+        }
+
+        // 1. Decode the offer + reconstruct Offer view.
+        let bundle = decode_offer(req.offer.trim())
+            .map_err(|e| EngineError::InvalidParams(format!("decode_offer: {e}")))?;
+
+        let mut allocator = Allocator::new();
+        let offer = Offer::from_spend_bundle(&mut allocator, &bundle)
+            .map_err(|e| EngineError::Internal(format!("Offer::from_spend_bundle: {e}")))?;
+
+        // 2. Derive synthetic keys for every taker input + build pk/sk maps.
+        let master_sk = self.unlocked_sk(req.fingerprint)?;
+
+        struct ParsedXchInput {
+            coin: Coin,
+            sk: SecretKey,
+            pk: PublicKey,
+            inner_ph: Bytes32,
+        }
+        struct ParsedCatInput {
+            cat: Cat,
+            sk: SecretKey,
+            pk: PublicKey,
+            inner_ph: Bytes32,
+        }
+
+        let mut parsed_xch: Vec<ParsedXchInput> = Vec::with_capacity(req.input_coins.len());
+        for (i, c) in req.input_coins.iter().enumerate() {
+            let amount_u: u64 = c.amount.parse().map_err(|_| {
+                EngineError::InvalidParams(format!("input_coins[{i}].amount must be u64"))
+            })?;
+            let parent = parse_bytes32(&c.parent_coin_info)?;
+            let coin_ph = parse_bytes32(&c.puzzle_hash)?;
+            let coin = Coin::new(parent, coin_ph, amount_u);
+            let intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+            let synthetic_sk = intermediate.derive_synthetic();
+            let synthetic_pk = synthetic_sk.public_key();
+            let derived_ph: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
+            if derived_ph != coin_ph {
+                return Err(EngineError::InvalidParams(format!(
+                    "input_coins[{i}] puzzle_hash {} doesn't match derivation_index {}",
+                    hex::encode(coin_ph),
+                    c.derivation_index
+                )));
+            }
+            parsed_xch.push(ParsedXchInput {
+                coin,
+                sk: synthetic_sk,
+                pk: synthetic_pk,
+                inner_ph: derived_ph,
+            });
+        }
+
+        let mut parsed_cats: Vec<ParsedCatInput> = Vec::with_capacity(req.input_cats.len());
+        for (i, c) in req.input_cats.iter().enumerate() {
+            let amt: u64 = c.amount.parse().map_err(|_| {
+                EngineError::InvalidParams(format!("input_cats[{i}].amount must be u64"))
+            })?;
+            let parent = parse_bytes32(&c.parent_coin_info)?;
+            let outer_ph = parse_bytes32(&c.puzzle_hash)?;
+            let inner_ph = parse_bytes32(&c.inner_puzzle_hash)?;
+            let hidden_ph = c
+                .hidden_puzzle_hash
+                .as_deref()
+                .map(parse_bytes32)
+                .transpose()?;
+            let asset_id = parse_bytes32(&c.asset_id)?;
+            let lineage_parent_name = parse_bytes32(&c.lineage_proof.parent_name)?;
+            let lineage_inner_ph = parse_bytes32(&c.lineage_proof.inner_puzzle_hash)?;
+            let lineage_amount: u64 = c.lineage_proof.amount.parse().map_err(|_| {
+                EngineError::InvalidParams(format!(
+                    "input_cats[{i}].lineage_proof.amount must be u64"
+                ))
+            })?;
+
+            let intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+            let synthetic_sk = intermediate.derive_synthetic();
+            let synthetic_pk = synthetic_sk.public_key();
+            let derived_inner: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
+            if derived_inner != inner_ph {
+                return Err(EngineError::InvalidParams(format!(
+                    "input_cats[{i}].inner_puzzle_hash {} doesn't match derivation_index {}",
+                    hex::encode(inner_ph),
+                    c.derivation_index
+                )));
+            }
+
+            let cat = Cat {
+                coin: Coin::new(parent, outer_ph, amt),
+                lineage_proof: Some(LineageProof {
+                    parent_parent_coin_info: lineage_parent_name,
+                    parent_inner_puzzle_hash: lineage_inner_ph,
+                    parent_amount: lineage_amount,
+                }),
+                info: CatInfo {
+                    asset_id,
+                    hidden_puzzle_hash: hidden_ph,
+                    p2_puzzle_hash: inner_ph,
+                },
+            };
+            parsed_cats.push(ParsedCatInput {
+                cat,
+                sk: synthetic_sk,
+                pk: synthetic_pk,
+                inner_ph,
+            });
+        }
+
+        // 3. Pick the taker's first p2 inner_ph as the change puzzle hash.
+        let taker_first_p2_ph: Bytes32 = if let Some(first) = parsed_xch.first() {
+            first.inner_ph
+        } else {
+            // No XCH inputs — fall back to first CAT input's p2 inner.
+            parsed_cats
+                .first()
+                .map(|c| c.inner_ph)
+                .ok_or_else(|| {
+                    EngineError::InvalidParams("no taker inputs provided".to_string())
+                })?
+        };
+
+        // 4. Build the Spends. We need a fresh allocator/ctx because the SDK
+        //    `Offer::from_spend_bundle` borrowed `allocator`; for the taker
+        //    spend we want a clean `SpendContext`.
+        let mut ctx = SpendContext::new();
+        let mut spends = Spends::new(taker_first_p2_ph);
+
+        // Add the offered coins (settlement-paid by the maker side).
+        spends.add(offer.offered_coins().clone());
+
+        // Add taker XCH inputs.
+        for p in &parsed_xch {
+            spends.add(p.coin);
+        }
+
+        // Add taker CAT inputs.
+        for p in &parsed_cats {
+            spends.add(p.cat);
+        }
+
+        // 5. Apply maker's requested payments + optional fee as actions.
+        let mut actions: Vec<Action> = offer.requested_payments().actions();
+        if fee > 0 {
+            actions.push(Action::fee(fee));
+        }
+
+        let deltas = spends
+            .apply(&mut ctx, &actions)
+            .map_err(|e| EngineError::Internal(format!("Spends::apply: {e}")))?;
+
+        // 6. Build pk lookup table keyed by p2_puzzle_hash for finish_with_keys
+        //    and parallel sk lookup keyed by pk bytes for signing.
+        let mut synthetic_keys: IndexMap<Bytes32, PublicKey> = IndexMap::new();
+        let mut sks_by_pk: std::collections::HashMap<Vec<u8>, SecretKey> =
+            std::collections::HashMap::new();
+        for p in &parsed_xch {
+            synthetic_keys.insert(p.inner_ph, p.pk);
+            sks_by_pk.insert(p.pk.to_bytes().to_vec(), p.sk.clone());
+        }
+        for p in &parsed_cats {
+            synthetic_keys.insert(p.inner_ph, p.pk);
+            sks_by_pk.insert(p.pk.to_bytes().to_vec(), p.sk.clone());
+        }
+
+        spends
+            .finish_with_keys(&mut ctx, &deltas, Relation::AssertConcurrent, &synthetic_keys)
+            .map_err(|e| EngineError::Internal(format!("Spends::finish_with_keys: {e}")))?;
+
+        let coin_spends = ctx.take();
+
+        // 7. Sign all required AGG_SIG signatures from our taker spends.
+        //    Maker-side settlement coins don't need signatures (their sigs
+        //    are already in the offer's input spend bundle).
+        let constants: &ConsensusConstants = &MAINNET_CONSTANTS;
+        let agg_sig_consts = AggSigConstants::new(constants.agg_sig_me_additional_data);
+        let required = RequiredSignature::from_coin_spends(
+            &mut ctx,
+            &coin_spends,
+            &agg_sig_consts,
+        )
+        .map_err(|e| EngineError::Internal(format!("required_signatures: {e}")))?;
+
+        let mut aggregated = Signature::default();
+        for r in required {
+            match r {
+                RequiredSignature::Bls(RequiredBlsSignature {
+                    public_key,
+                    raw_message,
+                    appended_info,
+                    domain_string,
+                }) => {
+                    let pk_bytes = public_key.to_bytes().to_vec();
+                    let sk = sks_by_pk.get(&pk_bytes).ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "no secret key for pubkey {} (not among taker inputs)",
+                            hex::encode(&pk_bytes)
+                        ))
+                    })?;
+                    let mut msg = raw_message.to_vec();
+                    msg.extend_from_slice(&appended_info);
+                    if let Some(domain) = domain_string {
+                        msg.extend_from_slice(&domain);
+                    }
+                    aggregated.aggregate(&sign(sk, &msg));
+                }
+                RequiredSignature::Secp(_) => {
+                    return Err(EngineError::Internal(
+                        "SECP signatures not supported in take_offer".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // 8. Combine maker's settlement spends with our taker spends + sig.
+        let taker_bundle = SpendBundle::new(coin_spends, aggregated);
+        let spend_bundle = offer.take(taker_bundle);
+
+        // 9. Optionally push to coinset.
+        let mut status = "DRY_RUN".to_string();
+        let mut error: Option<String> = None;
+        if req.broadcast {
+            let client = make_client(req.endpoint.as_deref());
+            let res = client
+                .push_tx(spend_bundle.clone())
+                .await
+                .map_err(|e| EngineError::Internal(format!("push_tx: {e}")))?;
+            status = res.status;
+            error = res.error;
+        }
+
+        let tx_id = spend_bundle.name();
+        Ok(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode(tx_id)),
+            "status": status,
+            "error": error,
+            "spend_bundle": {
+                "coin_spends": spend_bundle.coin_spends.iter().map(serialize_coin_spend).collect::<Vec<_>>(),
+                "aggregated_signature": format!("0x{}", hex::encode(spend_bundle.aggregated_signature.to_bytes())),
+            },
+            "input_xch_count": parsed_xch.len(),
+            "input_cat_count": parsed_cats.len(),
+        })
+        .to_string())
     }
 
     /// Discover NFT receipts by hint matching + parse with chia-sdk-driver.
@@ -164,13 +1268,90 @@ impl SageEngine {
     ///   royalty_basis_points, p2_puzzle_hash, confirmed_block_index,
     ///   spent }] }`.
     async fn scan_nfts(&self, params_json: &str) -> Result<String, EngineError> {
-        use chia_wallet_sdk::{
-            chia::puzzle_types::nft::NftMetadata,
-            clvm_traits::FromClvm,
-            clvmr::serde::node_from_bytes,
-            driver::{Nft, Puzzle, SpendContext},
-        };
+        // Backwards-compat wrapper: run phase-1 (hint scan) then phase-2
+        // (parent fetch + CLVM parse) in sequence and merge the outputs to
+        // match the legacy response shape. JS callers that have not yet
+        // migrated to the split endpoints keep working identically.
+        let hints_json = self.nft_scan_hints(params_json).await?;
+        let hints_val: serde_json::Value = serde_json::from_str(&hints_json)
+            .map_err(|e| EngineError::Internal(format!("nft_scan_hints output: {e}")))?;
 
+        let candidates = hints_val
+            .get("candidates")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let peak_height = hints_val.get("peak_height").cloned().unwrap_or(serde_json::Value::Null);
+        let failed_hints = hints_val
+            .get("failed_hints")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let scanned_inner_hashes = hints_val
+            .get("scanned_inner_hashes")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(0));
+
+        // Forward the original endpoint into the parse call so the parent
+        // get_puzzle_and_solution requests hit the same network. Pull
+        // `testnet` out of the inbound params so the wrapper response can
+        // echo it back as before.
+        #[derive(Deserialize)]
+        struct EndpointAndTestnet {
+            #[serde(default)]
+            endpoint: Option<String>,
+            #[serde(default)]
+            testnet: bool,
+        }
+        let et: EndpointAndTestnet = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let parse_req = serde_json::json!({
+            "endpoint": et.endpoint,
+            "candidates": candidates,
+        });
+        let parsed_json = self.nft_parse_candidates(&parse_req.to_string()).await?;
+        let parsed_val: serde_json::Value = serde_json::from_str(&parsed_json)
+            .map_err(|e| EngineError::Internal(format!("nft_parse_candidates output: {e}")))?;
+        let nfts = parsed_val
+            .get("nfts")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+
+        Ok(serde_json::json!({
+            "nfts": nfts,
+            "scanned_inner_hashes": scanned_inner_hashes,
+            "peak_height": peak_height,
+            "testnet": et.testnet,
+            "failed_hints": failed_hints,
+        })
+        .to_string())
+    }
+
+    /// Phase 1 of the split NFT scan — fetch hint records only.
+    ///
+    /// Does NOT touch parent coins, puzzle/solution, or CLVM. Designed to
+    /// finish under Chrome MV3's 60-second service-worker cap even on deep
+    /// wallets so JS can persist the raw candidate set before the SW gets
+    /// killed and re-spawned for phase 2.
+    ///
+    /// Same input shape as `scan_nfts`. Output is a `candidates[]` array
+    /// carrying the minimum data the parse phase needs: hint, coin, coin_id,
+    /// confirmation status, and the (derivation_index, derivation_kind) the
+    /// hint came from. JS persists this list and feeds it back to
+    /// `nft_parse_candidates` in chunks sized to fit a fresh SW lifetime.
+    async fn nft_scan_hints(&self, params_json: &str) -> Result<String, EngineError> {
+        #[derive(Deserialize)]
+        struct ExtraInnerPh {
+            puzzle_hash: String,
+            derivation_index: u32,
+            /// "unhardened" | "hardened" — defaults to "hardened" since the
+            /// only reason JS pre-derives + injects is to cover the hardened
+            /// path that the engine can't derive from `master_public_key`.
+            #[serde(default = "default_hardened_kind")]
+            kind: String,
+        }
+        fn default_hardened_kind() -> String {
+            "hardened".to_string()
+        }
         #[derive(Deserialize)]
         struct Req {
             #[serde(default)]
@@ -185,11 +1366,20 @@ impl SageEngine {
             testnet: bool,
             #[serde(default)]
             endpoint: Option<String>,
+            /// Optional per-hint cursor map (`{ "0x<hint_hex>": <start_height> }`).
+            /// Missing keys → full sweep from genesis (legacy behavior).
+            #[serde(default)]
+            hint_start_heights: Option<std::collections::HashMap<String, u32>>,
+            /// Pre-derived inner puzzle hashes to fan out IN ADDITION to the
+            /// ones the engine derives unhardened from `master_public_key`.
+            #[serde(default)]
+            extra_inner_phs: Vec<ExtraInnerPh>,
         }
         fn default_nft_count() -> u32 {
             50
         }
 
+        let _ = params_json; // suppress unused warning in case of early return
         let req: Req = serde_json::from_str(params_json)
             .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
         if req.count == 0 || req.count > 200 {
@@ -198,67 +1388,325 @@ impl SageEngine {
                 req.count
             )));
         }
+        let _ = req.testnet; // echo-back lives on the wrapper, not here
         let master_pk =
             self.resolve_master_pk(req.fingerprint, req.master_public_key.as_deref())?;
 
-        // Inner puzzle hashes — same set used for XCH/CAT detection.
+        // Inner puzzle hashes — same set used for XCH/CAT detection. Build a
+        // parallel `ph → (index, kind)` map so candidates carry the
+        // derivation hint forward.
         let mut inner_phs: Vec<Bytes32> = Vec::with_capacity(req.count as usize);
+        let mut ph_meta: std::collections::HashMap<Bytes32, (u32, &'static str)> =
+            std::collections::HashMap::new();
         for i in 0..req.count {
             let idx = req.start + i;
             let intermediate_pk = master_to_wallet_unhardened(&master_pk, idx);
             let synthetic_pk = intermediate_pk.derive_synthetic();
             let inner_ph: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
             inner_phs.push(inner_ph);
+            ph_meta.entry(inner_ph).or_insert((idx, "unhardened"));
+        }
+        for extra in &req.extra_inner_phs {
+            let ph = parse_bytes32(&extra.puzzle_hash)?;
+            let kind: &'static str = match extra.kind.as_str() {
+                "hardened" => "hardened",
+                "unhardened" => "unhardened",
+                other => {
+                    return Err(EngineError::InvalidParams(format!(
+                        "extra_inner_phs.kind must be 'hardened' or 'unhardened', got {other}"
+                    )));
+                }
+            };
+            if ph_meta.insert(ph, (extra.derivation_index, kind)).is_none() {
+                inner_phs.push(ph);
+            }
         }
         let inner_phs_set: std::collections::HashSet<Bytes32> =
             inner_phs.iter().copied().collect();
 
         let client = make_client(req.endpoint.as_deref());
 
-        // 1. For each inner_ph, scan hints for incoming NFTs.
-        //    Filter out coins whose puzzle_hash IS one of our PHs (those
-        //    are XCH receives, not NFTs).
-        let mut candidates = Vec::new();
+        let hint_starts: &Option<std::collections::HashMap<String, u32>> =
+            &req.hint_start_heights;
+        let peak_opt: Option<u32> = client
+            .get_blockchain_state()
+            .await
+            .ok()
+            .and_then(|s| s.blockchain_state)
+            .map(|bs| bs.peak.height);
+        let extra_count: usize = req.extra_inner_phs.len();
+        wlog(&format!(
+            "[nft_scan_hints] start: req.start={} count={} extra_inner_phs={} inner_phs_total={}",
+            req.start,
+            req.count,
+            extra_count,
+            inner_phs.len()
+        ));
+        // Sequential per-hint fetch.
+        //
+        // Previously we used futures_util::future::join_all to fan all 5–10
+        // hint requests out concurrently. In WASM that fan-out turned out to
+        // be the root cause of mid-tick SW deaths: reqwest's fetch-backed
+        // client allocates per-request buffers, and N concurrent requests
+        // briefly pin Nx the working set. On long chains of chunks (each
+        // chunk leaks a little to the WASM heap) we'd eventually hit the
+        // wasm-bindgen 4 GiB cap and the runtime traps silently — no panic
+        // hook fires, the SW just vanishes. Serializing the fetches caps
+        // peak memory at one in-flight request and made the bug disappear.
+        // Per-hint cost ~50 ms × 5 = 250 ms per chunk, which is fine since
+        // the only "slow" thing was the unbounded concurrency.
+        let mut hint_results: Vec<(Bytes32, Result<Vec<chia_wallet_sdk::coinset::CoinRecord>, String>)> =
+            Vec::with_capacity(inner_phs.len());
         for hint in &inner_phs {
-            let res = client
-                .get_coin_records_by_hint(*hint, None, None, Some(true))
-                .await
-                .map_err(|e| EngineError::Internal(format!("coinset hint: {e}")))?;
-            for r in res.coin_records.unwrap_or_default() {
-                if inner_phs_set.contains(&r.coin.puzzle_hash) {
-                    continue;
-                }
-                candidates.push((*hint, r));
-            }
+            let key = format!("0x{}", hex::encode(hint));
+            let start_h = hint_starts.as_ref().and_then(|m| m.get(&key).copied());
+            let res = fetch_hint_with_retry(
+                &client,
+                *hint,
+                start_h,
+                peak_opt,
+                Some(false),
+                false,
+            )
+            .await;
+            hint_results.push((*hint, res));
         }
 
-        // 2. For each candidate, fetch the parent's puzzle+solution and try
-        //    Nft::parse_child. Skip ones that don't parse (those will be
-        //    handled by scan_cats / scan_dids).
-        let mut nfts: Vec<serde_json::Value> = Vec::new();
-
-        for (hint, rec) in &candidates {
-            let parent_id = rec.coin.parent_coin_info;
-            let parent_rec = match client.get_coin_record_by_name(parent_id).await {
-                Ok(r) => r.coin_record,
-                Err(_) => continue,
+        let mut failed_hints: Vec<String> = Vec::new();
+        let mut candidates: Vec<serde_json::Value> = Vec::new();
+        for (hint, res) in hint_results {
+            let recs = match res {
+                Ok(r) => r,
+                Err(e) => {
+                    let hex_hint = format!("0x{}", hex::encode(hint));
+                    tracing::warn!(
+                        "nft_scan_hints: giving up on hint {} after {} attempts: {}",
+                        hex_hint,
+                        COINSET_RETRY_ATTEMPTS,
+                        e
+                    );
+                    failed_hints.push(hex_hint);
+                    continue;
+                }
             };
-            let Some(parent_rec) = parent_rec else {
+            let mut per_hint_count = 0u32;
+            for rec in recs {
+                if inner_phs_set.contains(&rec.coin.puzzle_hash) {
+                    continue; // XCH receive — covered elsewhere
+                }
+                if rec.spent {
+                    continue;
+                }
+                let (deriv_idx, deriv_kind) = match ph_meta.get(&hint).copied() {
+                    Some((i, k)) => (
+                        serde_json::Value::from(i),
+                        serde_json::Value::from(k),
+                    ),
+                    None => (serde_json::Value::Null, serde_json::Value::Null),
+                };
+                candidates.push(serde_json::json!({
+                    "hint": format!("0x{}", hex::encode(hint)),
+                    "coin": {
+                        "parent_coin_info": format!("0x{}", hex::encode(rec.coin.parent_coin_info)),
+                        "puzzle_hash": format!("0x{}", hex::encode(rec.coin.puzzle_hash)),
+                        "amount": rec.coin.amount.to_string(),
+                    },
+                    "coin_id": format!("0x{}", hex::encode(rec.coin.coin_id())),
+                    "confirmed_block_index": rec.confirmed_block_index,
+                    "spent": rec.spent,
+                    "spent_block_index": rec.spent_block_index,
+                    "derivation_index": deriv_idx,
+                    "derivation_kind": deriv_kind,
+                }));
+                per_hint_count += 1;
+            }
+            if per_hint_count > 0 {
+                wlog(&format!(
+                    "[nft_scan_hints] hint 0x{}: {} unspent candidates",
+                    hex::encode(hint),
+                    per_hint_count
+                ));
+            }
+        }
+        wlog(&format!(
+            "[nft_scan_hints] total candidates: {}, wasm_heap={:.2}MB",
+            candidates.len(),
+            wasm_memory_bytes() as f64 / (1024.0 * 1024.0),
+        ));
+
+        Ok(serde_json::json!({
+            "candidates": candidates,
+            "peak_height": peak_opt,
+            "failed_hints": failed_hints,
+            "scanned_inner_hashes": inner_phs.len(),
+        })
+        .to_string())
+    }
+
+    /// Phase 2 of the split NFT scan — parse a list of pre-fetched
+    /// candidates into NFT views.
+    ///
+    /// Input is the `candidates[]` array produced by `nft_scan_hints` (or
+    /// a subset of it persisted by JS between SW lifetimes). The endpoint
+    /// is taken from the request so JS can target the same network even
+    /// though phase 1 may have run hours earlier on a different SW.
+    ///
+    /// Output mirrors the legacy `scan_nfts` `nfts[]` per-NFT shape so the
+    /// downstream JSON writer doesn't have to know which phase produced
+    /// each NFT. `unparseable_coin_ids[]` lets JS drop hinted coins that
+    /// turned out to not be NFTs (e.g. CATs / DIDs) from its pending queue
+    /// so it doesn't keep re-trying them on every wake.
+    async fn nft_parse_candidates(
+        &self,
+        params_json: &str,
+    ) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{
+            chia::puzzle_types::nft::NftMetadata,
+            clvm_traits::FromClvm,
+            clvmr::serde::node_from_bytes,
+            driver::{Nft, Puzzle, SpendContext},
+        };
+
+        #[derive(Deserialize)]
+        struct CandidateCoin {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+        }
+        #[derive(Deserialize)]
+        struct Candidate {
+            hint: String,
+            coin: CandidateCoin,
+            #[serde(default)]
+            coin_id: Option<String>,
+            #[serde(default)]
+            confirmed_block_index: u32,
+            #[serde(default)]
+            spent: bool,
+            #[serde(default)]
+            spent_block_index: u32,
+            #[serde(default)]
+            derivation_index: serde_json::Value,
+            #[serde(default)]
+            derivation_kind: serde_json::Value,
+        }
+        #[derive(Deserialize)]
+        struct Req {
+            #[serde(default)]
+            endpoint: Option<String>,
+            candidates: Vec<Candidate>,
+        }
+
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        // Decode candidates into typed form once so we don't repeat hex
+        // parsing in the spend loop.
+        struct ParsedCandidate {
+            hint: Bytes32,
+            coin: chia_wallet_sdk::chia::protocol::Coin,
+            coin_id: Bytes32,
+            confirmed_block_index: u32,
+            spent: bool,
+            spent_block_index: u32,
+            derivation_index: serde_json::Value,
+            derivation_kind: serde_json::Value,
+        }
+        let mut parsed: Vec<ParsedCandidate> = Vec::with_capacity(req.candidates.len());
+        for c in req.candidates {
+            let hint = parse_bytes32(&c.hint)?;
+            let parent = parse_bytes32(&c.coin.parent_coin_info)?;
+            let puzzle_hash = parse_bytes32(&c.coin.puzzle_hash)?;
+            let amount: u64 = c.coin.amount.parse().map_err(|e| {
+                EngineError::InvalidParams(format!("coin.amount: {e}"))
+            })?;
+            let coin = chia_wallet_sdk::chia::protocol::Coin {
+                parent_coin_info: parent,
+                puzzle_hash,
+                amount,
+            };
+            let coin_id = match c.coin_id.as_deref() {
+                Some(s) => parse_bytes32(s)?,
+                None => coin.coin_id(),
+            };
+            parsed.push(ParsedCandidate {
+                hint,
+                coin,
+                coin_id,
+                confirmed_block_index: c.confirmed_block_index,
+                spent: c.spent,
+                spent_block_index: c.spent_block_index,
+                derivation_index: c.derivation_index,
+                derivation_kind: c.derivation_kind,
+            });
+        }
+
+        let client = make_client(req.endpoint.as_deref());
+        wlog(&format!(
+            "[nft_parse_candidates] {} candidates",
+            parsed.len()
+        ));
+
+        // Batched parent record fetch.
+        let parent_id_list: Vec<Bytes32> =
+            parsed.iter().map(|p| p.coin.parent_coin_info).collect();
+        let parent_map: std::collections::HashMap<
+            Bytes32,
+            chia_wallet_sdk::coinset::CoinRecord,
+        > = if parent_id_list.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let recs = fetch_names_with_retry(&client, parent_id_list.clone(), Some(true))
+                .await
+                .map_err(|e| EngineError::Internal(format!("coinset parents: {e}")))?;
+            recs.into_iter().map(|r| (r.coin.coin_id(), r)).collect()
+        };
+
+        let mut spend_fetches: Vec<(usize, Bytes32, u32)> = Vec::new();
+        for (idx, p) in parsed.iter().enumerate() {
+            let Some(parent_rec) = parent_map.get(&p.coin.parent_coin_info) else {
                 continue;
             };
             if !parent_rec.spent {
                 continue;
             }
-            let spend = match client
-                .get_puzzle_and_solution(parent_id, Some(parent_rec.spent_block_index))
-                .await
-            {
+            spend_fetches.push((idx, p.coin.parent_coin_info, parent_rec.spent_block_index));
+        }
+
+        let spends_results = futures_util::future::join_all(spend_fetches.iter().map(
+            |(_, pid, h)| {
+                let client = &client;
+                let pid = *pid;
+                let height = *h;
+                async move { (pid, client.get_puzzle_and_solution(pid, Some(height)).await) }
+            },
+        ))
+        .await;
+
+        let mut nfts: Vec<serde_json::Value> = Vec::new();
+        // Track which candidates produced a successful NFT parse — anything
+        // not in this set ends up in `unparseable_coin_ids` for JS to drop.
+        let mut parsed_ok: std::collections::HashSet<Bytes32> =
+            std::collections::HashSet::new();
+
+        for ((idx, _pid, _h), (_, spend_res)) in
+            spend_fetches.into_iter().zip(spends_results.into_iter())
+        {
+            let p = &parsed[idx];
+            let coin_id_hex = hex::encode(p.coin_id);
+            let spend = match spend_res {
                 Ok(s) => s,
                 Err(_) => continue,
             };
             let Some(coin_spend) = spend.coin_solution else {
                 continue;
             };
+            wlog(&format!(
+                "[nft_parse_candidates]   parse coin 0x{} (puzzle_reveal {}B, solution {}B)",
+                &coin_id_hex[..16.min(coin_id_hex.len())],
+                coin_spend.puzzle_reveal.as_ref().len(),
+                coin_spend.solution.as_ref().len()
+            ));
 
             let mut ctx = SpendContext::new();
             let puzzle_ptr =
@@ -279,16 +1727,21 @@ impl SageEngine {
                 solution_ptr,
             ) {
                 Ok(Some(n)) => n,
-                _ => continue,
+                _ => {
+                    wlog(&format!(
+                        "[nft_parse_candidates]   parse_child returned None for 0x{}",
+                        &coin_id_hex[..16.min(coin_id_hex.len())]
+                    ));
+                    continue;
+                }
             };
 
             // Match on coin_id — Nft::parse_child returns one child but its
             // coin should be the one we're looking at.
-            if nft.coin.coin_id() != rec.coin.coin_id() {
+            if nft.coin.coin_id() != p.coin_id {
                 continue;
             }
 
-            // Decode metadata via NftMetadata::from_clvm.
             let metadata_json = match NftMetadata::from_clvm(&*ctx, nft.info.metadata.ptr()) {
                 Ok(md) => serde_json::json!({
                     "edition_number": md.edition_number,
@@ -306,26 +1759,42 @@ impl SageEngine {
             nfts.push(serde_json::json!({
                 "launcher_id": format!("0x{}", hex::encode(nft.info.launcher_id)),
                 "coin_id": format!("0x{}", hex::encode(nft.coin.coin_id())),
-                "parent_coin_info": format!("0x{}", hex::encode(rec.coin.parent_coin_info)),
-                "puzzle_hash": format!("0x{}", hex::encode(rec.coin.puzzle_hash)),
-                "amount": rec.coin.amount.to_string(),
+                "parent_coin_info": format!("0x{}", hex::encode(p.coin.parent_coin_info)),
+                "puzzle_hash": format!("0x{}", hex::encode(p.coin.puzzle_hash)),
+                "amount": p.coin.amount.to_string(),
                 "metadata": metadata_json,
                 "metadata_updater_puzzle_hash": format!("0x{}", hex::encode(nft.info.metadata_updater_puzzle_hash)),
                 "current_owner_did": nft.info.current_owner.map(|d| format!("0x{}", hex::encode(d))),
                 "royalty_puzzle_hash": format!("0x{}", hex::encode(nft.info.royalty_puzzle_hash)),
                 "royalty_basis_points": nft.info.royalty_basis_points,
                 "p2_puzzle_hash": format!("0x{}", hex::encode(nft.info.p2_puzzle_hash)),
-                "hint": format!("0x{}", hex::encode(hint)),
-                "confirmed_block_index": rec.confirmed_block_index,
-                "spent": rec.spent,
-                "spent_block_index": rec.spent_block_index,
+                "hint": format!("0x{}", hex::encode(p.hint)),
+                "derivation_index": p.derivation_index.clone(),
+                "derivation_kind": p.derivation_kind.clone(),
+                "confirmed_block_index": p.confirmed_block_index,
+                "spent": p.spent,
+                "spent_block_index": p.spent_block_index,
             }));
+            parsed_ok.insert(p.coin_id);
         }
+
+        let unparseable_coin_ids: Vec<String> = parsed
+            .iter()
+            .filter(|p| !parsed_ok.contains(&p.coin_id))
+            .map(|p| format!("0x{}", hex::encode(p.coin_id)))
+            .collect();
+
+        let mem_mb = wasm_memory_bytes() as f64 / (1024.0 * 1024.0);
+        wlog(&format!(
+            "[nft_parse_candidates] DONE: {} nfts, {} unparseable; wasm_heap={:.2}MB",
+            nfts.len(),
+            unparseable_coin_ids.len(),
+            mem_mb,
+        ));
 
         Ok(serde_json::json!({
             "nfts": nfts,
-            "scanned_inner_hashes": inner_phs.len(),
-            "testnet": req.testnet,
+            "unparseable_coin_ids": unparseable_coin_ids,
         })
         .to_string())
     }
@@ -344,12 +1813,83 @@ impl SageEngine {
     ///   "unspent_coin_count", "coins": [{ coin_id, parent, ph, amount,
     ///   inner_puzzle_hash, hint, confirmed_block, spent_block }] }] }`.
     async fn scan_cats(&self, params_json: &str) -> Result<String, EngineError> {
-        use chia_wallet_sdk::{
-            chia::protocol::Program,
-            clvmr::serde::node_from_bytes,
-            driver::{Cat, Puzzle, SpendContext},
-        };
+        // Backwards-compat wrapper: run phase-1 (hint scan) then phase-2
+        // (parent fetch + Cat::parse_children) in sequence and merge the
+        // outputs to match the legacy response shape.
+        let hints_json = self.cat_scan_hints(params_json).await?;
+        let hints_val: serde_json::Value = serde_json::from_str(&hints_json)
+            .map_err(|e| EngineError::Internal(format!("cat_scan_hints output: {e}")))?;
 
+        let candidates = hints_val
+            .get("candidates")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let peak_height = hints_val.get("peak_height").cloned().unwrap_or(serde_json::Value::Null);
+        let failed_hints = hints_val
+            .get("failed_hints")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let scanned_inner_hashes = hints_val
+            .get("scanned_inner_hashes")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(0));
+
+        #[derive(Deserialize)]
+        struct EndpointAndTestnet {
+            #[serde(default)]
+            endpoint: Option<String>,
+            #[serde(default)]
+            testnet: bool,
+        }
+        let et: EndpointAndTestnet = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let parse_req = serde_json::json!({
+            "endpoint": et.endpoint,
+            "candidates": candidates,
+        });
+        let parsed_json = self.cat_parse_candidates(&parse_req.to_string()).await?;
+        let parsed_val: serde_json::Value = serde_json::from_str(&parsed_json)
+            .map_err(|e| EngineError::Internal(format!("cat_parse_candidates output: {e}")))?;
+        let cats = parsed_val
+            .get("cats")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+
+        Ok(serde_json::json!({
+            "cats": cats,
+            "scanned_inner_hashes": scanned_inner_hashes,
+            "peak_height": peak_height,
+            "testnet": et.testnet,
+            "failed_hints": failed_hints,
+        })
+        .to_string())
+    }
+
+    /// Phase 1 of the split CAT scan — fetch hint records only.
+    ///
+    /// CATs differ from NFTs here: the hint sweep uses the WINDOWED form of
+    /// `fetch_hint_with_retry` (`windowed=true`) because a single CAT hint
+    /// can carry years of receipts that blow up the WASM heap on an
+    /// open-ended fetch. Each window still has its own retry budget.
+    ///
+    /// Each candidate carries `derivation_index` + `derivation_kind` for the
+    /// matched hint so phase 2 can echo them back on the parsed coin without
+    /// re-deriving from `master_public_key`. JS persists the candidates and
+    /// feeds them to `cat_parse_candidates` after the SW wakes up again.
+    async fn cat_scan_hints(&self, params_json: &str) -> Result<String, EngineError> {
+        #[derive(Deserialize)]
+        struct ExtraInnerPh {
+            puzzle_hash: String,
+            derivation_index: u32,
+            /// "unhardened" | "hardened" — defaults to "hardened" (see
+            /// `nft_scan_hints`).
+            #[serde(default = "default_hardened_kind")]
+            kind: String,
+        }
+        fn default_hardened_kind() -> String {
+            "hardened".to_string()
+        }
         #[derive(Deserialize)]
         struct Req {
             #[serde(default)]
@@ -364,6 +1904,13 @@ impl SageEngine {
             testnet: bool,
             #[serde(default)]
             endpoint: Option<String>,
+            /// Optional per-hint cursor map (`{ "0x<hint_hex>": <start_height> }`).
+            #[serde(default)]
+            hint_start_heights: Option<std::collections::HashMap<String, u32>>,
+            /// Pre-derived inner puzzle hashes to fan out IN ADDITION to the
+            /// ones the engine derives unhardened from `master_public_key`.
+            #[serde(default)]
+            extra_inner_phs: Vec<ExtraInnerPh>,
         }
         fn default_cat_count() -> u32 {
             50
@@ -377,115 +1924,348 @@ impl SageEngine {
                 req.count
             )));
         }
+        let _ = req.testnet;
         let master_pk =
             self.resolve_master_pk(req.fingerprint, req.master_public_key.as_deref())?;
 
-        // 1. Derive the inner puzzle hashes we'll scan as hints.
+        // Derive the inner puzzle hashes we'll scan as hints + build a
+        // parallel `ph → (derivation_index, kind)` map.
         let mut inner_phs: Vec<Bytes32> = Vec::with_capacity(req.count as usize);
+        let mut ph_meta: std::collections::HashMap<Bytes32, (u32, &'static str)> =
+            std::collections::HashMap::new();
         for i in 0..req.count {
             let idx = req.start + i;
             let intermediate_pk = master_to_wallet_unhardened(&master_pk, idx);
             let synthetic_pk = intermediate_pk.derive_synthetic();
             let inner_ph: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
             inner_phs.push(inner_ph);
+            ph_meta.entry(inner_ph).or_insert((idx, "unhardened"));
+        }
+        for extra in &req.extra_inner_phs {
+            let ph = parse_bytes32(&extra.puzzle_hash)?;
+            let kind: &'static str = match extra.kind.as_str() {
+                "hardened" => "hardened",
+                "unhardened" => "unhardened",
+                other => {
+                    return Err(EngineError::InvalidParams(format!(
+                        "extra_inner_phs.kind must be 'hardened' or 'unhardened', got {other}"
+                    )));
+                }
+            };
+            if ph_meta.insert(ph, (extra.derivation_index, kind)).is_none() {
+                inner_phs.push(ph);
+            }
         }
         let inner_phs_set: std::collections::HashSet<Bytes32> =
             inner_phs.iter().copied().collect();
 
         let client = make_client(req.endpoint.as_deref());
 
-        // 2. For each inner_ph, fetch coins with hint = inner_ph.
-        //    We skip records whose outer puzzle_hash is itself in inner_phs
-        //    (those are XCH receives, already covered by scan_puzzle_hashes).
-        let mut candidates = Vec::new();
+        let hint_starts: &Option<std::collections::HashMap<String, u32>> =
+            &req.hint_start_heights;
+        let peak_opt: Option<u32> = client
+            .get_blockchain_state()
+            .await
+            .ok()
+            .and_then(|s| s.blockchain_state)
+            .map(|bs| bs.peak.height);
+        wlog(&format!(
+            "[cat_scan_hints] start: req.start={} count={} extra_inner_phs={} inner_phs_total={}",
+            req.start,
+            req.count,
+            req.extra_inner_phs.len(),
+            inner_phs.len()
+        ));
+        // See nft_scan_hints for the rationale on serializing these.
+        //
+        // Also: CAT used to use windowed=true (split each hint scan into
+        // ~18 sub-requests of 500k blocks each, newest-first). That was
+        // designed for coinset's old behavior where open-ended queries
+        // timed out on deep history. With include_spent_coins=false the
+        // response is tiny (only unspent CATs hinted to this PH — usually
+        // 0-5 records) so the windowing produces ~180 wasted HTTP calls
+        // per chunk. Each call's request/response churn pushed the WASM
+        // heap toward OOM and silently trapped the SW. windowed=false
+        // here = one open-ended request per hint, matching NFT scan.
+        let mut hint_results: Vec<(Bytes32, Result<Vec<chia_wallet_sdk::coinset::CoinRecord>, String>)> =
+            Vec::with_capacity(inner_phs.len());
         for hint in &inner_phs {
-            let res = client
-                .get_coin_records_by_hint(*hint, None, None, Some(true))
-                .await
-                .map_err(|e| EngineError::Internal(format!("coinset hint: {e}")))?;
-            for r in res.coin_records.unwrap_or_default() {
-                if inner_phs_set.contains(&r.coin.puzzle_hash) {
-                    continue; // XCH receive — covered elsewhere
-                }
-                candidates.push((*hint, r));
-            }
+            let key = format!("0x{}", hex::encode(hint));
+            let start_h = hint_starts.as_ref().and_then(|m| m.get(&key).copied());
+            let res = fetch_hint_with_retry(
+                &client,
+                *hint,
+                start_h,
+                peak_opt,
+                Some(false),
+                false,
+            )
+            .await;
+            hint_results.push((*hint, res));
         }
 
-        // 3. For each candidate, fetch its PARENT's spend, parse via
-        //    Cat::parse_children, and find the child matching this coin.
-        let mut by_asset: std::collections::HashMap<Bytes32, CatBucket> =
-            std::collections::HashMap::new();
-
-        // Parent cache: avoid re-fetching when many siblings share a parent
-        let mut parent_cache: std::collections::HashMap<Bytes32, Option<Vec<Cat>>> =
-            std::collections::HashMap::new();
-
-        for (hint, rec) in &candidates {
-            let parent_id = rec.coin.parent_coin_info;
-            let children = match parent_cache.get(&parent_id) {
-                Some(v) => v.clone(),
-                None => {
-                    // Fetch parent record so we know which block to query
-                    // get_puzzle_and_solution against.
-                    let parent_rec = client
-                        .get_coin_record_by_name(parent_id)
-                        .await
-                        .map_err(|e| EngineError::Internal(format!("coinset parent: {e}")))?;
-                    let parent_rec = parent_rec.coin_record;
-                    let Some(parent_rec) = parent_rec else {
-                        parent_cache.insert(parent_id, None);
-                        continue;
-                    };
-                    if !parent_rec.spent {
-                        parent_cache.insert(parent_id, None);
-                        continue;
-                    }
-                    let spend = client
-                        .get_puzzle_and_solution(
-                            parent_id,
-                            Some(parent_rec.spent_block_index),
-                        )
-                        .await
-                        .map_err(|e| EngineError::Internal(format!("coinset puzzle: {e}")))?;
-                    let Some(coin_spend) = spend.coin_solution else {
-                        parent_cache.insert(parent_id, None);
-                        continue;
-                    };
-
-                    // Parse via chia-sdk-driver
-                    let mut ctx = SpendContext::new();
-                    let puzzle_ptr = node_from_bytes(
-                        &mut *ctx,
-                        coin_spend.puzzle_reveal.as_ref(),
-                    )
-                    .map_err(|e| EngineError::Internal(format!("clvm puzzle: {e}")))?;
-                    let solution_ptr = node_from_bytes(
-                        &mut *ctx,
-                        coin_spend.solution.as_ref(),
-                    )
-                    .map_err(|e| EngineError::Internal(format!("clvm solution: {e}")))?;
-                    let parent_puzzle = Puzzle::parse(&ctx, puzzle_ptr);
-                    let parsed = Cat::parse_children(
-                        &mut *ctx,
-                        coin_spend.coin,
-                        parent_puzzle,
-                        solution_ptr,
-                    )
-                    .map_err(|e| EngineError::Internal(format!("Cat::parse_children: {e}")))?;
-                    parent_cache.insert(parent_id, parsed.clone());
-                    parsed
+        let mut failed_hints: Vec<String> = Vec::new();
+        let mut candidates: Vec<serde_json::Value> = Vec::new();
+        for (hint, res) in hint_results {
+            let recs = match res {
+                Ok(r) => r,
+                Err(e) => {
+                    let hex_hint = format!("0x{}", hex::encode(hint));
+                    tracing::warn!(
+                        "cat_scan_hints: giving up on hint {} after {} attempts: {}",
+                        hex_hint,
+                        COINSET_RETRY_ATTEMPTS,
+                        e
+                    );
+                    failed_hints.push(hex_hint);
+                    continue;
                 }
             };
+            for rec in recs {
+                if inner_phs_set.contains(&rec.coin.puzzle_hash) {
+                    continue; // XCH receive — covered elsewhere
+                }
+                if rec.spent {
+                    continue;
+                }
+                let (deriv_idx, deriv_kind) = match ph_meta.get(&hint).copied() {
+                    Some((i, k)) => (
+                        serde_json::Value::from(i),
+                        serde_json::Value::from(k),
+                    ),
+                    None => (serde_json::Value::Null, serde_json::Value::Null),
+                };
+                candidates.push(serde_json::json!({
+                    "hint": format!("0x{}", hex::encode(hint)),
+                    "coin": {
+                        "parent_coin_info": format!("0x{}", hex::encode(rec.coin.parent_coin_info)),
+                        "puzzle_hash": format!("0x{}", hex::encode(rec.coin.puzzle_hash)),
+                        "amount": rec.coin.amount.to_string(),
+                    },
+                    "coin_id": format!("0x{}", hex::encode(rec.coin.coin_id())),
+                    "confirmed_block_index": rec.confirmed_block_index,
+                    "spent": rec.spent,
+                    "spent_block_index": rec.spent_block_index,
+                    "derivation_index": deriv_idx,
+                    "derivation_kind": deriv_kind,
+                }));
+            }
+        }
+        wlog(&format!(
+            "[cat_scan_hints] total candidates: {}, wasm_heap={:.2}MB",
+            candidates.len(),
+            wasm_memory_bytes() as f64 / (1024.0 * 1024.0),
+        ));
 
-            let Some(children) = children else {
+        Ok(serde_json::json!({
+            "candidates": candidates,
+            "peak_height": peak_opt,
+            "failed_hints": failed_hints,
+            "scanned_inner_hashes": inner_phs.len(),
+        })
+        .to_string())
+    }
+
+    /// Phase 2 of the split CAT scan — parse pre-fetched candidates into
+    /// per-asset rollups.
+    ///
+    /// Does the batched parent record fetch, the concurrent
+    /// `get_puzzle_and_solution` fanout over spent parents, and the
+    /// `Cat::parse_children` decode. Candidates that can't be matched to a
+    /// parsed CAT child (no lineage_proof, parent unparseable, etc.) end up
+    /// in `unparseable_coin_ids` so JS can drop them from its pending queue.
+    async fn cat_parse_candidates(
+        &self,
+        params_json: &str,
+    ) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{
+            clvmr::serde::node_from_bytes,
+            driver::{Cat, Puzzle, SpendContext},
+        };
+
+        #[derive(Deserialize)]
+        struct CandidateCoin {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+        }
+        #[derive(Deserialize)]
+        struct Candidate {
+            hint: String,
+            coin: CandidateCoin,
+            #[serde(default)]
+            coin_id: Option<String>,
+            #[serde(default)]
+            confirmed_block_index: u32,
+            #[serde(default)]
+            spent: bool,
+            #[serde(default)]
+            spent_block_index: u32,
+            #[serde(default)]
+            derivation_index: serde_json::Value,
+            #[serde(default)]
+            derivation_kind: serde_json::Value,
+        }
+        #[derive(Deserialize)]
+        struct Req {
+            #[serde(default)]
+            endpoint: Option<String>,
+            candidates: Vec<Candidate>,
+        }
+
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        struct ParsedCandidate {
+            hint: Bytes32,
+            coin: chia_wallet_sdk::chia::protocol::Coin,
+            coin_id: Bytes32,
+            confirmed_block_index: u32,
+            spent: bool,
+            spent_block_index: u32,
+            derivation_index: serde_json::Value,
+            derivation_kind: serde_json::Value,
+        }
+        let mut parsed_cands: Vec<ParsedCandidate> =
+            Vec::with_capacity(req.candidates.len());
+        for c in req.candidates {
+            let hint = parse_bytes32(&c.hint)?;
+            let parent = parse_bytes32(&c.coin.parent_coin_info)?;
+            let puzzle_hash = parse_bytes32(&c.coin.puzzle_hash)?;
+            let amount: u64 = c.coin.amount.parse().map_err(|e| {
+                EngineError::InvalidParams(format!("coin.amount: {e}"))
+            })?;
+            let coin = chia_wallet_sdk::chia::protocol::Coin {
+                parent_coin_info: parent,
+                puzzle_hash,
+                amount,
+            };
+            let coin_id = match c.coin_id.as_deref() {
+                Some(s) => parse_bytes32(s)?,
+                None => coin.coin_id(),
+            };
+            parsed_cands.push(ParsedCandidate {
+                hint,
+                coin,
+                coin_id,
+                confirmed_block_index: c.confirmed_block_index,
+                spent: c.spent,
+                spent_block_index: c.spent_block_index,
+                derivation_index: c.derivation_index,
+                derivation_kind: c.derivation_kind,
+            });
+        }
+
+        let client = make_client(req.endpoint.as_deref());
+        wlog(&format!(
+            "[cat_parse_candidates] {} candidates",
+            parsed_cands.len()
+        ));
+
+        // Batched parent record fetch over the deduped parent_id set.
+        let unique_parent_ids: Vec<Bytes32> = {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::new();
+            for p in &parsed_cands {
+                let pid = p.coin.parent_coin_info;
+                if seen.insert(pid) {
+                    out.push(pid);
+                }
+            }
+            out
+        };
+        let parent_rec_map: std::collections::HashMap<
+            Bytes32,
+            chia_wallet_sdk::coinset::CoinRecord,
+        > = if unique_parent_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let recs = fetch_names_with_retry(&client, unique_parent_ids.clone(), Some(true))
+                .await
+                .map_err(|e| EngineError::Internal(format!("coinset parents: {e}")))?;
+            recs.into_iter().map(|r| (r.coin.coin_id(), r)).collect()
+        };
+
+        let spent_parents: Vec<(Bytes32, u32)> = unique_parent_ids
+            .iter()
+            .filter_map(|pid| {
+                let prec = parent_rec_map.get(pid)?;
+                if !prec.spent {
+                    return None;
+                }
+                Some((*pid, prec.spent_block_index))
+            })
+            .collect();
+        let spend_results = futures_util::future::join_all(spent_parents.iter().map(
+            |(pid, h)| {
+                let client = &client;
+                let pid = *pid;
+                let height = *h;
+                async move {
+                    let r = client.get_puzzle_and_solution(pid, Some(height)).await;
+                    (pid, r)
+                }
+            },
+        ))
+        .await;
+
+        let mut by_asset: std::collections::HashMap<Bytes32, CatBucket> =
+            std::collections::HashMap::new();
+        let mut parent_cache: std::collections::HashMap<Bytes32, Option<Vec<Cat>>> =
+            std::collections::HashMap::new();
+        for pid in &unique_parent_ids {
+            parent_cache.insert(*pid, None);
+        }
+        for (pid, spend_res) in spend_results {
+            let spend = match spend_res {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(EngineError::Internal(format!("coinset puzzle: {e}")));
+                }
+            };
+            let Some(coin_spend) = spend.coin_solution else {
                 continue;
             };
-            // Match the on-chain coin to the parsed child by coin_id.
-            let coin_id = rec.coin.coin_id();
-            let Some(child) = children.iter().find(|c| c.coin.coin_id() == coin_id) else {
+            let mut ctx = SpendContext::new();
+            let puzzle_ptr = node_from_bytes(&mut *ctx, coin_spend.puzzle_reveal.as_ref())
+                .map_err(|e| EngineError::Internal(format!("clvm puzzle: {e}")))?;
+            let solution_ptr = node_from_bytes(&mut *ctx, coin_spend.solution.as_ref())
+                .map_err(|e| EngineError::Internal(format!("clvm solution: {e}")))?;
+            let parent_puzzle = Puzzle::parse(&ctx, puzzle_ptr);
+            let parsed = Cat::parse_children(
+                &mut *ctx,
+                coin_spend.coin,
+                parent_puzzle,
+                solution_ptr,
+            )
+            .map_err(|e| EngineError::Internal(format!("Cat::parse_children: {e}")))?;
+            parent_cache.insert(pid, parsed);
+        }
+
+        // Track which candidates produced a successful child match — anything
+        // not in this set ends up in `unparseable_coin_ids` for JS to drop.
+        let mut parsed_ok: std::collections::HashSet<Bytes32> =
+            std::collections::HashSet::new();
+
+        // Per-candidate carry of (deriv_idx, deriv_kind) — used by the
+        // emission loop below since by_asset has already lost the link to
+        // the original candidate index.
+        let mut coin_deriv: std::collections::HashMap<
+            Bytes32,
+            (serde_json::Value, serde_json::Value),
+        > = std::collections::HashMap::new();
+
+        for p in &parsed_cands {
+            let parent_id = p.coin.parent_coin_info;
+            let children = parent_cache.get(&parent_id).cloned().flatten();
+            let Some(children) = children else { continue };
+            let Some(child) = children.iter().find(|c| c.coin.coin_id() == p.coin_id)
+            else {
                 continue;
             };
-
+            let Some(lineage) = child.lineage_proof else {
+                continue;
+            };
             let bucket = by_asset
                 .entry(child.info.asset_id)
                 .or_insert_with(|| CatBucket {
@@ -493,19 +2273,27 @@ impl SageEngine {
                     coins: Vec::new(),
                 });
             bucket.coins.push(CatCoinView {
-                coin_id,
-                parent_coin_info: rec.coin.parent_coin_info,
-                puzzle_hash: rec.coin.puzzle_hash,
-                amount: rec.coin.amount,
+                coin_id: p.coin_id,
+                parent_coin_info: p.coin.parent_coin_info,
+                puzzle_hash: p.coin.puzzle_hash,
+                amount: p.coin.amount,
                 inner_puzzle_hash: child.info.p2_puzzle_hash,
-                hint: *hint,
-                confirmed_block_index: rec.confirmed_block_index,
-                spent: rec.spent,
-                spent_block_index: rec.spent_block_index,
+                hidden_puzzle_hash: child.info.hidden_puzzle_hash,
+                hint: p.hint,
+                confirmed_block_index: p.confirmed_block_index,
+                spent: p.spent,
+                spent_block_index: p.spent_block_index,
+                lineage_parent_name: lineage.parent_parent_coin_info,
+                lineage_inner_puzzle_hash: lineage.parent_inner_puzzle_hash,
+                lineage_amount: lineage.parent_amount,
             });
+            coin_deriv.insert(
+                p.coin_id,
+                (p.derivation_index.clone(), p.derivation_kind.clone()),
+            );
+            parsed_ok.insert(p.coin_id);
         }
 
-        // Emit per-asset rollups
         let cats: Vec<_> = by_asset
             .into_values()
             .map(|b| {
@@ -520,16 +2308,35 @@ impl SageEngine {
                                 total_unspent.saturating_add(u128::from(c.amount));
                             unspent_count = unspent_count.saturating_add(1);
                         }
+                        // Prefer the per-candidate derivation echo (carried
+                        // verbatim through phase 1 → phase 2). Null when the
+                        // candidate didn't carry it (legacy callers).
+                        let (deriv_idx_v, deriv_kind_v) = coin_deriv
+                            .get(&c.coin_id)
+                            .cloned()
+                            .unwrap_or((
+                                serde_json::Value::Null,
+                                serde_json::Value::Null,
+                            ));
                         serde_json::json!({
                             "coin_id": format!("0x{}", hex::encode(c.coin_id)),
                             "parent_coin_info": format!("0x{}", hex::encode(c.parent_coin_info)),
                             "puzzle_hash": format!("0x{}", hex::encode(c.puzzle_hash)),
                             "amount": c.amount.to_string(),
                             "inner_puzzle_hash": format!("0x{}", hex::encode(c.inner_puzzle_hash)),
+                            "hidden_puzzle_hash": c.hidden_puzzle_hash
+                                .map(|h| format!("0x{}", hex::encode(h))),
                             "hint": format!("0x{}", hex::encode(c.hint)),
+                            "derivation_index": deriv_idx_v,
+                            "derivation_kind": deriv_kind_v,
                             "confirmed_block_index": c.confirmed_block_index,
                             "spent": c.spent,
                             "spent_block_index": c.spent_block_index,
+                            "lineage_proof": {
+                                "parent_name": format!("0x{}", hex::encode(c.lineage_parent_name)),
+                                "inner_puzzle_hash": format!("0x{}", hex::encode(c.lineage_inner_puzzle_hash)),
+                                "amount": c.lineage_amount.to_string(),
+                            },
                         })
                     })
                     .collect();
@@ -542,10 +2349,21 @@ impl SageEngine {
             })
             .collect();
 
+        let unparseable_coin_ids: Vec<String> = parsed_cands
+            .iter()
+            .filter(|p| !parsed_ok.contains(&p.coin_id))
+            .map(|p| format!("0x{}", hex::encode(p.coin_id)))
+            .collect();
+
+        wlog(&format!(
+            "[cat_parse_candidates] DONE: {} assets, {} unparseable",
+            cats.len(),
+            unparseable_coin_ids.len(),
+        ));
+
         Ok(serde_json::json!({
             "cats": cats,
-            "scanned_inner_hashes": inner_phs.len(),
-            "testnet": req.testnet,
+            "unparseable_coin_ids": unparseable_coin_ids,
         })
         .to_string())
     }
@@ -1409,6 +3227,80 @@ impl SageEngine {
         Ok(serde_json::json!({ "addresses": out }).to_string())
     }
 
+    /// Hardened variant of `derive_addresses`. Requires the wallet to be
+    /// unlocked because hardened derivation needs the SECRET key (you
+    /// cannot derive a hardened child from a public key alone).
+    ///
+    /// Mirrors `derive_addresses` but uses `master_to_wallet_hardened(sk, idx)`
+    /// → `derive_synthetic()` → `StandardArgs::curry_tree_hash`. The Sage
+    /// reference wallet stores BOTH the hardened and unhardened sets in its
+    /// derivation table (see
+    /// `vendor/sage/crates/sage-wallet/src/wallet/signing.rs` lines 52-53),
+    /// and on-chain receives can land at either kind of puzzle hash.
+    ///
+    /// Params: `{ "fingerprint": N, "start": K, "count": M, "testnet": bool }`.
+    /// Returns: `{ "addresses": [{ index, address, puzzle_hash, public_key }] }`.
+    ///
+    /// Errors:
+    /// - `Unauthorized` (code 4001) if the wallet is locked or `fingerprint`
+    ///   is missing — `"wallet not unlocked"`.
+    async fn derive_addresses_hardened(
+        &self,
+        params_json: &str,
+    ) -> Result<String, EngineError> {
+        #[derive(Deserialize)]
+        struct Req {
+            #[serde(default)]
+            fingerprint: Option<u32>,
+            #[serde(default)]
+            start: u32,
+            #[serde(default = "default_count")]
+            count: u32,
+            #[serde(default)]
+            testnet: bool,
+        }
+        fn default_count() -> u32 {
+            10
+        }
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+        if req.count == 0 || req.count > 200 {
+            return Err(EngineError::InvalidParams(format!(
+                "count must be 1..=200, got {}",
+                req.count
+            )));
+        }
+        let fp = req
+            .fingerprint
+            .ok_or_else(|| EngineError::Unauthorized("wallet not unlocked".to_string()))?;
+        let master_sk = self
+            .unlocked
+            .lock()
+            .map_err(|_| EngineError::Internal("unlocked-cache mutex poisoned".to_string()))?
+            .get(&fp)
+            .cloned()
+            .ok_or_else(|| EngineError::Unauthorized("wallet not unlocked".to_string()))?;
+        let prefix = if req.testnet { "txch" } else { "xch" };
+        let mut out = Vec::with_capacity(req.count as usize);
+        for i in 0..req.count {
+            let idx = req.start + i;
+            let intermediate_sk = master_to_wallet_hardened(&master_sk, idx);
+            let synthetic_sk = intermediate_sk.derive_synthetic();
+            let synthetic_pk = synthetic_sk.public_key();
+            let puzzle_hash: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
+            let address = Address::new(puzzle_hash, prefix.to_string())
+                .encode()
+                .map_err(|e| EngineError::Internal(format!("bech32m: {e}")))?;
+            out.push(serde_json::json!({
+                "index": idx,
+                "address": address,
+                "puzzle_hash": format!("0x{}", hex::encode(puzzle_hash)),
+                "public_key": format!("0x{}", hex::encode(synthetic_pk.to_bytes())),
+            }));
+        }
+        Ok(serde_json::json!({ "addresses": out }).to_string())
+    }
+
     /// Validate a Chia bech32m address.
     ///
     /// Matches sage's `check_address` — returns `{ valid: bool }`. Extended
@@ -1567,6 +3459,67 @@ impl SageEngine {
         let testnet = req.testnet;
         let name = req.name;
         return self.do_import_key(mnemonic_input, &password, testnet, name).await;
+    }
+
+    /// Import a wallet from a raw BLS master secret key (32-byte hex).
+    /// Encrypts it with the password into a new keychain blob, returns the
+    /// fingerprint + master_public_key + blob the same way `import_key` does.
+    ///
+    /// Params: `{ "secret_key": "0x<64 hex>", "password": "...", "testnet"?: bool, "name"?: "..." }`
+    async fn import_secret_key(&self, params_json: &str) -> Result<String, EngineError> {
+        #[derive(Deserialize)]
+        struct Req {
+            secret_key: String,
+            password: String,
+            #[serde(default)]
+            testnet: bool,
+            #[serde(default)]
+            name: Option<String>,
+        }
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let sk_bytes = hex::decode(req.secret_key.trim().trim_start_matches("0x"))
+            .map_err(|e| EngineError::InvalidParams(format!("secret_key hex: {e}")))?;
+        if sk_bytes.len() != 32 {
+            return Err(EngineError::InvalidParams(format!(
+                "secret_key must be 32 bytes, got {}",
+                sk_bytes.len()
+            )));
+        }
+        let master_sk = SecretKey::from_bytes(
+            sk_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| EngineError::InvalidParams("secret_key length".to_string()))?,
+        )
+        .map_err(|e| EngineError::InvalidParams(format!("secret_key parse: {e}")))?;
+
+        let mut keychain = Keychain::default();
+        let fingerprint = keychain
+            .add_secret_key(&master_sk, req.password.as_bytes())
+            .map_err(|e| EngineError::Internal(e.to_string()))?;
+        let blob = keychain
+            .to_bytes()
+            .map_err(|e| EngineError::Internal(e.to_string()))?;
+
+        let intermediate_pk = master_to_wallet_unhardened(&master_sk.public_key(), 0);
+        let synthetic_pk = intermediate_pk.derive_synthetic();
+        let puzzle_hash: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
+        let prefix = if req.testnet { "txch" } else { "xch" };
+        let address_0 = Address::new(puzzle_hash, prefix.to_string())
+            .encode()
+            .map_err(|e| EngineError::Internal(format!("bech32m: {e}")))?;
+
+        Ok(serde_json::json!({
+            "fingerprint": fingerprint,
+            "master_public_key": format!("0x{}", hex::encode(master_sk.public_key().to_bytes())),
+            "keychain_blob": hex::encode(&blob),
+            "address_0": address_0,
+            "name": req.name,
+            "has_mnemonic": false,
+        })
+        .to_string())
     }
 
     /// Legacy entrypoint that still expects only the old-shape body.
@@ -1818,6 +3771,188 @@ fn make_client(endpoint: Option<&str>) -> CoinsetClient {
     }
 }
 
+/// Number of attempts for transient coinset HTTP errors. Coinset will return
+/// "error decoding response body" mid-stream for hints with very deep
+/// history; an immediate retry usually clears it. We don't sleep between
+/// attempts — adding a sleep primitive that works in WASM would require a
+/// new dep (futures-timer / wasm-timer), and 3 back-to-back retries
+/// already deflakes the vast majority of transient errors we've seen.
+const COINSET_RETRY_ATTEMPTS: usize = 3;
+
+/// Block window size (in heights) used to paginate `get_coin_records_by_hint`
+/// per hint. Even with `include_spent_coins: false`, a single hint that has
+/// been receiving CATs / NFTs for years can produce a giant response and
+/// OOM the WASM heap (or trigger coinset's "error decoding response body"
+/// mid-stream). Walking the height range in chunks bounds each HTTP
+/// response. ~500k blocks ≈ 50 days @ ~6s/block on mainnet — tune later
+/// based on observed response sizes.
+const HEIGHT_WINDOW: u32 = 500_000;
+
+/// Fetch coin records for a single hint.
+///
+/// When `windowed == false` (NFT scans): a single open-ended call to
+/// `get_coin_records_by_hint(hint, start_h, None, include_spent)`. NFTs
+/// are singletons (one coin per launcher), so the response size is
+/// bounded regardless of history depth and windowing only adds
+/// round-trips. This is the original fast path.
+///
+/// When `windowed == true` (CAT scans): walks the height range
+/// **newest-first** (peak → floor) in `HEIGHT_WINDOW`-sized chunks, and
+/// fires all chunks **in parallel** via `join_all`. The floor is
+/// `start_h.unwrap_or(0)` — i.e. the cursor JS persisted from a
+/// previous scan, or genesis on first run. Windowing is needed for CATs
+/// because a hint with years of receipts can return thousands of
+/// records and OOM the WASM heap (or trigger coinset's "error decoding
+/// response body" mid-stream); parallelizing the windows keeps the
+/// scan latency-bounded by the slowest window rather than the sum of
+/// all windows.
+///
+/// Each window gets up to 3 attempts. On total failure of ANY window
+/// returns `Err(last_error_string)` so the caller can decide how to
+/// surface the failure (e.g. push the hint into `failed_hints` rather
+/// than killing the whole chunk). When multiple windows fail, the
+/// first error (newest window) is reported — matches the existing
+/// "bail on first failed window" behavior from the previous serial
+/// implementation.
+///
+/// Records are aggregated peak-first so the UX "newest receipts appear
+/// first" feel still holds even though the underlying fetches finish
+/// out of order.
+async fn fetch_hint_with_retry(
+    client: &CoinsetClient,
+    hint: Bytes32,
+    start_h: Option<u32>,
+    peak: Option<u32>,
+    include_spent: Option<bool>,
+    windowed: bool,
+) -> Result<Vec<chia_wallet_sdk::coinset::CoinRecord>, String> {
+    wlog(&format!(
+        "[scan_nfts/fetch] 0x{} start={:?} windowed={}",
+        hex::encode(hint),
+        start_h,
+        windowed,
+    ));
+    if !windowed || peak.is_none() {
+        let r = fetch_hint_window_with_retry(client, hint, start_h, None, include_spent).await;
+        wlog(&format!(
+            "[scan_nfts/fetch] 0x{} done: {}",
+            hex::encode(hint),
+            match &r { Ok(v) => format!("{} records", v.len()), Err(e) => format!("ERR {e}") },
+        ));
+        return r;
+    }
+    let peak = peak.expect("peak checked above");
+
+    let floor = start_h.unwrap_or(0);
+    // Build the [from, to] ranges peak → floor newest-first. Order is
+    // preserved through aggregation so the caller still sees newest
+    // records first.
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut to = peak;
+    while to > floor {
+        let from = to.saturating_sub(HEIGHT_WINDOW).max(floor);
+        ranges.push((from, to));
+        if from == floor {
+            break;
+        }
+        // Step one block past the window edge so we don't double-count
+        // `from` on the next iteration.
+        to = from.saturating_sub(1);
+    }
+
+    // Serialize windowed fetches.
+    //
+    // We used to fan all windows out via join_all, but concurrent reqwest
+    // calls in wasm32 turned out to push the heap past wasm-bindgen's
+    // 4 GiB ceiling on long sync runs — the SW would die silently with no
+    // panic-hook output. See nft_scan_hints for the full diagnosis. The
+    // throughput cost is small because each window still has its own
+    // 3-retry budget and the per-window response is normally tiny.
+    let mut window_results: Vec<Result<Vec<chia_wallet_sdk::coinset::CoinRecord>, String>> =
+        Vec::with_capacity(ranges.len());
+    for (from, to) in &ranges {
+        let res =
+            fetch_hint_window_with_retry(client, hint, Some(*from), Some(*to), include_spent)
+                .await;
+        window_results.push(res);
+    }
+
+    // Aggregate in peak-first order; propagate the first (newest)
+    // window error if any window exhausted retries.
+    let mut all_records: Vec<chia_wallet_sdk::coinset::CoinRecord> = Vec::new();
+    for ((from, to), res) in ranges.iter().zip(window_results.into_iter()) {
+        match res {
+            Ok(recs) => all_records.extend(recs),
+            Err(e) => return Err(format!("window [{from}..{to}]: {e}")),
+        }
+    }
+    Ok(all_records)
+}
+
+/// Inner helper: single windowed call to `get_coin_records_by_hint` with
+/// up to 3 attempts. Pulled out of `fetch_hint_with_retry` so the retry
+/// loop is shared between the windowed path and the (rare) "no peak"
+/// fallback.
+async fn fetch_hint_window_with_retry(
+    client: &CoinsetClient,
+    hint: Bytes32,
+    start_h: Option<u32>,
+    end_h: Option<u32>,
+    include_spent: Option<bool>,
+) -> Result<Vec<chia_wallet_sdk::coinset::CoinRecord>, String> {
+    let mut last_err = String::new();
+    for attempt in 0..COINSET_RETRY_ATTEMPTS {
+        match client
+            .get_coin_records_by_hint(hint, start_h, end_h, include_spent)
+            .await
+        {
+            Ok(res) => return Ok(res.coin_records.unwrap_or_default()),
+            Err(e) => {
+                last_err = format!("{e}");
+                tracing::debug!(
+                    "get_coin_records_by_hint attempt {} failed for hint 0x{} [{:?}..{:?}]: {}",
+                    attempt + 1,
+                    hex::encode(hint),
+                    start_h,
+                    end_h,
+                    last_err
+                );
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// Batched parent-record fetch with up to 3 attempts. Same rationale as
+/// `fetch_hint_with_retry`: a single transient HTTP error on the parents
+/// call would otherwise nuke the whole chunk after we just spent N
+/// round-trips on hints. On total failure returns the last error string.
+async fn fetch_names_with_retry(
+    client: &CoinsetClient,
+    names: Vec<Bytes32>,
+    include_spent: Option<bool>,
+) -> Result<Vec<chia_wallet_sdk::coinset::CoinRecord>, String> {
+    let mut last_err = String::new();
+    for attempt in 0..COINSET_RETRY_ATTEMPTS {
+        match client
+            .get_coin_records_by_names(names.clone(), None, None, include_spent)
+            .await
+        {
+            Ok(res) => return Ok(res.coin_records.unwrap_or_default()),
+            Err(e) => {
+                last_err = format!("{e}");
+                tracing::debug!(
+                    "get_coin_records_by_names attempt {} failed ({} names): {}",
+                    attempt + 1,
+                    names.len(),
+                    last_err
+                );
+            }
+        }
+    }
+    Err(last_err)
+}
+
 fn parse_bytes32(s: &str) -> Result<Bytes32, EngineError> {
     let bytes = hex::decode(s.trim_start_matches("0x"))
         .map_err(|e| EngineError::InvalidParams(format!("hex: {e}")))?;
@@ -1840,10 +3975,16 @@ struct CatCoinView {
     puzzle_hash: Bytes32,
     amount: u64,
     inner_puzzle_hash: Bytes32,
+    hidden_puzzle_hash: Option<Bytes32>,
     hint: Bytes32,
     confirmed_block_index: u32,
     spent: bool,
     spent_block_index: u32,
+    /// LineageProof needed to spend this CAT. Captured at parse time so the
+    /// JS side can hand it back to `send_cat` without re-fetching the parent.
+    lineage_parent_name: Bytes32,
+    lineage_inner_puzzle_hash: Bytes32,
+    lineage_amount: u64,
 }
 
 fn serialize_coin_spend(cs: &CoinSpend) -> serde_json::Value {
