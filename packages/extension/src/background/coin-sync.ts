@@ -20,6 +20,7 @@ import { callEngine } from "./engine.js";
 import {
   type CoinRecord,
   type NftView,
+  type RawAssetCandidate,
   type RawCatCandidate,
   type RawNftCandidate,
   readCoinStore,
@@ -548,6 +549,22 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
     const pendingNfts: Record<string, RawNftCandidate> = {
       ...(store.pending_nft_candidates ?? {}),
     };
+    // CAT-side scratch state — hoisted out of the CAT stage so the NFT
+    // stage's `asset_scan_hints` response can populate both pending queues
+    // and both cursor maps in a single fetch. Each Phase-2 parser rejects
+    // coins that don't match its primitive (Cat::parse_children / Nft::parse_child),
+    // so writing the same candidate to both queues is safe.
+    const catsHintHeights: Record<string, number> = { ...(store.cat_hint_heights ?? {}) };
+    const pendingCats: Record<string, RawCatCandidate> = {
+      ...(store.pending_cat_candidates ?? {}),
+    };
+    /**
+     * Set to true when the NFT stage's Phase-1 loop actually issues at
+     * least one `asset_scan_hints` call this tick. The CAT stage uses
+     * this to skip its own Phase-1 — the candidates + cursors are already
+     * up-to-date in `pendingCats` / `catsHintHeights`.
+     */
+    let assetScanRanInNftStage = false;
     const nftTotalChunks = Math.ceil(DERIVE_COUNT / SCAN_CHUNK_PHS);
     let nftChunksDone = 0;
     const nftsHasCursors = Object.keys(nftsHintHeights).length === addresses.length;
@@ -661,10 +678,10 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
         try {
           const hintRes = await withTimeout(
             callEngine<{
-              candidates: RawNftCandidate[];
+              candidates: RawAssetCandidate[];
               peak_height: number | null;
               failed_hints?: string[];
-            }>("nft_scan_hints", {
+            }>("asset_scan_hints", {
               master_public_key: masterPk,
               start,
               count,
@@ -674,14 +691,23 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
               extra_inner_phs: hardenedSorted.slice(start, start + count),
             }),
             SCAN_TIMEOUT_MS,
-            `nft_scan_hints[${start}..${start + count}]`,
+            `asset_scan_hints[${start}..${start + count}]`,
           );
+          assetScanRanInNftStage = true;
           const failedSet = new Set(hintRes.failed_hints ?? []);
-          for (const c of hintRes.candidates) pendingNfts[c.coin_id] = c;
+          // Each candidate is asset-type-agnostic — fan it into both
+          // queues so the CAT stage can skip its own Phase-1 fetch.
+          for (const c of hintRes.candidates) {
+            pendingNfts[c.coin_id] = c;
+            pendingCats[c.coin_id] = c;
+          }
           if (typeof hintRes.peak_height === "number") {
             for (let i = 0; i < count; i += 1) {
               const ph = allPhs[start + i]!;
-              if (!failedSet.has(ph)) nftsHintHeights[ph] = hintRes.peak_height;
+              if (!failedSet.has(ph)) {
+                nftsHintHeights[ph] = hintRes.peak_height;
+                catsHintHeights[ph] = hintRes.peak_height;
+              }
             }
           }
           if (failedSet.size > 0) {
@@ -692,6 +718,8 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
           nftChunksDone += 1;
           store.pending_nft_candidates = pendingNfts;
           store.nft_hint_heights = nftsHintHeights;
+          store.pending_cat_candidates = pendingCats;
+          store.cat_hint_heights = catsHintHeights;
           await writeCoinStore(wallet.fingerprint, store);
         } catch (err) {
           console.warn("[Loroco] NFT hint chunk failed:", (err as Error).message);
@@ -737,17 +765,22 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       }>;
     };
     const catsMap: Record<string, CatRecord> = { ...(store.cats ?? {}) };
-    const catsHintHeights: Record<string, number> = { ...(store.cat_hint_heights ?? {}) };
-    const pendingCats: Record<string, RawCatCandidate> = {
-      ...(store.pending_cat_candidates ?? {}),
-    };
+    // NOTE: `catsHintHeights` + `pendingCats` are hoisted above the NFT
+    // stage so its `asset_scan_hints` call can populate them in the same
+    // fetch. If the NFT stage already ran (`assetScanRanInNftStage`), the
+    // CAT stage's own Phase-1 loop is a no-op below.
     const catTotalChunks = Math.ceil(DERIVE_COUNT / SCAN_CHUNK_PHS);
     let catChunksDone = 0;
     const catsHasCursors = Object.keys(catsHintHeights).length === addresses.length;
     // Sidecar already swept hints for us — skip Phase 1.
     const sidecarHandledCatHints = useSidecar && sidecarCandidates > 0;
+    // NFT stage's `asset_scan_hints` call already populated `pendingCats`
+    // + `catsHintHeights` in this tick — Phase 1 here would refetch the
+    // same hints. Skip it.
+    const nftStageHandledCatHints = assetScanRanInNftStage;
     const catsStale =
       !sidecarHandledCatHints &&
+      !nftStageHandledCatHints &&
       (opts.force ||
         catsHasCursors ||
         !store.cats_synced_at ||
@@ -871,10 +904,10 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
         try {
           const hintRes = await withTimeout(
             callEngine<{
-              candidates: RawCatCandidate[];
+              candidates: RawAssetCandidate[];
               peak_height: number | null;
               failed_hints?: string[];
-            }>("cat_scan_hints", {
+            }>("asset_scan_hints", {
               master_public_key: masterPk,
               start,
               count,
@@ -884,14 +917,22 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
               extra_inner_phs: hardenedSorted.slice(start, start + count),
             }),
             SCAN_TIMEOUT_MS,
-            `cat_scan_hints[${start}..${start + count}]`,
+            `asset_scan_hints[${start}..${start + count}]`,
           );
           const failedSet = new Set(hintRes.failed_hints ?? []);
-          for (const c of hintRes.candidates) pendingCats[c.coin_id] = c;
+          // Fan into both queues — the NFT stage might run on a later
+          // tick when the CAT throttle wins this one.
+          for (const c of hintRes.candidates) {
+            pendingCats[c.coin_id] = c;
+            pendingNfts[c.coin_id] = c;
+          }
           if (typeof hintRes.peak_height === "number") {
             for (let i = 0; i < count; i += 1) {
               const ph = allPhs[start + i]!;
-              if (!failedSet.has(ph)) catsHintHeights[ph] = hintRes.peak_height;
+              if (!failedSet.has(ph)) {
+                catsHintHeights[ph] = hintRes.peak_height;
+                nftsHintHeights[ph] = hintRes.peak_height;
+              }
             }
           }
           if (failedSet.size > 0) {
@@ -902,6 +943,8 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
           catChunksDone += 1;
           store.pending_cat_candidates = pendingCats;
           store.cat_hint_heights = catsHintHeights;
+          store.pending_nft_candidates = pendingNfts;
+          store.nft_hint_heights = nftsHintHeights;
           await writeCoinStore(wallet.fingerprint, store);
         } catch (err) {
           console.warn("[Loroco] CAT hint chunk failed:", (err as Error).message);

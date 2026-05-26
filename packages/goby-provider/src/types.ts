@@ -57,6 +57,28 @@ export interface TransactionResp {
 
 // ─── Method param/return maps ────────────────────────────────────────────────
 
+export interface NftRoyaltyView {
+  royalty_address?: string;
+  royalty_percentage?: number;
+}
+
+export interface NftInfo {
+  launcher_id: Hex;
+  nft_coin_id: Hex;
+  owner_did?: Hex | null;
+  royalty_address?: Hex | null;
+  royalty_percentage?: number;
+  data_uris: string[];
+  data_hash?: Hex | null;
+  metadata_uris: string[];
+  metadata_hash?: Hex | null;
+  license_uris: string[];
+  license_hash?: Hex | null;
+  edition_number?: number;
+  edition_total?: number;
+  p2_puzzle_hash?: Hex | null;
+}
+
 export interface ChiaMethodMap {
   // CHIP-0002 — Connection & meta
   chainId: { params: void; result: ChainId };
@@ -142,6 +164,42 @@ export interface ChiaMethodMap {
     params: { offer: string; fee?: Amount };
     result: { id: Hex };
   };
+
+  // ─── Sage WalletConnect2 extras ──────────────────────────────────────────
+  // These mirror the WC2 surface Sage already supports natively. They are
+  // exposed through window.chia so dApps that target Sage's WC API (sage-wc.app,
+  // dexie marketplace tooling) work without a WC2 pairing.
+
+  /**
+   * Sign a "Chia Signed Message" using the secret key whose puzzle is derived
+   * from this address. Mirrors `sage_api::wallet_connect::SignMessageByAddress`.
+   */
+  signMessageByAddress: {
+    params: { message: Hex; address: string };
+    result: { publicKey: Hex; signature: Hex };
+  };
+
+  /** List NFTs owned by the wallet, paginated. */
+  getNFTs: {
+    params: { limit?: number; offset?: number; didId?: Hex | null } | undefined;
+    result: NftInfo[];
+  };
+
+  /** Resolve a single NFT by launcher id or coin id. */
+  getNFTInfo: {
+    params: { coinId?: Hex; launcherId?: Hex };
+    result: NftInfo | null;
+  };
+
+  /**
+   * Cancel an offer the wallet previously made. If `local` is true the offer
+   * is only removed from local tracking (matches Goby's `cancelOffer({secure:false})`).
+   * If false, a cancellation spend is broadcast.
+   */
+  cancelOffer: {
+    params: { id: Hex; fee?: Amount; secure?: boolean };
+    result: { id: Hex; cancelled: boolean };
+  };
 }
 
 export type ChiaMethod = keyof ChiaMethodMap;
@@ -207,6 +265,18 @@ export interface ChiaWallet {
   takeOffer(
     params: ChiaMethodMap["takeOffer"]["params"],
   ): Promise<ChiaMethodMap["takeOffer"]["result"]>;
+  signMessageByAddress(
+    params: ChiaMethodMap["signMessageByAddress"]["params"],
+  ): Promise<ChiaMethodMap["signMessageByAddress"]["result"]>;
+  getNFTs(
+    params?: ChiaMethodMap["getNFTs"]["params"],
+  ): Promise<ChiaMethodMap["getNFTs"]["result"]>;
+  getNFTInfo(
+    params: ChiaMethodMap["getNFTInfo"]["params"],
+  ): Promise<ChiaMethodMap["getNFTInfo"]["result"]>;
+  cancelOffer(
+    params: ChiaMethodMap["cancelOffer"]["params"],
+  ): Promise<ChiaMethodMap["cancelOffer"]["result"]>;
 
   // Events
   on(event: ChiaEvent, listener: (...args: any[]) => void): void;

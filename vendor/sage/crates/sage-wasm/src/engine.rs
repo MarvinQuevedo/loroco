@@ -165,9 +165,14 @@ impl SageEngine {
             // CLVM parse in one call, which exceeds the 60s service-worker
             // cap for wallets with deep history. The split lets JS persist
             // raw candidates between SW lifecycles and parse them later.
-            "nft_scan_hints" => self.nft_scan_hints(params_json).await,
+            // `asset_scan_hints` is the unified phase-1 that supersedes
+            // `nft_scan_hints` + `cat_scan_hints` — they used to re-fetch
+            // the same hints from coinset twice. The legacy names are
+            // kept as aliases for backwards-compat.
+            "asset_scan_hints" => self.asset_scan_hints(params_json).await,
+            "nft_scan_hints" => self.asset_scan_hints(params_json).await,
+            "cat_scan_hints" => self.asset_scan_hints(params_json).await,
             "nft_parse_candidates" => self.nft_parse_candidates(params_json).await,
-            "cat_scan_hints" => self.cat_scan_hints(params_json).await,
             "cat_parse_candidates" => self.cat_parse_candidates(params_json).await,
             "send_cat" => self.send_cat(params_json).await,
             "transfer_nft" => self.transfer_nft(params_json).await,
@@ -1272,9 +1277,9 @@ impl SageEngine {
         // (parent fetch + CLVM parse) in sequence and merge the outputs to
         // match the legacy response shape. JS callers that have not yet
         // migrated to the split endpoints keep working identically.
-        let hints_json = self.nft_scan_hints(params_json).await?;
+        let hints_json = self.asset_scan_hints(params_json).await?;
         let hints_val: serde_json::Value = serde_json::from_str(&hints_json)
-            .map_err(|e| EngineError::Internal(format!("nft_scan_hints output: {e}")))?;
+            .map_err(|e| EngineError::Internal(format!("asset_scan_hints output: {e}")))?;
 
         let candidates = hints_val
             .get("candidates")
@@ -1326,19 +1331,27 @@ impl SageEngine {
         .to_string())
     }
 
-    /// Phase 1 of the split NFT scan — fetch hint records only.
+    /// Phase 1 of asset sync — discover unspent coins matched by the
+    /// wallet's derived inner puzzle hashes, EXCLUDING XCH receives
+    /// (which `scan_puzzle_hashes` handles separately).
     ///
-    /// Does NOT touch parent coins, puzzle/solution, or CLVM. Designed to
-    /// finish under Chrome MV3's 60-second service-worker cap even on deep
-    /// wallets so JS can persist the raw candidate set before the SW gets
-    /// killed and re-spawned for phase 2.
+    /// The returned `candidates[]` are asset-type-agnostic: each one is
+    /// just a hint-matched coin record carrying the minimum data Phase 2
+    /// needs (hint, coin, coin_id, confirmation status, derivation_index
+    /// + derivation_kind). Phase-2 parsers (`nft_parse_candidates`,
+    /// `cat_parse_candidates`) fetch the parent spend and try their
+    /// respective SDK parser. Candidates that don't match either primitive
+    /// are reported in `unparseable_coin_ids[]` so JS can drop them.
     ///
-    /// Same input shape as `scan_nfts`. Output is a `candidates[]` array
-    /// carrying the minimum data the parse phase needs: hint, coin, coin_id,
-    /// confirmation status, and the (derivation_index, derivation_kind) the
-    /// hint came from. JS persists this list and feeds it back to
-    /// `nft_parse_candidates` in chunks sized to fit a fresh SW lifetime.
-    async fn nft_scan_hints(&self, params_json: &str) -> Result<String, EngineError> {
+    /// Supersedes the legacy `nft_scan_hints` + `cat_scan_hints`, which
+    /// were byte-identical apart from the log tag and made coinset fetch
+    /// the same hints twice per sync cycle. Both legacy names still route
+    /// here for backwards-compat.
+    ///
+    /// Designed to finish under Chrome MV3's 60-second service-worker
+    /// cap even on deep wallets so JS can persist the raw candidate set
+    /// before the SW gets killed and re-spawned for Phase 2.
+    async fn asset_scan_hints(&self, params_json: &str) -> Result<String, EngineError> {
         #[derive(Deserialize)]
         struct ExtraInnerPh {
             puzzle_hash: String,
@@ -1360,7 +1373,7 @@ impl SageEngine {
             master_public_key: Option<String>,
             #[serde(default)]
             start: u32,
-            #[serde(default = "default_nft_count")]
+            #[serde(default = "default_asset_scan_count")]
             count: u32,
             #[serde(default)]
             testnet: bool,
@@ -1375,7 +1388,7 @@ impl SageEngine {
             #[serde(default)]
             extra_inner_phs: Vec<ExtraInnerPh>,
         }
-        fn default_nft_count() -> u32 {
+        fn default_asset_scan_count() -> u32 {
             50
         }
 
@@ -1436,7 +1449,7 @@ impl SageEngine {
             .map(|bs| bs.peak.height);
         let extra_count: usize = req.extra_inner_phs.len();
         wlog(&format!(
-            "[nft_scan_hints] start: req.start={} count={} extra_inner_phs={} inner_phs_total={}",
+            "[asset_scan_hints] start: req.start={} count={} extra_inner_phs={} inner_phs_total={}",
             req.start,
             req.count,
             extra_count,
@@ -1480,7 +1493,7 @@ impl SageEngine {
                 Err(e) => {
                     let hex_hint = format!("0x{}", hex::encode(hint));
                     tracing::warn!(
-                        "nft_scan_hints: giving up on hint {} after {} attempts: {}",
+                        "asset_scan_hints: giving up on hint {} after {} attempts: {}",
                         hex_hint,
                         COINSET_RETRY_ATTEMPTS,
                         e
@@ -1522,14 +1535,14 @@ impl SageEngine {
             }
             if per_hint_count > 0 {
                 wlog(&format!(
-                    "[nft_scan_hints] hint 0x{}: {} unspent candidates",
+                    "[asset_scan_hints] hint 0x{}: {} unspent candidates",
                     hex::encode(hint),
                     per_hint_count
                 ));
             }
         }
         wlog(&format!(
-            "[nft_scan_hints] total candidates: {}, wasm_heap={:.2}MB",
+            "[asset_scan_hints] total candidates: {}, wasm_heap={:.2}MB",
             candidates.len(),
             wasm_memory_bytes() as f64 / (1024.0 * 1024.0),
         ));
@@ -1816,9 +1829,9 @@ impl SageEngine {
         // Backwards-compat wrapper: run phase-1 (hint scan) then phase-2
         // (parent fetch + Cat::parse_children) in sequence and merge the
         // outputs to match the legacy response shape.
-        let hints_json = self.cat_scan_hints(params_json).await?;
+        let hints_json = self.asset_scan_hints(params_json).await?;
         let hints_val: serde_json::Value = serde_json::from_str(&hints_json)
-            .map_err(|e| EngineError::Internal(format!("cat_scan_hints output: {e}")))?;
+            .map_err(|e| EngineError::Internal(format!("asset_scan_hints output: {e}")))?;
 
         let candidates = hints_val
             .get("candidates")
@@ -1866,205 +1879,6 @@ impl SageEngine {
         .to_string())
     }
 
-    /// Phase 1 of the split CAT scan — fetch hint records only.
-    ///
-    /// CATs differ from NFTs here: the hint sweep uses the WINDOWED form of
-    /// `fetch_hint_with_retry` (`windowed=true`) because a single CAT hint
-    /// can carry years of receipts that blow up the WASM heap on an
-    /// open-ended fetch. Each window still has its own retry budget.
-    ///
-    /// Each candidate carries `derivation_index` + `derivation_kind` for the
-    /// matched hint so phase 2 can echo them back on the parsed coin without
-    /// re-deriving from `master_public_key`. JS persists the candidates and
-    /// feeds them to `cat_parse_candidates` after the SW wakes up again.
-    async fn cat_scan_hints(&self, params_json: &str) -> Result<String, EngineError> {
-        #[derive(Deserialize)]
-        struct ExtraInnerPh {
-            puzzle_hash: String,
-            derivation_index: u32,
-            /// "unhardened" | "hardened" — defaults to "hardened" (see
-            /// `nft_scan_hints`).
-            #[serde(default = "default_hardened_kind")]
-            kind: String,
-        }
-        fn default_hardened_kind() -> String {
-            "hardened".to_string()
-        }
-        #[derive(Deserialize)]
-        struct Req {
-            #[serde(default)]
-            fingerprint: Option<u32>,
-            #[serde(default)]
-            master_public_key: Option<String>,
-            #[serde(default)]
-            start: u32,
-            #[serde(default = "default_cat_count")]
-            count: u32,
-            #[serde(default)]
-            testnet: bool,
-            #[serde(default)]
-            endpoint: Option<String>,
-            /// Optional per-hint cursor map (`{ "0x<hint_hex>": <start_height> }`).
-            #[serde(default)]
-            hint_start_heights: Option<std::collections::HashMap<String, u32>>,
-            /// Pre-derived inner puzzle hashes to fan out IN ADDITION to the
-            /// ones the engine derives unhardened from `master_public_key`.
-            #[serde(default)]
-            extra_inner_phs: Vec<ExtraInnerPh>,
-        }
-        fn default_cat_count() -> u32 {
-            50
-        }
-
-        let req: Req = serde_json::from_str(params_json)
-            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
-        if req.count == 0 || req.count > 200 {
-            return Err(EngineError::InvalidParams(format!(
-                "count must be 1..=200, got {}",
-                req.count
-            )));
-        }
-        let _ = req.testnet;
-        let master_pk =
-            self.resolve_master_pk(req.fingerprint, req.master_public_key.as_deref())?;
-
-        // Derive the inner puzzle hashes we'll scan as hints + build a
-        // parallel `ph → (derivation_index, kind)` map.
-        let mut inner_phs: Vec<Bytes32> = Vec::with_capacity(req.count as usize);
-        let mut ph_meta: std::collections::HashMap<Bytes32, (u32, &'static str)> =
-            std::collections::HashMap::new();
-        for i in 0..req.count {
-            let idx = req.start + i;
-            let intermediate_pk = master_to_wallet_unhardened(&master_pk, idx);
-            let synthetic_pk = intermediate_pk.derive_synthetic();
-            let inner_ph: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
-            inner_phs.push(inner_ph);
-            ph_meta.entry(inner_ph).or_insert((idx, "unhardened"));
-        }
-        for extra in &req.extra_inner_phs {
-            let ph = parse_bytes32(&extra.puzzle_hash)?;
-            let kind: &'static str = match extra.kind.as_str() {
-                "hardened" => "hardened",
-                "unhardened" => "unhardened",
-                other => {
-                    return Err(EngineError::InvalidParams(format!(
-                        "extra_inner_phs.kind must be 'hardened' or 'unhardened', got {other}"
-                    )));
-                }
-            };
-            if ph_meta.insert(ph, (extra.derivation_index, kind)).is_none() {
-                inner_phs.push(ph);
-            }
-        }
-        let inner_phs_set: std::collections::HashSet<Bytes32> =
-            inner_phs.iter().copied().collect();
-
-        let client = make_client(req.endpoint.as_deref());
-
-        let hint_starts: &Option<std::collections::HashMap<String, u32>> =
-            &req.hint_start_heights;
-        let peak_opt: Option<u32> = client
-            .get_blockchain_state()
-            .await
-            .ok()
-            .and_then(|s| s.blockchain_state)
-            .map(|bs| bs.peak.height);
-        wlog(&format!(
-            "[cat_scan_hints] start: req.start={} count={} extra_inner_phs={} inner_phs_total={}",
-            req.start,
-            req.count,
-            req.extra_inner_phs.len(),
-            inner_phs.len()
-        ));
-        // See nft_scan_hints for the rationale on serializing these.
-        //
-        // Also: CAT used to use windowed=true (split each hint scan into
-        // ~18 sub-requests of 500k blocks each, newest-first). That was
-        // designed for coinset's old behavior where open-ended queries
-        // timed out on deep history. With include_spent_coins=false the
-        // response is tiny (only unspent CATs hinted to this PH — usually
-        // 0-5 records) so the windowing produces ~180 wasted HTTP calls
-        // per chunk. Each call's request/response churn pushed the WASM
-        // heap toward OOM and silently trapped the SW. windowed=false
-        // here = one open-ended request per hint, matching NFT scan.
-        let mut hint_results: Vec<(Bytes32, Result<Vec<chia_wallet_sdk::coinset::CoinRecord>, String>)> =
-            Vec::with_capacity(inner_phs.len());
-        for hint in &inner_phs {
-            let key = format!("0x{}", hex::encode(hint));
-            let start_h = hint_starts.as_ref().and_then(|m| m.get(&key).copied());
-            let res = fetch_hint_with_retry(
-                &client,
-                *hint,
-                start_h,
-                peak_opt,
-                Some(false),
-                false,
-            )
-            .await;
-            hint_results.push((*hint, res));
-        }
-
-        let mut failed_hints: Vec<String> = Vec::new();
-        let mut candidates: Vec<serde_json::Value> = Vec::new();
-        for (hint, res) in hint_results {
-            let recs = match res {
-                Ok(r) => r,
-                Err(e) => {
-                    let hex_hint = format!("0x{}", hex::encode(hint));
-                    tracing::warn!(
-                        "cat_scan_hints: giving up on hint {} after {} attempts: {}",
-                        hex_hint,
-                        COINSET_RETRY_ATTEMPTS,
-                        e
-                    );
-                    failed_hints.push(hex_hint);
-                    continue;
-                }
-            };
-            for rec in recs {
-                if inner_phs_set.contains(&rec.coin.puzzle_hash) {
-                    continue; // XCH receive — covered elsewhere
-                }
-                if rec.spent {
-                    continue;
-                }
-                let (deriv_idx, deriv_kind) = match ph_meta.get(&hint).copied() {
-                    Some((i, k)) => (
-                        serde_json::Value::from(i),
-                        serde_json::Value::from(k),
-                    ),
-                    None => (serde_json::Value::Null, serde_json::Value::Null),
-                };
-                candidates.push(serde_json::json!({
-                    "hint": format!("0x{}", hex::encode(hint)),
-                    "coin": {
-                        "parent_coin_info": format!("0x{}", hex::encode(rec.coin.parent_coin_info)),
-                        "puzzle_hash": format!("0x{}", hex::encode(rec.coin.puzzle_hash)),
-                        "amount": rec.coin.amount.to_string(),
-                    },
-                    "coin_id": format!("0x{}", hex::encode(rec.coin.coin_id())),
-                    "confirmed_block_index": rec.confirmed_block_index,
-                    "spent": rec.spent,
-                    "spent_block_index": rec.spent_block_index,
-                    "derivation_index": deriv_idx,
-                    "derivation_kind": deriv_kind,
-                }));
-            }
-        }
-        wlog(&format!(
-            "[cat_scan_hints] total candidates: {}, wasm_heap={:.2}MB",
-            candidates.len(),
-            wasm_memory_bytes() as f64 / (1024.0 * 1024.0),
-        ));
-
-        Ok(serde_json::json!({
-            "candidates": candidates,
-            "peak_height": peak_opt,
-            "failed_hints": failed_hints,
-            "scanned_inner_hashes": inner_phs.len(),
-        })
-        .to_string())
-    }
 
     /// Phase 2 of the split CAT scan — parse pre-fetched candidates into
     /// per-asset rollups.

@@ -119,8 +119,13 @@ export interface CoinStore {
   pending_cat_candidates?: Record<string, RawCatCandidate>;
 }
 
-/** Raw NFT candidate as returned by `nft_scan_hints` — awaiting parse. */
-export interface RawNftCandidate {
+/**
+ * Hint-matched coin record returned by `asset_scan_hints`. Asset-type-
+ * agnostic — both NFT phase-2 (`nft_parse_candidates`) and CAT phase-2
+ * (`cat_parse_candidates`) consume the same shape and decide what each
+ * candidate actually is by parsing its parent spend.
+ */
+export interface RawAssetCandidate {
   hint: string;
   coin: { parent_coin_info: string; puzzle_hash: string; amount: string };
   coin_id: string;
@@ -131,17 +136,11 @@ export interface RawNftCandidate {
   derivation_kind: "hardened" | "unhardened";
 }
 
-/** Raw CAT candidate as returned by `cat_scan_hints` — awaiting parse. */
-export interface RawCatCandidate {
-  hint: string;
-  coin: { parent_coin_info: string; puzzle_hash: string; amount: string };
-  coin_id: string;
-  confirmed_block_index: number;
-  spent: boolean;
-  spent_block_index: number;
-  derivation_index: number;
-  derivation_kind: "hardened" | "unhardened";
-}
+/** @deprecated Use `RawAssetCandidate`. Kept as alias for in-flight refactors. */
+export type RawNftCandidate = RawAssetCandidate;
+
+/** @deprecated Use `RawAssetCandidate`. Kept as alias for in-flight refactors. */
+export type RawCatCandidate = RawAssetCandidate;
 
 const empty = (): CoinStore => ({
   last_synced_height: 0,

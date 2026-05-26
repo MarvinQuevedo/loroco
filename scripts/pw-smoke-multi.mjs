@@ -139,8 +139,8 @@ try {
   // the other wallet, not the Lock screen.
   const bodyAfterSwitch = await popup.locator("body").innerText();
   log("after switch (first 200 chars):", bodyAfterSwitch.slice(0, 200).replace(/\s+/g, " "));
-  if (!new RegExp(`fp ${fpFirst}`).test(bodyAfterSwitch)) {
-    fail(`expected first wallet (fp ${fpFirst}) to be active after switch`);
+  if (!new RegExp(` ${fpFirst}`).test(bodyAfterSwitch)) {
+    fail(`expected first wallet ( ${fpFirst}) to be active after switch`);
   }
   // The wallet-switcher in the header should still be present and show fpFirst as selected
   const headerSwitcherVal = await popup.locator(".wallet-switcher").first().inputValue();

@@ -11,7 +11,7 @@ import { handleApprovalMessage, isApprovalMessage } from "../src/background/appr
 import { tickCoinSync } from "../src/background/coin-sync";
 import { setActiveWallet } from "../src/background/engine";
 import { handlePopupMessage, isPopupMessage } from "../src/background/popup-rpc";
-import { handleRpc } from "../src/background/rpc-router";
+import { canonicalizeMethod, handleRpc } from "../src/background/rpc-router";
 import { startSyncLoop } from "../src/background/sync-loop";
 import { ensurePermissions, requireConnected } from "../src/background/permissions";
 
@@ -101,11 +101,14 @@ export default defineBackground(() => {
 
     (async () => {
       try {
-        if (msg.method !== "connect") {
+        // Normalise legacy/aliased method names (chia_*, chip0002_*, snake_case)
+        // down to the CHIP-0002 canonical surface before any gating runs.
+        const method = canonicalizeMethod(String(msg.method)) as ChiaMethod;
+        if (method !== "connect") {
           requireConnected(origin);
         }
-        await ensurePermissions(origin, msg.method as ChiaMethod);
-        const result = await handleRpc(origin, msg.method as ChiaMethod, msg.params);
+        await ensurePermissions(origin, method);
+        const result = await handleRpc(origin, method, msg.params);
         sendResponse({ result });
       } catch (err) {
         const e = err as Error & { code?: number; data?: unknown };

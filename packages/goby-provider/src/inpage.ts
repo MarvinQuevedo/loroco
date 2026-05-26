@@ -184,6 +184,18 @@ const provider: ChiaWallet = {
   takeOffer(params: ChiaMethodMap["takeOffer"]["params"]) {
     return call("takeOffer", params);
   },
+  signMessageByAddress(params: ChiaMethodMap["signMessageByAddress"]["params"]) {
+    return call("signMessageByAddress", params);
+  },
+  getNFTs(params?: ChiaMethodMap["getNFTs"]["params"]) {
+    return call("getNFTs", params);
+  },
+  getNFTInfo(params: ChiaMethodMap["getNFTInfo"]["params"]) {
+    return call("getNFTInfo", params);
+  },
+  cancelOffer(params: ChiaMethodMap["cancelOffer"]["params"]) {
+    return call("cancelOffer", params);
+  },
 
   on(event, listener) {
     let set = listeners.get(event);

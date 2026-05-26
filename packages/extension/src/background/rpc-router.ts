@@ -104,11 +104,76 @@ function strip0x(s: string): string {
  */
 const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   "signMessage",
+  "signMessageByAddress",
+  "signCoinSpends",
   "transfer",
+  "sendTransaction",
+  "createOffer",
   "takeOffer",
+  "cancelOffer",
   "walletSwitchChain",
   "walletWatchAsset",
 ]);
+
+// ─── Method-name aliasing ────────────────────────────────────────────────
+// dApps target several historical naming conventions for the same wallet
+// surface:
+//   • CHIP-0002 camelCase             — `connect`, `signMessage`, …
+//   • Goby pre-CHIP-0002 prefixed     — `chia_requestAccounts`, …
+//   • WalletConnect2 topic-style      — `chip0002_signMessage`, …
+//   • Sage WC2 with `chia_` snake     — `chia_signMessageByAddress`, …
+// We accept all of them by canonicalising on the way in. The handler set
+// only ever needs to be keyed on CHIP-0002 camelCase.
+const METHOD_ALIASES: Record<string, ChiaMethod> = {
+  // chia_* (Goby legacy + Sage WC2)
+  chia_chainId: "chainId",
+  chia_connect: "connect",
+  chia_requestAccounts: "requestAccounts",
+  chia_accounts: "accounts",
+  chia_getPublicKeys: "getPublicKeys",
+  chia_filterUnlockedCoins: "filterUnlockedCoins",
+  chia_getAssetCoins: "getAssetCoins",
+  chia_getAssetBalance: "getAssetBalance",
+  chia_signCoinSpends: "signCoinSpends",
+  chia_signMessage: "signMessage",
+  chia_signMessageByAddress: "signMessageByAddress",
+  chia_transfer: "transfer",
+  chia_sendTransaction: "sendTransaction",
+  chia_createOffer: "createOffer",
+  chia_takeOffer: "takeOffer",
+  chia_cancelOffer: "cancelOffer",
+  chia_getNFTs: "getNFTs",
+  chia_getNFTInfo: "getNFTInfo",
+  chia_walletSwitchChain: "walletSwitchChain",
+  chia_walletWatchAsset: "walletWatchAsset",
+  // chip0002_* (WC2 topic style — CHIP-0002 namespace)
+  chip0002_chainId: "chainId",
+  chip0002_connect: "connect",
+  chip0002_getPublicKeys: "getPublicKeys",
+  chip0002_filterUnlockedCoins: "filterUnlockedCoins",
+  chip0002_getAssetCoins: "getAssetCoins",
+  chip0002_getAssetBalance: "getAssetBalance",
+  chip0002_signCoinSpends: "signCoinSpends",
+  chip0002_signMessage: "signMessage",
+  chip0002_signMessageByPublicKey: "signMessage",
+  chip0002_signMessageByAddress: "signMessageByAddress",
+  chip0002_sendTransaction: "sendTransaction",
+  // snake_case Sage WC2 names that some clients send unchanged
+  filter_unlocked_coins: "filterUnlockedCoins",
+  get_asset_coins: "getAssetCoins",
+  get_asset_balance: "getAssetBalance",
+  sign_message_with_public_key: "signMessage",
+  sign_message_by_address: "signMessageByAddress",
+  send_transaction_immediately: "sendTransaction",
+  get_nfts: "getNFTs",
+  get_nft_info: "getNFTInfo",
+  cancel_offer: "cancelOffer",
+};
+
+/** Normalise an alias/legacy method name down to its CHIP-0002 canonical. */
+export function canonicalizeMethod(method: string): ChiaMethod {
+  return (METHOD_ALIASES[method] ?? method) as ChiaMethod;
+}
 
 type Handler<M extends ChiaMethod> = (
   origin: string,
@@ -352,16 +417,59 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     return with0x(res.signature) as Hex;
   },
 
-  // The wasm engine doesn't expose a raw `sign_coin_spends` endpoint yet —
-  // every signing path goes through send_xch / send_cat / transfer_nft /
-  // take_offer which build the bundle internally. Surface a clear CHIP-0002
-  // MethodNotFound so dApps know to fall back to those higher-level methods.
-  async signCoinSpends() {
-    throw new (class extends Error {
-      code = 4004;
-    })(
-      "signCoinSpends is not exposed yet — use transfer / takeOffer / sendTransaction with a fully-built bundle instead.",
+  // signCoinSpends: ship the bundle to the engine which derives our SKs +
+  // signs every required AGG_SIG condition. The dApp passes its preferred
+  // derivation_index per coin (it knows which of our addresses received the
+  // coin). Note that we DON'T pop an approval popup for partial_sign:true —
+  // those are co-signing flows where the dApp will need a second round-trip
+  // for a real fund-moving signature anyway. Full-sign always pops.
+  async signCoinSpends(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["signCoinSpends"]["params"];
+    if (!p?.coinSpends || !Array.isArray(p.coinSpends)) {
+      throw Errors.invalidParams("signCoinSpends requires { coinSpends }");
+    }
+
+    // dApps generally pass raw `{coin, puzzle_reveal, solution}` triples
+    // without a derivation_index. Look it up from the wallet's derivation
+    // window using puzzle_hash; if it's not one of ours, fail loudly so the
+    // dApp knows it asked us to sign something we don't own.
+    const phToIdx = await derivePhToIndex();
+    const enriched = p.coinSpends.map((cs, i) => {
+      const phRaw = (cs.coin as { puzzle_hash?: string } | undefined)?.puzzle_hash;
+      if (!phRaw) {
+        throw Errors.invalidParams(`coinSpends[${i}].coin.puzzle_hash is required`);
+      }
+      const phLookup = with0x(strip0x(phRaw));
+      const idx = phToIdx[phLookup] ?? phToIdx[strip0x(phRaw)];
+      if (idx === undefined) {
+        throw Errors.noSecretKey(
+          `coinSpends[${i}] puzzle_hash ${phLookup} doesn't match any derivation in the first ${DERIVATION_WINDOW} keys`,
+        );
+      }
+      return {
+        coin: {
+          parent_coin_info: with0x(strip0x((cs.coin as { parent_coin_info: string }).parent_coin_info)),
+          puzzle_hash: phLookup,
+          amount: Number((cs.coin as { amount: number | string }).amount),
+        },
+        puzzle_reveal: with0x(cs.puzzle_reveal as string),
+        solution: with0x(cs.solution as string),
+        derivation_index: idx,
+        hardened: false,
+      };
+    });
+
+    const res = await callEngine<{ signature: string; missing_keys: string[] }>(
+      "sign_coin_spends",
+      {
+        fingerprint: fp,
+        coin_spends: enriched,
+        partial_sign: Boolean(p.partialSign),
+      },
     );
+    return with0x(res.signature) as ChiaMethodMap["signCoinSpends"]["result"];
   },
 
   // ── State-mutating endpoints ────────────────────────────────────────────
@@ -467,27 +575,193 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     return { id: with0x(res.tx_id) } as ChiaMethodMap["transfer"]["result"];
   },
 
-  // No raw-bundle submit endpoint in the engine yet; sendTransaction is the
-  // dApp escape hatch for pre-signed bundles built externally (e.g. Goby's
-  // own offer/spend flows). Surface CHIP-0002 MethodNotFound until the
-  // engine gets a `submit_transaction` dispatch arm.
-  async sendTransaction() {
-    throw new (class extends Error {
-      code = 4004;
-    })(
-      "sendTransaction is not implemented — Loroco builds + signs bundles internally via transfer / takeOffer.",
+  // Raw-bundle broadcast — the escape hatch for pre-signed bundles built
+  // externally (Goby's offer engines, multi-sig co-signing flows, …). The
+  // engine just calls `push_tx` against coinset; we don't touch the bundle.
+  async sendTransaction(_origin, params) {
+    const p = params as ChiaMethodMap["sendTransaction"]["params"];
+    if (!p?.spendBundle?.coin_spends) {
+      throw Errors.invalidParams("sendTransaction requires { spendBundle.coin_spends }");
+    }
+    const res = await callEngine<{ status: number; tx_id: string; error?: string }>(
+      "submit_transaction",
+      {
+        spend_bundle: {
+          coin_spends: p.spendBundle.coin_spends.map((cs) => ({
+            coin: {
+              parent_coin_info: with0x(strip0x(cs.coin.parent_coin_info)),
+              puzzle_hash: with0x(strip0x(cs.coin.puzzle_hash)),
+              amount: Number(cs.coin.amount),
+            },
+            puzzle_reveal: with0x(cs.puzzle_reveal),
+            solution: with0x(cs.solution),
+          })),
+          aggregated_signature: with0x(p.spendBundle.aggregated_signature),
+        },
+        endpoint: "mainnet",
+      },
     );
+    return [
+      {
+        status: res.status as 1 | 2 | 3,
+        error: res.error ?? null,
+      },
+    ] as ChiaMethodMap["sendTransaction"]["result"];
   },
 
-  // Offer creation is intentionally out-of-scope in the WASM engine today
-  // (see vendor/sage/.../engine.rs:911 comment). Return MethodNotFound with a
-  // dedicated message so dApps don't loop on "should I retry?".
-  async createOffer() {
-    throw new (class extends Error {
-      code = 4004;
-    })(
-      "createOffer is not implemented yet — Loroco can take offers (takeOffer) but cannot mint new ones until the engine exposes make_offer.",
-    );
+  // createOffer: build an offer1... string from the maker side. The dApp
+  // passes the assets it wants to lock (offerAssets) and the assets it wants
+  // back (requestAssets). We pick coins from our local store + forward to
+  // make_offer in the engine, which handles the spend bookkeeping + signs.
+  async createOffer(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["createOffer"]["params"];
+    if (!p?.offerAssets?.length) {
+      throw Errors.invalidParams("createOffer requires at least one offerAssets entry");
+    }
+    if (!p?.requestAssets?.length) {
+      throw Errors.invalidParams("createOffer requires at least one requestAssets entry");
+    }
+
+    let offeredXch = 0n;
+    const offeredCats = new Map<string, bigint>();
+    for (const a of p.offerAssets) {
+      const amt = BigInt(String(a.amount));
+      if (a.assetId === "" || a.assetId === null || a.assetId === undefined) {
+        offeredXch += amt;
+      } else {
+        const id = with0x(strip0x(a.assetId));
+        offeredCats.set(id, (offeredCats.get(id) ?? 0n) + amt);
+      }
+    }
+    let requestedXch = 0n;
+    const requestedCats = new Map<string, bigint>();
+    for (const a of p.requestAssets) {
+      const amt = BigInt(String(a.amount));
+      if (a.assetId === "" || a.assetId === null || a.assetId === undefined) {
+        requestedXch += amt;
+      } else {
+        const id = with0x(strip0x(a.assetId));
+        requestedCats.set(id, (requestedCats.get(id) ?? 0n) + amt);
+      }
+    }
+    const fee = BigInt(String(p.fee ?? 0));
+
+    const phToIdx = await derivePhToIndex();
+    const store = await readCoinStore(fp);
+
+    // Pick XCH inputs to cover offered XCH + fee.
+    const xchInputs: Array<{
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      derivation_index: number;
+    }> = [];
+    const xchNeeded = offeredXch + fee;
+    if (xchNeeded > 0n) {
+      const candidates = Object.values(store.coins)
+        .filter((c) => !c.spent && phToIdx[c.puzzle_hash] !== undefined)
+        .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+      let running = 0n;
+      for (const c of candidates) {
+        if (running >= xchNeeded) break;
+        xchInputs.push({
+          parent_coin_info: c.parent_coin_info,
+          puzzle_hash: c.puzzle_hash,
+          amount: c.amount,
+          derivation_index: phToIdx[c.puzzle_hash]!,
+        });
+        running += BigInt(c.amount);
+      }
+      if (running < xchNeeded) {
+        throw Errors.spendableBalanceExceeded(
+          `Need ${xchNeeded} XCH mojos (offered + fee), only ${running} available`,
+        );
+      }
+    }
+
+    // Pick CAT inputs per asset_id to cover the offered amount.
+    const catInputs: Array<{
+      asset_id: string;
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      inner_puzzle_hash: string;
+      derivation_index: number;
+      lineage_proof: { parent_name: string; inner_puzzle_hash: string; amount: string };
+    }> = [];
+    for (const [assetId, need] of offeredCats) {
+      const cat = (store.cats ?? {})[assetId] ?? (store.cats ?? {})[strip0x(assetId)];
+      if (!cat) {
+        throw Errors.spendableBalanceExceeded(`Offered CAT ${assetId} not in wallet`);
+      }
+      const candidates = cat.coins
+        .filter((c) => !c.spent && phToIdx[c.inner_puzzle_hash] !== undefined)
+        .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+      let running = 0n;
+      for (const c of candidates) {
+        if (running >= need) break;
+        catInputs.push({
+          asset_id: assetId,
+          parent_coin_info: c.parent_coin_info,
+          puzzle_hash: c.puzzle_hash,
+          amount: c.amount,
+          inner_puzzle_hash: c.inner_puzzle_hash,
+          derivation_index: phToIdx[c.inner_puzzle_hash]!,
+          lineage_proof: c.lineage_proof,
+        });
+        running += BigInt(c.amount);
+      }
+      if (running < need) {
+        throw Errors.spendableBalanceExceeded(
+          `Need ${need} of offered CAT ${assetId}, only ${running} available`,
+        );
+      }
+    }
+
+    const res = await callEngine<{
+      offer: string;
+      offer_id: string;
+      error?: string;
+    }>("make_offer", {
+      fingerprint: fp,
+      offered_xch_mojos: offeredXch.toString(),
+      offered_cats: Array.from(offeredCats.entries()).map(([asset_id, amount]) => ({
+        asset_id,
+        amount: amount.toString(),
+      })),
+      requested_xch_mojos: requestedXch.toString(),
+      requested_cats: Array.from(requestedCats.entries()).map(([asset_id, amount]) => ({
+        asset_id,
+        amount: amount.toString(),
+      })),
+      fee_mojos: fee.toString(),
+      input_coins: xchInputs,
+      input_cats: catInputs,
+    });
+    if (res.error) throw new Error(res.error);
+
+    // Persist the offer so cancelOffer({secure:false}) can drop it later.
+    const key = `offers.${fp}`;
+    const data = await chrome.storage.local.get(key);
+    const list = (data[key] as Array<{
+      id: string;
+      offer: string;
+      created_at: number;
+      cancelled?: boolean;
+    }> | undefined) ?? [];
+    list.push({
+      id: res.offer_id,
+      offer: res.offer,
+      created_at: Date.now(),
+    });
+    await chrome.storage.local.set({ [key]: list });
+
+    return {
+      id: with0x(res.offer_id) as Hex,
+      offer: res.offer,
+    } as ChiaMethodMap["createOffer"]["result"];
   },
 
   // Take an existing offer: enrich the dApp's `{offer, fee}` params with the
@@ -603,7 +877,153 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     if (res.error) throw new Error(res.error);
     return { id: with0x(res.tx_id) } as ChiaMethodMap["takeOffer"]["result"];
   },
+
+  // ── Sage WalletConnect2 extras ──────────────────────────────────────────
+  //
+  // signMessageByAddress: resolve `address` → puzzle_hash → derivation_index,
+  // then look up the matching public_key from our derived window and forward
+  // to the engine's existing `sign_message_with_public_key` path. This mirrors
+  // `vendor/sage/.../endpoints/wallet_connect.rs:sign_message_by_address` but
+  // does the address → key resolution on the JS side so the WASM engine
+  // doesn't need to query the (browser-side) coin store.
+  async signMessageByAddress(_origin, params) {
+    const p = params as ChiaMethodMap["signMessageByAddress"]["params"];
+    if (!p?.message || !p?.address) {
+      throw Errors.invalidParams("signMessageByAddress requires { message, address }");
+    }
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+
+    // Decode the address to its puzzle_hash via the engine helper. Returns
+    // the inner puzzle hash (p2_puzzle_hash) for a standard XCH address.
+    const decoded = await callEngine<{ valid: boolean; puzzle_hash?: string; prefix?: string }>(
+      "decode_address",
+      { address: p.address },
+    );
+    if (!decoded.valid || !decoded.puzzle_hash) {
+      throw Errors.invalidParams(`Address ${p.address} is not a valid Chia address`);
+    }
+    const targetPh = strip0x(decoded.puzzle_hash).toLowerCase();
+
+    // Walk the derivation window until we find the matching ph. We expose
+    // ACCOUNTS_COUNT addresses through `accounts`, but a dApp may pass any
+    // address it received from `getPublicKeys`/`getAssetCoins`, which can sit
+    // further down the curve. Use the same window as derivePhToIndex.
+    const addrs = await deriveAddresses(DERIVATION_WINDOW);
+    const match = addrs.find((a) => strip0x(a.puzzle_hash).toLowerCase() === targetPh);
+    if (!match) {
+      throw Errors.noSecretKey(
+        `No matching derivation for address ${p.address} in the first ${DERIVATION_WINDOW} keys`,
+      );
+    }
+
+    const res = await callEngine<{ signature: string }>("sign_message_with_public_key", {
+      fingerprint: fp,
+      message: with0x(p.message),
+      public_key: with0x(match.public_key),
+    });
+    return {
+      publicKey: with0x(match.public_key) as Hex,
+      signature: with0x(res.signature) as Hex,
+    };
+  },
+
+  // getNFTs / getNFTInfo: read-only queries over the local NFT coin store.
+  // Mirrors `vendor/sage/.../endpoints/wallet_connect.rs:get_asset_coins` for
+  // the NFT branch but returns the richer NftInfo shape (metadata + royalty)
+  // dApps expect instead of just spendable coins.
+  async getNFTs(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["getNFTs"]["params"];
+    const limit = (p?.limit ?? 50) | 0;
+    const offset = (p?.offset ?? 0) | 0;
+    const didFilter = p?.didId ? strip0x(p.didId) : null;
+    const store = await readCoinStore(fp);
+
+    const all = Object.values(store.nfts ?? {})
+      .filter((n) => !n.spent)
+      .filter((n) =>
+        didFilter == null ? true : strip0x(n.current_owner_did ?? "") === didFilter,
+      )
+      .slice(offset, offset + limit)
+      .map(nftViewToInfo);
+    return all;
+  },
+
+  async getNFTInfo(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["getNFTInfo"]["params"];
+    if (!p?.coinId && !p?.launcherId) {
+      throw Errors.invalidParams("getNFTInfo requires { coinId } or { launcherId }");
+    }
+    const store = await readCoinStore(fp);
+    const nfts = Object.values(store.nfts ?? {});
+    const target = strip0x(p.launcherId ?? p.coinId ?? "");
+    const match = nfts.find(
+      (n) => strip0x(n.launcher_id) === target || strip0x(n.coin_id) === target,
+    );
+    return match ? nftViewToInfo(match) : null;
+  },
+
+  // cancelOffer: with secure=false (the Goby default), we just drop the
+  // tracked offer from local storage so the dApp can recreate it. A "secure"
+  // cancellation that actually spends the offered coins back to the wallet
+  // needs the engine's `make_offer`-style coin selection — not yet wired,
+  // so we surface a clear MethodNotFound to keep the dApp UX honest.
+  async cancelOffer(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["cancelOffer"]["params"];
+    if (!p?.id) throw Errors.invalidParams("cancelOffer requires { id }");
+    const secure = p.secure ?? true;
+    if (secure) {
+      throw new (class extends Error {
+        code = 4004;
+      })(
+        "Secure cancelOffer is not implemented yet — pass { secure: false } to drop the offer from local tracking only.",
+      );
+    }
+    const offerId = strip0x(p.id);
+    const key = `offers.${fp}`;
+    const data = await chrome.storage.local.get(key);
+    const list = (data[key] as Array<{ id: string; cancelled?: boolean }> | undefined) ?? [];
+    let cancelled = false;
+    for (const o of list) {
+      if (strip0x(o.id) === offerId && !o.cancelled) {
+        o.cancelled = true;
+        cancelled = true;
+      }
+    }
+    if (cancelled) await chrome.storage.local.set({ [key]: list });
+    return { id: with0x(offerId) as Hex, cancelled };
+  },
 };
+
+/** Local CoinStore.NftView → wire NftInfo. */
+function nftViewToInfo(
+  n: import("./coin-store.js").NftView,
+): import("@ozone/goby-provider/types").NftInfo {
+  return {
+    launcher_id: with0x(n.launcher_id) as Hex,
+    nft_coin_id: with0x(n.coin_id) as Hex,
+    owner_did: n.current_owner_did ? (with0x(n.current_owner_did) as Hex) : null,
+    royalty_address: with0x(n.royalty_puzzle_hash) as Hex,
+    royalty_percentage: n.royalty_basis_points,
+    data_uris: n.metadata.data_uris ?? [],
+    data_hash: n.metadata.data_hash ? (with0x(n.metadata.data_hash) as Hex) : null,
+    metadata_uris: n.metadata.metadata_uris ?? [],
+    metadata_hash: n.metadata.metadata_hash
+      ? (with0x(n.metadata.metadata_hash) as Hex)
+      : null,
+    license_uris: n.metadata.license_uris ?? [],
+    license_hash: n.metadata.license_hash ? (with0x(n.metadata.license_hash) as Hex) : null,
+    edition_number: n.metadata.edition_number,
+    edition_total: n.metadata.edition_total,
+    p2_puzzle_hash: with0x(n.p2_puzzle_hash) as Hex,
+  };
+}
 
 export async function handleRpc<M extends ChiaMethod>(
   origin: string,

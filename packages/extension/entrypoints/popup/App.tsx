@@ -368,6 +368,8 @@ function approvalTitle(method: string): string {
       return "Sign coin spends";
     case "signMessage":
       return "Sign message";
+    case "signMessageByAddress":
+      return "Sign message";
     case "transfer":
       return "Send transfer";
     case "sendTransaction":
@@ -376,6 +378,8 @@ function approvalTitle(method: string): string {
       return "Create offer";
     case "takeOffer":
       return "Take offer";
+    case "cancelOffer":
+      return "Cancel offer";
     case "walletSwitchChain":
       return "Switch network";
     case "walletWatchAsset":
@@ -681,6 +685,52 @@ function ApprovalSummary({ request }: { request: PendingApproval }) {
           </div>
           {fee != null && BigInt(String(fee)) > 0n && (
             <p className="muted small">Fee: {String(fee)} mojos</p>
+          )}
+        </div>
+      );
+    }
+
+    case "signMessageByAddress": {
+      const message = params?.message;
+      const address = params?.address;
+      return (
+        <div className="result">
+          <p className="muted small">
+            This site is asking the wallet to sign a message using the key for a
+            specific address you own. Signed messages can prove ownership but
+            cannot move funds.
+          </p>
+          <div>
+            <span className="muted">address</span>
+            <code>{String(address ?? "")}</code>
+          </div>
+          <div>
+            <span className="muted">message (hex)</span>
+            <code>{String(message ?? "")}</code>
+          </div>
+        </div>
+      );
+    }
+
+    case "cancelOffer": {
+      const id = params?.id;
+      const secure = params?.secure !== false;
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            This site is asking the wallet to {secure ? "broadcast a cancellation spend for" : "drop local tracking of"}{" "}
+            an offer. {secure ? "A cancellation spend prevents anyone from accepting the offer afterwards." : "The offer can still be accepted on-chain if someone has the offer string."}
+          </p>
+          <div>
+            <span className="muted">offer id</span>
+            <code>{String(id ?? "")}</code>
+          </div>
+          {fee != null && BigInt(String(fee)) > 0n && (
+            <div>
+              <span className="muted">fee</span>
+              <code>{String(fee)}</code>
+            </div>
           )}
         </div>
       );
@@ -1021,8 +1071,8 @@ function LockScreen({
             {wallets.map((w) => (
               <option key={w.fingerprint} value={w.fingerprint}>
                 {w.label === `Wallet ${w.fingerprint}`
-                  ? `fp ${w.fingerprint}`
-                  : `${w.label} · fp ${w.fingerprint}`}
+                  ? ` ${w.fingerprint}`
+                  : `${w.label} ·  ${w.fingerprint}`}
               </option>
             ))}
           </select>
@@ -1062,7 +1112,7 @@ function LockScreen({
           <>
             <p className="muted small">
               This deletes the encrypted seed for{" "}
-              <strong>{wallet.label === `Wallet ${wallet.fingerprint}` ? `fp ${wallet.fingerprint}` : wallet.label}</strong>{" "}
+              <strong>{wallet.label === `Wallet ${wallet.fingerprint}` ? ` ${wallet.fingerprint}` : wallet.label}</strong>{" "}
               from this browser. Make sure you have your recovery phrase before continuing.
             </p>
             <div className="row">
@@ -1232,8 +1282,8 @@ function HomeScreen({
                   {wallets.map((w) => (
                     <option key={w.fingerprint} value={w.fingerprint}>
                       {w.label === `Wallet ${w.fingerprint}`
-                        ? `fp ${w.fingerprint}`
-                        : `${w.label} · fp ${w.fingerprint}`}
+                        ? ` ${w.fingerprint}`
+                        : `${w.label} ·  ${w.fingerprint}`}
                     </option>
                   ))}
                 </select>
@@ -1391,7 +1441,7 @@ function SettingsTab({
               {w.fingerprint === wallet.fingerprint ? "●" : "○"}
             </span>
             <span className="wallet-row-label">
-              {w.label === `Wallet ${w.fingerprint}` ? `fp ${w.fingerprint}` : w.label}
+              {w.label === `Wallet ${w.fingerprint}` ? ` ${w.fingerprint}` : w.label}
             </span>
             <span className="wallet-row-fp muted">{w.fingerprint}</span>
           </button>
@@ -1843,9 +1893,9 @@ function walletDisplayLine(w: StoredWallet): string {
   const fpStr = w.fingerprint.toString();
   const defaultLabel = `Wallet ${fpStr}`;
   if (!w.label || w.label === defaultLabel) {
-    return `fp ${fpStr}`;
+    return ` ${fpStr}`;
   }
-  return `${w.label} · fp ${fpStr}`;
+  return `${w.label} ·  ${fpStr}`;
 }
 
 function HomeTab({

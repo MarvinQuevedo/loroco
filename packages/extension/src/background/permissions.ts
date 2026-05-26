@@ -45,6 +45,8 @@ const NO_APPROVAL_METHODS = new Set<ChiaMethod>([
   "getAssetCoins",
   "getAssetBalance",
   "accounts",
+  "getNFTs",
+  "getNFTInfo",
 ]);
 
 const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([
@@ -54,10 +56,12 @@ const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([
   "walletWatchAsset",
   "signCoinSpends",
   "signMessage",
+  "signMessageByAddress",
   "transfer",
   "sendTransaction",
   "createOffer",
   "takeOffer",
+  "cancelOffer",
 ]);
 
 export async function ensurePermissions(origin: string, method: ChiaMethod) {

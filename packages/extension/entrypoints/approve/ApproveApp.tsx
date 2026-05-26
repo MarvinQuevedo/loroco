@@ -102,6 +102,7 @@ function titleForMethod(method: string): string {
     case "signCoinSpends":
       return "Sign coin spends";
     case "signMessage":
+    case "signMessageByAddress":
       return "Sign message";
     case "transfer":
       return "Send transfer";
@@ -111,6 +112,8 @@ function titleForMethod(method: string): string {
       return "Create offer";
     case "takeOffer":
       return "Take offer";
+    case "cancelOffer":
+      return "Cancel offer";
     case "walletSwitchChain":
       return "Switch network";
     case "walletWatchAsset":
@@ -190,6 +193,47 @@ function SummaryFor({ request }: { request: PendingRequest }) {
           <div>
             <span className="muted">asset id</span>
             <code>{String(assetId ?? "(XCH)")}</code>
+          </div>
+          {fee != null && (
+            <div>
+              <span className="muted">fee</span>
+              <code>{String(fee)}</code>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    case "signMessageByAddress": {
+      const message = params?.message;
+      const address = params?.address;
+      return (
+        <div className="result">
+          <div>
+            <span className="muted">address</span>
+            <code>{String(address ?? "")}</code>
+          </div>
+          <div>
+            <span className="muted">message (hex)</span>
+            <code>{String(message ?? "")}</code>
+          </div>
+        </div>
+      );
+    }
+
+    case "cancelOffer": {
+      const id = params?.id;
+      const fee = params?.fee;
+      const secure = params?.secure !== false;
+      return (
+        <div className="result">
+          <div>
+            <span className="muted">offer id</span>
+            <code>{String(id ?? "")}</code>
+          </div>
+          <div>
+            <span className="muted">mode</span>
+            <code>{secure ? "secure (broadcast spend)" : "local-only"}</code>
           </div>
           {fee != null && (
             <div>
