@@ -5,6 +5,9 @@ dist/
 *.tsbuildinfo
 .DS_Store
 
+# Per-repo Chrome profile created by `pnpm chrome`.
+.chrome-profile/
+
 # Rust build artifacts inside the embedded sage tree.
 vendor/sage/target/
 

@@ -72,19 +72,28 @@ You also need:
 - `wasm-pack` (`cargo install wasm-pack`)
 - Brew LLVM (`brew install llvm`) — used by `CC_wasm32_unknown_unknown`
 
-## Build
+## Daily commands
 
-```bash
-# 1. Build the WASM bundle from the embedded Sage (one-time + when Rust changes)
-pnpm wasm:build
+Run all of these from `~/Projects/Ozone/loroco/`.
 
-# 2. Dev the extension
-pnpm dev
+| Command | What it does |
+|---|---|
+| `pnpm start` | Fast build (skips wasm rebuild) + launch Chrome with the extension loaded. **Use this most of the time.** |
+| `pnpm start:full` | Full build (rebuilds wasm too, ~1 min) + launch Chrome. Run after editing `vendor/sage/`. |
+| `pnpm dev` | WXT dev mode — live reload + auto-launches Chrome. Best for iterating on UI. |
+| `pnpm chrome` | Just open Chrome with the existing build (no rebuild). |
+| `pnpm build:fast` | Build the extension only — does NOT touch wasm. ~2 s. |
+| `pnpm build` | Full build: rebuild wasm + rebuild extension. ~1 min on cold cache. |
+| `pnpm zip` | Produce `.output/chrome-mv3.zip` for distribution. |
+| `pnpm typecheck` | Run `tsc --noEmit` across all workspace packages. |
 
-# 3. Build for release
-pnpm build
-pnpm zip
-```
+The `pnpm chrome` script uses a per-repo profile at `./.chrome-profile/` so
+it doesn't touch your daily browsing session. The profile is persistent —
+log in once, the wallet state survives subsequent launches.
+
+If you want the extension in your *real* Chrome instead: go to
+`chrome://extensions/` → enable Developer mode → **Load unpacked** → pick
+`packages/extension/.output/chrome-mv3/`.
 
 ## Optional: local peer-sync sidecar
 

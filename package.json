@@ -10,6 +10,10 @@
     "wasm:fix-pkg-name": "node -e \"const fs=require('fs');const p='packages/wallet-wasm/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.name='@ozone/wallet-wasm';j.private=true;fs.writeFileSync(p, JSON.stringify(j,null,2)+'\\n');\"",
     "dev": "pnpm --filter @ozone/extension dev",
     "build": "pnpm wasm:build && pnpm --filter @ozone/extension build",
+    "build:fast": "pnpm --filter @ozone/extension build",
+    "chrome": "node scripts/launch-chrome.mjs",
+    "start": "pnpm build:fast && pnpm chrome",
+    "start:full": "pnpm build && pnpm chrome",
     "zip": "pnpm --filter @ozone/extension zip",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint"
