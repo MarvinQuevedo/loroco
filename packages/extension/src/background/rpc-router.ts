@@ -263,7 +263,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
   // (i.e. we have them unspent in the local store and they're not currently
   // queued for a pending approval). We don't have a mempool lock UI yet, so
   // "unlocked" == "unspent && we own it".
-  async filterUnlockedCoins(_origin, params) {
+  async filterUnlockedCoins(origin, params) {
     const fp = await loadActiveFingerprint();
     if (fp == null) throw Errors.unauthorized("No active wallet");
     const p = params as ChiaMethodMap["filterUnlockedCoins"]["params"];
@@ -276,12 +276,17 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     for (const cat of Object.values(store.cats ?? {})) {
       for (const c of cat.coins) if (!c.spent) owned.add(strip0x(c.coin_id));
     }
-    return p.coinNames.filter((id) => owned.has(strip0x(id))) as Hex[];
+    const matched = p.coinNames.filter((id) => owned.has(strip0x(id))) as Hex[];
+    console.log(
+      `[loroco/filterUnlockedCoins] origin=${origin} asked for ${p.coinNames.length}`,
+      `coins → ${matched.length} match our store (fp=${fp})`,
+    );
+    return matched;
   },
 
   // Goby-style get_spendable_coins. type=null/empty/"xch" → XCH; type="cat" → CAT;
   // type="nft" → NFT (one-coin entries since NFTs are singletons).
-  async getAssetCoins(_origin, params) {
+  async getAssetCoins(origin, params) {
     const fp = await loadActiveFingerprint();
     if (fp == null) throw Errors.unauthorized("No active wallet");
     const p = params as ChiaMethodMap["getAssetCoins"]["params"];
@@ -349,10 +354,16 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
         });
       }
     }
-    return out.slice(offset, offset + limit);
+    const sliced = out.slice(offset, offset + limit);
+    console.log(
+      `[loroco/getAssetCoins] origin=${origin} type=${p?.type ?? "(xch)"}`,
+      `assetId=${p?.assetId ?? "null"} → ${sliced.length} coins`,
+      `(${out.length} total, includeLocked=${includeLocked})`,
+    );
+    return sliced;
   },
 
-  async getAssetBalance(_origin, params) {
+  async getAssetBalance(origin, params) {
     const fp = await loadActiveFingerprint();
     if (fp == null) throw Errors.unauthorized("No active wallet");
     const p = params as ChiaMethodMap["getAssetBalance"]["params"];
@@ -393,6 +404,17 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
         coinCount += 1;
       }
     }
+
+    // Temporary diagnostic — kept until we trust the dApp balance path. Lets
+    // us reproduce in the live browser: open the SW DevTools console
+    // (chrome://extensions → Loroco → service worker) and read the
+    // (origin, type, assetId) → confirmed line for each dApp call.
+    console.log(
+      `[loroco/getAssetBalance] origin=${origin} type=${p?.type ?? "(xch)"}`,
+      `assetId=${p?.assetId ?? "null"} → confirmed=${confirmed} spendable=${spendable}`,
+      `coins=${coinCount} (fp=${fp}, store has ${Object.keys(store.coins).length} XCH`,
+      `+ ${Object.keys(store.cats ?? {}).length} CAT assets)`,
+    );
 
     return {
       confirmed: confirmed.toString(),

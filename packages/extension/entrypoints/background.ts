@@ -104,6 +104,15 @@ export default defineBackground(() => {
         // Normalise legacy/aliased method names (chia_*, chip0002_*, snake_case)
         // down to the CHIP-0002 canonical surface before any gating runs.
         const method = canonicalizeMethod(String(msg.method)) as ChiaMethod;
+        // Trace every dApp message at the entry point so debug captures even
+        // the calls that fail at the gating layer (unauthorized / not connected).
+        // Useful when a dApp shows stale state — we can correlate its UI with
+        // the exact sequence of calls.
+        console.log(
+          `[loroco/dapp-in] origin=${origin} method=${msg.method}${
+            method !== msg.method ? ` (alias→${method})` : ""
+          }`,
+        );
         if (method !== "connect") {
           requireConnected(origin);
         }
@@ -112,6 +121,10 @@ export default defineBackground(() => {
         sendResponse({ result });
       } catch (err) {
         const e = err as Error & { code?: number; data?: unknown };
+        console.log(
+          `[loroco/dapp-err] origin=${origin} method=${msg.method} →`,
+          `code=${e.code ?? -32603} msg=${(e.message ?? String(err)).slice(0, 200)}`,
+        );
         sendResponse({
           error: {
             code: e.code ?? -32603,

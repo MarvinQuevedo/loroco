@@ -141,15 +141,6 @@ body {
   object-fit: contain;
 }
 
-/* The icon source is white-on-transparent. Invert to black for light
- * mode so the plant stays visible against the cream popup background. */
-@media (prefers-color-scheme: light) {
-  .ozone-logo-mark,
-  .screen-logo {
-    filter: invert(1);
-  }
-}
-
 .ozone-meta {
   font-size: 11px;
   font-family: var(--font-mono);

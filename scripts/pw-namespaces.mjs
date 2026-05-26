@@ -8,10 +8,12 @@
 
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as wait } from "node:timers/promises";
 
-const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+const __here = dirname(fileURLToPath(import.meta.url));
+const EXT_PATH = resolve(__here, "..", "packages/extension/.output/chrome-mv3");
 const USER_DATA = "/tmp/Ozone-PW-NS";
 const SHOT_DIR = "/tmp/ozone-pw-ns";
 

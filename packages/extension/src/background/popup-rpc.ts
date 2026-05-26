@@ -11,6 +11,7 @@ import { clearCoinStore, readCoinStore, totalUnspentMojos, unspentCoinCount } fr
 import { readSyncTelemetry, tickCoinSync } from "./coin-sync.js";
 import { decidePending, listPending } from "./approval.js";
 import { getXchPriceUsd, resolveCatMetadata } from "./dexie.js";
+import { broadcastEvent } from "./events.js";
 import { listConnections, revokeConnection } from "./permissions.js";
 import { readSyncState } from "./sync-loop.js";
 import { readSidecarSettings, writeSidecarSettings, type SidecarSettings } from "./sidecar-settings.js";
@@ -31,7 +32,8 @@ export type PopupRpcMessage =
   | { from: "popup"; kind: "decide-approval"; id: string; approved: boolean }
   | { from: "popup"; kind: "get-sidecar-settings" }
   | { from: "popup"; kind: "set-sidecar-settings"; patch: Partial<SidecarSettings> }
-  | { from: "popup"; kind: "probe-sidecar"; url?: string };
+  | { from: "popup"; kind: "probe-sidecar"; url?: string }
+  | { from: "popup"; kind: "debug-broadcast"; event: "chainChanged" | "accountChanged"; payload: unknown };
 
 export type PopupRpcResponse =
   | { ok: true; value: unknown }
@@ -59,7 +61,20 @@ export async function handlePopupMessage(
         } else {
           await chrome.storage.session.remove("walletId");
         }
+        // Notify every connected dApp that the active account changed so
+        // they re-fetch `accounts` / `getAssetBalance` instead of sitting
+        // on the cached values they observed at connect-time. Awaited —
+        // MV3 SWs can be killed right after we return, and a fire-and-
+        // forget broadcast races that shutdown unpredictably.
+        await broadcastEvent("accountChanged", { walletId: msg.walletId });
         return { ok: true, value: null };
+      }
+      case "debug-broadcast": {
+        // Test-only hook so smokes can trigger an event without going
+        // through the unlock path. Drops into the same broadcastEvent.
+        // No security gate — popup-rpc is already extension-internal.
+        const r = await broadcastEvent(msg.event, msg.payload);
+        return { ok: true, value: r };
       }
       case "get-sync-state": {
         const state = await readSyncState();

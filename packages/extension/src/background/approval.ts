@@ -24,9 +24,19 @@ export interface PendingRequest {
   createdAt: number;
 }
 
+export interface ApprovalDecision {
+  approved: boolean;
+  /**
+   * Optional shallow override on the original params. Methods that care
+   * (e.g. createOffer letting the user reduce dexie's default fee) merge
+   * these on top of `request.params` before dispatching the engine call.
+   */
+  overrides?: Record<string, unknown>;
+}
+
 interface PendingEntry {
   request: PendingRequest;
-  resolve: (approved: boolean) => void;
+  resolve: (decision: ApprovalDecision) => void;
   windowId?: number;
 }
 
@@ -57,12 +67,18 @@ async function updateBadge(): Promise<void> {
   }
 }
 
-/** Request user approval. Resolves to true (approve) or false (reject). */
+/**
+ * Request user approval.
+ *
+ * Resolves to a decision object so handlers that want to honour user
+ * overrides (fee picker, etc.) can read them. Callers that only care
+ * about the boolean check `.approved`.
+ */
 export function requestApproval(
   origin: string,
   method: ChiaMethod,
   params: unknown,
-): Promise<boolean> {
+): Promise<ApprovalDecision> {
   const request: PendingRequest = {
     id: newId(),
     origin,
@@ -71,7 +87,7 @@ export function requestApproval(
     createdAt: Date.now(),
   };
 
-  return new Promise<boolean>((resolve) => {
+  return new Promise<ApprovalDecision>((resolve) => {
     const entry: PendingEntry = { request, resolve };
     PENDING.set(request.id, entry);
     void syncPendingToStorage();
@@ -92,11 +108,15 @@ export function getPending(id: string): PendingRequest | null {
   return PENDING.get(id)?.request ?? null;
 }
 
-export function decidePending(id: string, approved: boolean): boolean {
+export function decidePending(
+  id: string,
+  approved: boolean,
+  overrides?: Record<string, unknown>,
+): boolean {
   const entry = PENDING.get(id);
   if (!entry) return false;
   PENDING.delete(id);
-  entry.resolve(approved);
+  entry.resolve({ approved, ...(overrides ? { overrides } : {}) });
   void syncPendingToStorage();
   void updateBadge();
   return true;
@@ -107,7 +127,7 @@ export function cancelPending(id: string): void {
   const entry = PENDING.get(id);
   if (!entry) return;
   PENDING.delete(id);
-  entry.resolve(false);
+  entry.resolve({ approved: false });
   void syncPendingToStorage();
   void updateBadge();
 }
@@ -124,7 +144,14 @@ export function listPending(): PendingRequest[] {
 
 export type ApprovalMessage =
   | { from: "approval"; kind: "fetch"; id: string }
-  | { from: "approval"; kind: "decide"; id: string; approved: boolean };
+  | {
+      from: "approval";
+      kind: "decide";
+      id: string;
+      approved: boolean;
+      /** Per-method param overrides — e.g. {fee: "100"} for createOffer. */
+      overrides?: Record<string, unknown>;
+    };
 
 export type ApprovalResponse =
   | { ok: true; request?: PendingRequest }
@@ -146,7 +173,7 @@ export async function handleApprovalMessage(msg: ApprovalMessage): Promise<Appro
       return { ok: true, request: req };
     }
     case "decide": {
-      const found = decidePending(msg.id, msg.approved);
+      const found = decidePending(msg.id, msg.approved, msg.overrides);
       if (!found) return { ok: false, error: "no pending request with that id" };
       return { ok: true };
     }

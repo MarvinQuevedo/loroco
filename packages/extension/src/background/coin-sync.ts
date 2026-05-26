@@ -464,6 +464,16 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
     // scans below time out or the SW dies mid-flight.
     await writeCoinStore(wallet.fingerprint, store);
     const xchUnspent = Object.values(store.coins).filter((c) => !c.spent).length;
+    // Notify connected dApps if this tick actually changed the unspent set.
+    // Throttling lives inside broadcastEvent — safe to call from each tick.
+    if (newCoins > 0) {
+      const { broadcastEvent } = await import("./events.js");
+      void broadcastEvent("accountChanged", {
+        reason: "coin-sync",
+        new_coins: newCoins,
+        xch_unspent: xchUnspent,
+      });
+    }
     await writeTelemetry({
       fingerprint: wallet.fingerprint,
       last_attempt_at: startedAt,
