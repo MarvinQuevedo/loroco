@@ -62,6 +62,20 @@ const METHODS = [
   { name: "getOffers", params: { limit: 10 }, mutating: false },
   { name: "getOffer", params: { id: "0x" + "00".repeat(32) }, mutating: false },
 
+  // ── Dry-validating writes first (no on-chain side effects) ──────────
+  // We run the writes whose param-validation kicks in BEFORE input
+  // selection ahead of the auto-broadcasters (combine/split/createDid).
+  // This keeps the smoke from frying the SW with mempool back-pressure
+  // before we've checked every method.
+  {
+    name: "transferDid",
+    params: {
+      didDerivationIndex: 0,
+      recipientAddress: SELF_ADDRESS,
+    },
+    mutating: true,
+    expectInvalidParams: true,
+  },
   // ── Oleada 2 writes (approval required, dry-validation by default) ───
   {
     name: "bulkSendXch",
