@@ -160,6 +160,7 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   // Oleada 3 — issuance + DID creation broadcast on-chain spends.
   "issueCat",
   "createDid",
+  "addNftUri",
 ]);
 
 // ─── Method-name aliasing ────────────────────────────────────────────────
@@ -220,6 +221,7 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   // chia_* Oleada 3 (new on-chain primitives)
   chia_issueCat: "issueCat",
   chia_createDid: "createDid",
+  chia_addNftUri: "addNftUri",
   // chip0002_* (WC2 topic style — CHIP-0002 namespace)
   chip0002_chainId: "chainId",
   chip0002_connect: "connect",
@@ -263,6 +265,7 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   // snake_case Oleada 3
   issue_cat: "issueCat",
   create_did: "createDid",
+  add_nft_uri: "addNftUri",
   // Sage WC2 names with different case/spelling that map to existing handlers
   chia_send: "transfer",
   chia_getNfts: "getNFTs",
@@ -1970,6 +1973,90 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     return {
       id: with0x(res.tx_id) as Hex,
       didId: with0x(res.did_id) as Hex,
+    };
+  },
+
+  async addNftUri(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["addNftUri"]["params"];
+    if (!p?.launcherId && !p?.coinId) {
+      throw Errors.invalidParams("addNftUri requires { launcherId } or { coinId }");
+    }
+    if (!p?.uriKind) {
+      throw Errors.invalidParams("addNftUri requires { uriKind }");
+    }
+    if (!p?.uri || !p.uri.trim()) {
+      throw Errors.invalidParams("addNftUri requires non-empty { uri }");
+    }
+
+    // Resolve to the current NFT head coin via the local store. We accept
+    // either launcherId (preferred — stable across re-spends) or coinId.
+    const store = await readCoinStore(fp);
+    const target = strip0x((p.launcherId ?? p.coinId)!);
+    const nft = Object.values(store.nfts ?? {}).find((n) => {
+      if (n.spent) return false;
+      return (
+        strip0x(n.launcher_id) === target || strip0x(n.coin_id) === target
+      );
+    });
+    if (!nft) {
+      throw Errors.invalidParams(
+        `addNftUri: NFT ${with0x(target)} not found in wallet (spent or not yet synced)`,
+      );
+    }
+    // Resolve derivation_index for the NFT's p2 inner_puzzle_hash.
+    const phToIdx = await derivePhToIndex();
+    const derivationIndex = phToIdx[nft.p2_puzzle_hash];
+    if (derivationIndex === undefined) {
+      throw Errors.invalidParams(
+        `addNftUri: NFT ${with0x(nft.launcher_id)} p2 ${nft.p2_puzzle_hash} ` +
+          `not in current derivation window (${DERIVATION_WINDOW})`,
+      );
+    }
+
+    const fee = BigInt(String(p.fee ?? 0));
+    // Pay the fee from an XCH input when > 0. addNftUri's WASM endpoint
+    // expects `fee_input_coins` to cover the fee fully.
+    let feeInputs: Array<{
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      derivation_index: number;
+    }> = [];
+    let feeInputIds: string[] = [];
+    if (fee > 0n) {
+      const picked = await pickXchInputs(fp, fee);
+      feeInputs = picked.inputs;
+      feeInputIds = picked.inputCoinIds;
+      // pickXchInputs returns its own store snapshot; we already loaded ours
+      // above for the NFT lookup. Merge the optimistic-spent marker onto our
+      // snapshot below.
+    }
+
+    const res = await callEngine<{ tx_id: string; launcher_id: string; error?: string }>(
+      "add_nft_uri",
+      {
+        fingerprint: fp,
+        coin_id: with0x(nft.coin_id),
+        parent_coin_info: with0x(nft.parent_coin_info),
+        derivation_index: derivationIndex,
+        uri_kind: p.uriKind,
+        uri: p.uri,
+        fee_mojos: fee.toString(),
+        fee_input_coins: feeInputs,
+        fee_change_index: derivationIndex,
+        broadcast: true,
+      },
+    );
+    if (res.error) throw new Error(res.error);
+    if (feeInputIds.length > 0) {
+      markXchSpentOptimistic(store, feeInputIds);
+    }
+    await writeCoinStore(fp, store);
+    return {
+      id: with0x(res.tx_id) as Hex,
+      launcherId: with0x(res.launcher_id) as Hex,
     };
   },
 };

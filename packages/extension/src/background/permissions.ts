@@ -83,6 +83,7 @@ const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([
   // Oleada 3 — new on-chain primitives.
   "issueCat",
   "createDid",
+  "addNftUri",
 ]);
 
 export async function ensurePermissions(origin: string, method: ChiaMethod) {

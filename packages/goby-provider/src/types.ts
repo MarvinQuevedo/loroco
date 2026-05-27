@@ -418,6 +418,31 @@ export interface ChiaMethodMap {
     };
     result: { id: Hex; didId: Hex };
   };
+
+  /**
+   * Append a new URI to one of an NFT's metadata lists. Re-spends the NFT
+   * to its current owner — only metadata changes. The wallet must own the
+   * NFT's p2 inner puzzle (verified server-side via derivationIndex).
+   *
+   * uriKind selects which list the URI joins:
+   *   "data"     → primary data_uris (image / file)
+   *   "metadata" → metadata_uris (off-chain attributes)
+   *   "license"  → license_uris (rights / terms)
+   *
+   * Caller may pass either the NFT's launcher_id OR coin_id; the handler
+   * resolves to the current head coin via the local NFT store.
+   */
+  addNftUri: {
+    params: {
+      /** Either launcherId OR coinId is required. */
+      launcherId?: Hex;
+      coinId?: Hex;
+      uriKind: "data" | "metadata" | "license";
+      uri: string;
+      fee?: Amount;
+    };
+    result: { id: Hex; launcherId: Hex };
+  };
 }
 
 // ─── View types for Loroco read extensions ─────────────────────────────────
