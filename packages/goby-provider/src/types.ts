@@ -497,6 +497,31 @@ export interface ChiaMethodMap {
     };
     result: { id: Hex; launcherId: Hex };
   };
+
+  /**
+   * Normalize one or more DIDs to the "simple" profile:
+   *   recovery_list_hash = empty-list hash
+   *   num_verifications_required = 1
+   * Metadata + owner stay the same. Useful when a DID was created with
+   * a non-standard recovery list and the user wants to reset it.
+   *
+   * One bundle per DID — the handler iterates `didCoinIds` so each DID
+   * gets its own tx. Returns one entry per DID. Fee is applied to the
+   * FIRST tx only; subsequent normalizations don't carry an XCH fee.
+   *
+   * Until Fase 3 DID sync lands, the caller must supply each DID's
+   * current head coin id and the wallet derivation_index that owns its
+   * p2 puzzle.
+   */
+  normalizeDids: {
+    params: {
+      /** Parallel arrays — entry i targets didCoinIds[i] / didDerivationIndices[i]. */
+      didCoinIds: Hex[];
+      didDerivationIndices: number[];
+      fee?: Amount;
+    };
+    result: Array<{ id: Hex; launcherId: Hex }>;
+  };
 }
 
 // ─── Stub view types (filled in by Fase 3 DID sync) ──────────────────────

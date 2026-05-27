@@ -162,6 +162,7 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   "createDid",
   "addNftUri",
   "transferDid",
+  "normalizeDids",
 ]);
 
 // ─── Method-name aliasing ────────────────────────────────────────────────
@@ -222,6 +223,7 @@ const BASE_ALIASES: Record<string, ChiaMethod> = {
   create_did: "createDid",
   add_nft_uri: "addNftUri",
   transfer_did: "transferDid",
+  normalize_dids: "normalizeDids",
   // snake_case stub reads (Fase 3 placeholders)
   get_dids: "getDids",
   get_nft_collections: "getNftCollections",
@@ -277,6 +279,7 @@ const LEGACY_GOBY_ALIASES: Record<string, ChiaMethod> = {
   chia_transferDid: "transferDid",
   // Sage WC2 spells the plural form
   chia_transferDids: "transferDid",
+  chia_normalizeDids: "normalizeDids",
   // chia_* dApp probe stubs (empty until Fase 3 DID sync)
   chia_getDids: "getDids",
   chia_getNftCollections: "getNftCollections",
@@ -2108,6 +2111,71 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       id: with0x(res.tx_id) as Hex,
       launcherId: with0x(res.launcher_id) as Hex,
     };
+  },
+
+  async normalizeDids(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["normalizeDids"]["params"];
+    if (!Array.isArray(p?.didCoinIds) || p.didCoinIds.length === 0) {
+      throw Errors.invalidParams("normalizeDids requires non-empty { didCoinIds }");
+    }
+    if (
+      !Array.isArray(p?.didDerivationIndices) ||
+      p.didDerivationIndices.length !== p.didCoinIds.length
+    ) {
+      throw Errors.invalidParams(
+        "normalizeDids: didDerivationIndices must match didCoinIds length",
+      );
+    }
+    const totalFee = BigInt(String(p.fee ?? 0));
+    // Pay the fee on the FIRST tx only — subsequent normalizations don't
+    // get fee inputs, so they need fee=0 (still valid on-chain since the
+    // DID singleton's balance is unchanged).
+    let feeInputs: Array<{
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      derivation_index: number;
+    }> = [];
+    let feeInputIds: string[] = [];
+    let store: import("./coin-store.js").CoinStore | null = null;
+    if (totalFee > 0n) {
+      const picked = await pickXchInputs(fp, totalFee);
+      feeInputs = picked.inputs;
+      feeInputIds = picked.inputCoinIds;
+      store = picked.store;
+    }
+
+    const out: Array<{ id: Hex; launcherId: Hex }> = [];
+    for (let i = 0; i < p.didCoinIds.length; i += 1) {
+      const didCoinId = p.didCoinIds[i]!;
+      const didDerivationIndex = p.didDerivationIndices[i]!;
+      const isFirst = i === 0;
+      const res = await callEngine<{ tx_id: string; launcher_id: string; error?: string }>(
+        "normalize_did",
+        {
+          fingerprint: fp,
+          did_coin_id: with0x(strip0x(didCoinId)),
+          did_derivation_index: didDerivationIndex,
+          fee_mojos: isFirst ? totalFee.toString() : "0",
+          fee_input_coins: isFirst ? feeInputs : [],
+          fee_change_index: didDerivationIndex,
+          broadcast: true,
+        },
+      );
+      if (res.error) throw new Error(res.error);
+      out.push({
+        id: with0x(res.tx_id) as Hex,
+        launcherId: with0x(res.launcher_id) as Hex,
+      });
+    }
+
+    if (store && feeInputIds.length > 0) {
+      markXchSpentOptimistic(store, feeInputIds);
+      await writeCoinStore(fp, store);
+    }
+    return out;
   },
 
   async transferDid(_origin, params) {
