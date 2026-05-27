@@ -95,6 +95,28 @@ const METHODS = [
     mutating: true,
     expectInvalidParams: !BROADCAST,
   },
+
+  // ── Oleada 3 writes (approval required, dry-validation by default) ───
+  // issueCat dry-fail: amount 0 → 4000. BROADCAST: tiny supply to self.
+  {
+    name: "issueCat",
+    params: BROADCAST
+      ? { recipientAddress: SELF_ADDRESS, amount: "1", fee: 0 }
+      : { recipientAddress: SELF_ADDRESS, amount: "0" },
+    mutating: true,
+    expectInvalidParams: !BROADCAST,
+  },
+  // createDid dry-fail: no XCH coins yet on fresh wallet → 4029.
+  // BROADCAST: tiny self-create, will consume 1 mojo.
+  {
+    name: "createDid",
+    params: BROADCAST ? { fee: 0 } : { fee: 0 },
+    mutating: true,
+    // createDid has no validation that can be triggered by params — it
+    // always fails at input selection (4029) on a thin wallet. Accept
+    // either 4029 (no XCH) or 4000 if a future param check kicks in.
+    expectInvalidParams: false,
+  },
 ];
 
 const ctx = await chromium.launchPersistentContext(USER_DATA, {
