@@ -117,6 +117,19 @@ const METHODS = [
     // either 4029 (no XCH) or 4000 if a future param check kicks in.
     expectInvalidParams: false,
   },
+  // addNftUri: dry-fail with empty uri → 4000 (caught before NFT lookup).
+  // BROADCAST: would require an actually-owned NFT — skip in this smoke,
+  // the dry-validation path is enough to prove the method is wired.
+  {
+    name: "addNftUri",
+    params: {
+      launcherId: "0x" + "00".repeat(32),
+      uriKind: "data",
+      uri: "",
+    },
+    mutating: true,
+    expectInvalidParams: true,
+  },
 ];
 
 const ctx = await chromium.launchPersistentContext(USER_DATA, {
