@@ -443,6 +443,59 @@ export interface ChiaMethodMap {
     };
     result: { id: Hex; launcherId: Hex };
   };
+
+  // ─── Stub reads — silence WC2 dApp probes until full implementations land ─
+  // dApps that target Sage's WC API frequently call these on connect to
+  // populate UI dropdowns. Returning 4004 makes them show "wallet doesn't
+  // support DIDs" errors; returning empty arrays / null lets the UI render
+  // gracefully and the wallet still works for non-DID flows.
+  //
+  // Real implementations require JS-side DID sync (Fase 3). When that lands
+  // these handlers will route to actual coin-store reads instead of stubs.
+
+  /** DIDs owned by the wallet. Empty stub until Fase 3 DID sync. */
+  getDids: {
+    params: { limit?: number; offset?: number } | undefined;
+    result: DidInfo[];
+  };
+
+  /** NFT collections derived from owned NFTs' minter DIDs. Stub today. */
+  getNftCollections: {
+    params: { limit?: number; offset?: number } | undefined;
+    result: NftCollectionInfo[];
+  };
+
+  /** Single collection lookup. Always null until Fase 3. */
+  getNftCollection: {
+    params: { collectionId: Hex };
+    result: NftCollectionInfo | null;
+  };
+
+  /** Minter DIDs across the wallet's NFTs. Empty stub today. */
+  getMinterDidIds: {
+    params: { limit?: number; offset?: number } | undefined;
+    result: Hex[];
+  };
+}
+
+// ─── Stub view types (filled in by Fase 3 DID sync) ──────────────────────
+
+export interface DidInfo {
+  launcherId: Hex;
+  coinId: Hex;
+  /** bech32m did:chia: address. */
+  address: string;
+  /** Off-chain display name from the DID's metadata, when present. */
+  name: string | null;
+}
+
+export interface NftCollectionInfo {
+  collectionId: Hex;
+  name: string | null;
+  /** Minter DID launcher id when known. */
+  minterDid: Hex | null;
+  /** Count of NFTs we own from this collection. */
+  count: number;
 }
 
 // ─── View types for Loroco read extensions ─────────────────────────────────

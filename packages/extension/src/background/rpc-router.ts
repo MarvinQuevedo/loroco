@@ -177,7 +177,57 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
 // `chia_getNfts`, `chia_send`, `chia_cancelOffer`) receive the *original*
 // method name as the 3rd argument and branch on it — so a WC2 dApp gets the
 // Sage shape and a Goby dApp gets the Loroco/Goby shape from the same handler.
-const METHOD_ALIASES: Record<string, ChiaMethod> = {
+//
+// Split into two tables so the user can opt out of Goby compatibility:
+//   • BASE_ALIASES — always honoured. Canonical CHIP-0002 camelCase plus
+//     the snake_case forms Sage WC2 uses on the wire. These are how
+//     modern dApps that target Loroco directly will call us.
+//   • LEGACY_GOBY_ALIASES — only honoured when settings.legacyGoby=true.
+//     Everything namespaced `chia_*` (Goby's pre-CHIP-0002 surface) or
+//     `chip0002_*` (WC2 topic-style). In production-default mode these
+//     are rejected with MethodNotFound so Loroco doesn't silently
+//     answer for a Goby surface its user hasn't opted into.
+const BASE_ALIASES: Record<string, ChiaMethod> = {
+  // snake_case Sage WC2 names that some clients send unchanged
+  filter_unlocked_coins: "filterUnlockedCoins",
+  get_asset_coins: "getAssetCoins",
+  get_asset_balance: "getAssetBalance",
+  sign_message_with_public_key: "signMessage",
+  sign_message_by_address: "signMessageByAddress",
+  send_transaction_immediately: "sendTransaction",
+  get_nfts: "getNFTs",
+  get_nft_info: "getNFTInfo",
+  cancel_offer: "cancelOffer",
+  bulk_mint_nfts: "bulkMintNfts",
+  get_address: "getAddress",
+  // snake_case for the read-only extensions
+  get_coins: "getCoins",
+  get_coins_by_ids: "getCoinsByIds",
+  is_asset_owned: "isAssetOwned",
+  get_cats: "getCats",
+  get_all_cats: "getAllCats",
+  get_token: "getToken",
+  get_derivations: "getDerivations",
+  get_transactions: "getTransactions",
+  get_pending_transactions: "getPendingTransactions",
+  get_offers: "getOffers",
+  get_offer: "getOffer",
+  // snake_case Oleada 2
+  bulk_send_xch: "bulkSendXch",
+  bulk_send_cat: "bulkSendCat",
+  // (combine / split don't have a snake_case Sage equivalent — same name works)
+  // snake_case Oleada 3
+  issue_cat: "issueCat",
+  create_did: "createDid",
+  add_nft_uri: "addNftUri",
+  // snake_case stub reads (Fase 3 placeholders)
+  get_dids: "getDids",
+  get_nft_collections: "getNftCollections",
+  get_nft_collection: "getNftCollection",
+  get_minter_did_ids: "getMinterDidIds",
+};
+
+const LEGACY_GOBY_ALIASES: Record<string, ChiaMethod> = {
   // chia_* (Goby legacy + Sage WC2)
   chia_chainId: "chainId",
   chia_connect: "connect",
@@ -222,6 +272,11 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   chia_issueCat: "issueCat",
   chia_createDid: "createDid",
   chia_addNftUri: "addNftUri",
+  // chia_* dApp probe stubs (empty until Fase 3 DID sync)
+  chia_getDids: "getDids",
+  chia_getNftCollections: "getNftCollections",
+  chia_getNftCollection: "getNftCollection",
+  chia_getMinterDidIds: "getMinterDidIds",
   // chip0002_* (WC2 topic style — CHIP-0002 namespace)
   chip0002_chainId: "chainId",
   chip0002_connect: "connect",
@@ -234,46 +289,36 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   chip0002_signMessageByPublicKey: "signMessage",
   chip0002_signMessageByAddress: "signMessageByAddress",
   chip0002_sendTransaction: "sendTransaction",
-  // snake_case Sage WC2 names that some clients send unchanged
-  filter_unlocked_coins: "filterUnlockedCoins",
-  get_asset_coins: "getAssetCoins",
-  get_asset_balance: "getAssetBalance",
-  sign_message_with_public_key: "signMessage",
-  sign_message_by_address: "signMessageByAddress",
-  send_transaction_immediately: "sendTransaction",
-  get_nfts: "getNFTs",
-  get_nft_info: "getNFTInfo",
-  cancel_offer: "cancelOffer",
-  bulk_mint_nfts: "bulkMintNfts",
-  get_address: "getAddress",
-  // snake_case for the read-only extensions
-  get_coins: "getCoins",
-  get_coins_by_ids: "getCoinsByIds",
-  is_asset_owned: "isAssetOwned",
-  get_cats: "getCats",
-  get_all_cats: "getAllCats",
-  get_token: "getToken",
-  get_derivations: "getDerivations",
-  get_transactions: "getTransactions",
-  get_pending_transactions: "getPendingTransactions",
-  get_offers: "getOffers",
-  get_offer: "getOffer",
-  // snake_case Oleada 2
-  bulk_send_xch: "bulkSendXch",
-  bulk_send_cat: "bulkSendCat",
-  // (combine / split don't have a snake_case Sage equivalent — same name works)
-  // snake_case Oleada 3
-  issue_cat: "issueCat",
-  create_did: "createDid",
-  add_nft_uri: "addNftUri",
   // Sage WC2 names with different case/spelling that map to existing handlers
   chia_send: "transfer",
   chia_getNfts: "getNFTs",
 };
 
-/** Normalise an alias/legacy method name down to its CHIP-0002 canonical. */
-export function canonicalizeMethod(method: string): ChiaMethod {
-  return (METHOD_ALIASES[method] ?? method) as ChiaMethod;
+/**
+ * Normalise an alias/legacy method name down to its CHIP-0002 canonical.
+ *
+ * When `allowLegacyGoby` is false, the `chia_*` and `chip0002_*` namespaces
+ * are NOT resolved — the original name is returned so the dispatcher in
+ * handleRpc surfaces MethodNotFound. snake_case names are always resolved
+ * because they're Sage WC2's wire format, independent of the Goby-compat
+ * decision.
+ */
+export function canonicalizeMethod(
+  method: string,
+  allowLegacyGoby: boolean,
+): ChiaMethod {
+  const base = BASE_ALIASES[method];
+  if (base) return base;
+  if (allowLegacyGoby) {
+    const legacy = LEGACY_GOBY_ALIASES[method];
+    if (legacy) return legacy;
+  }
+  return method as ChiaMethod;
+}
+
+/** True if the method name belongs to a legacy-Goby namespace we gate. */
+export function isLegacyGobyAlias(method: string): boolean {
+  return Object.hasOwn(LEGACY_GOBY_ALIASES, method);
 }
 
 type Handler<M extends ChiaMethod> = (
@@ -2058,6 +2103,27 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       id: with0x(res.tx_id) as Hex,
       launcherId: with0x(res.launcher_id) as Hex,
     };
+  },
+
+  // ── Fase 3 stubs — empty reads to silence WC2 dApp probes ───────────────
+  // These return [] / null instead of 4004 so dApps that probe for DIDs /
+  // collections on connect render gracefully. Real implementations land
+  // when JS-side DID sync is wired.
+
+  async getDids() {
+    return [] as ChiaMethodMap["getDids"]["result"];
+  },
+
+  async getNftCollections() {
+    return [] as ChiaMethodMap["getNftCollections"]["result"];
+  },
+
+  async getNftCollection() {
+    return null as ChiaMethodMap["getNftCollection"]["result"];
+  },
+
+  async getMinterDidIds() {
+    return [] as ChiaMethodMap["getMinterDidIds"]["result"];
   },
 };
 

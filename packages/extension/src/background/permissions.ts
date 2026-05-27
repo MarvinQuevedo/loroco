@@ -60,6 +60,11 @@ const NO_APPROVAL_METHODS = new Set<ChiaMethod>([
   "getOffers",
   "getOffer",
   "getAddress",
+  // Fase 3 stubs — empty reads, no on-chain side effects.
+  "getDids",
+  "getNftCollections",
+  "getNftCollection",
+  "getMinterDidIds",
 ]);
 
 const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([
