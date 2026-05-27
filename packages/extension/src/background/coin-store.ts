@@ -24,6 +24,17 @@ export interface CoinRecord {
   spent_block_index: number;
   timestamp: number;
   hint?: string;
+  /**
+   * Set to true when WE marked the coin spent before the chain confirmed it
+   * (after a successful broadcast in transfer/sendTransaction/takeOffer). The
+   * coin-sync tick reconciles: confirmed spent → clears `pending`, writes the
+   * real `spent_block_index`. Still unspent past `PENDING_TTL_MS` → reverts.
+   * Treat as "spent" in any UI/balance computation; the only consumer that
+   * should care about the flag is the reconciliation loop.
+   */
+  pending?: boolean;
+  /** Epoch ms when `pending` was set. Used by the TTL revert rule. */
+  pending_at?: number;
 }
 
 export interface CatCoin {
@@ -43,6 +54,10 @@ export interface CatCoin {
     inner_puzzle_hash: string;
     amount: string;
   };
+  /** See `CoinRecord.pending`. */
+  pending?: boolean;
+  /** See `CoinRecord.pending_at`. */
+  pending_at?: number;
 }
 
 export interface CatAsset {
@@ -81,6 +96,43 @@ export interface NftView {
   spent_block_index: number;
 }
 
+/**
+ * Item observed in the mempool that creates a coin going TO us — addition
+ * with a puzzle_hash in our derived set, before any block confirms it.
+ * Migrates to a real `CoinRecord` on the next scan_puzzle_hashes tick.
+ */
+export interface MempoolIncoming {
+  tx_id: string;
+  parent_coin_info: string;
+  puzzle_hash: string;
+  amount: string;
+  /** Set when we detected an incoming CAT via hint match. Null for XCH. */
+  asset_id?: string | null;
+  /** When mempool-watch first saw this addition. Used for TTL expiry. */
+  seen_at: number;
+}
+
+/**
+ * Item observed in the mempool that spends one of OUR coins — removal whose
+ * `coin_id` is in `store.coins` or `store.cats[*].coins`. Lets us show "you
+ * are spending X" before the block confirms it, and lets the optimistic
+ * spent reconciliation in coin-sync extend the TTL when push_tx clearly
+ * landed.
+ */
+export interface MempoolOutgoing {
+  tx_id: string;
+  spent_xch_coin_ids: string[];
+  /** Per-asset CAT spends: asset_id_hex → coin_ids. */
+  spent_cat_coin_ids: Record<string, string[]>;
+  seen_at: number;
+}
+
+export interface MempoolSnapshot {
+  incoming: MempoolIncoming[];
+  outgoing: MempoolOutgoing[];
+  last_polled_at: number;
+}
+
 export interface CoinStore {
   last_synced_height: number;
   ph_heights: Record<string, number>;
@@ -91,6 +143,12 @@ export interface CoinStore {
   /** NFTs keyed by launcher_id, refreshed by the scan_nfts path. */
   nfts?: Record<string, NftView>;
   nfts_synced_at?: number;
+  /**
+   * Current view of the mempool from the mempool-watch poller. Items expire
+   * after MEMPOOL_TTL_MS without seeing them again in a poll, so a tx that
+   * the indexer evicted disappears from the UI on its own.
+   */
+  mempool?: MempoolSnapshot;
   /**
    * Per-PH cursor for `get_coin_records_by_hint` start_height. After each
    * successful CAT chunk we advance the entry to peak_height so the next
@@ -153,7 +211,16 @@ const empty = (): CoinStore => ({
   hardened_phs: {},
   pending_nft_candidates: {},
   pending_cat_candidates: {},
+  mempool: { incoming: [], outgoing: [], last_polled_at: 0 },
 });
+
+/**
+ * How long a mempool item is allowed to sit in `store.mempool` without
+ * appearing in a fresh poll before we evict it. 5 minutes lines up with
+ * Chia's actual mempool eviction window — anything stale beyond that is
+ * almost certainly a tx that got dropped (fee too low, expired, etc.).
+ */
+export const MEMPOOL_TTL_MS = 5 * 60_000;
 
 export async function readCoinStore(fingerprint: number): Promise<CoinStore> {
   const key = `${KEY_PREFIX}${fingerprint}`;
@@ -186,4 +253,102 @@ export function unspentCoinCount(store: CoinStore): number {
     if (!c.spent) count += 1;
   }
   return count;
+}
+
+/**
+ * How long an optimistic `pending` coin is allowed to sit unconfirmed before
+ * the reconciliation loop reverts it. Sized for "push_tx success but never
+ * landed in a block" failure modes: typical mainnet inclusion is 5–30s,
+ * 2 minutes leaves comfortable headroom for full-mempool periods.
+ */
+export const PENDING_TTL_MS = 120_000;
+
+/**
+ * Mark XCH coins as spent optimistically. `coinIds` must already exist in
+ * `store.coins` (we picked them as inputs); unknown ids are silently skipped.
+ * The coin-sync tick reconciles the `pending` flag against `check_coins_spent`.
+ */
+export function markXchSpentOptimistic(store: CoinStore, coinIds: string[]): void {
+  const now = Date.now();
+  for (const id of coinIds) {
+    const c = store.coins[id];
+    if (c && !c.spent) {
+      c.spent = true;
+      c.pending = true;
+      c.pending_at = now;
+    }
+  }
+}
+
+/** Mark CAT coins as spent optimistically inside `store.cats[assetId]`. */
+export function markCatSpentOptimistic(
+  store: CoinStore,
+  assetIdHex: string,
+  coinIds: string[],
+): void {
+  if (!store.cats) return;
+  const cat = store.cats[assetIdHex] ?? store.cats[assetIdHex.replace(/^0x/, "")];
+  if (!cat) return;
+  const wanted = new Set(coinIds);
+  const now = Date.now();
+  let unspent = 0;
+  let total = 0n;
+  for (const c of cat.coins) {
+    if (wanted.has(c.coin_id) && !c.spent) {
+      c.spent = true;
+      c.pending = true;
+      c.pending_at = now;
+    }
+    if (!c.spent) {
+      unspent += 1;
+      total += BigInt(c.amount);
+    }
+  }
+  cat.unspent_coin_count = unspent;
+  cat.total_unspent_mojos = total.toString();
+}
+
+/**
+ * For raw spend bundles (`sendTransaction`) we only know each input by its
+ * outpoint `{parent_coin_info, puzzle_hash, amount}`. Find the matching XCH
+ * `coin_id` in `store.coins`, or null if we don't track this coin.
+ */
+export function findXchCoinIdByOutpoint(
+  store: CoinStore,
+  parentCoinInfo: string,
+  puzzleHash: string,
+  amount: string,
+): string | null {
+  for (const c of Object.values(store.coins)) {
+    if (
+      c.parent_coin_info === parentCoinInfo &&
+      c.puzzle_hash === puzzleHash &&
+      c.amount === amount
+    ) {
+      return c.coin_id;
+    }
+  }
+  return null;
+}
+
+/** Same as `findXchCoinIdByOutpoint`, but scans every CAT bucket. */
+export function findCatCoinIdByOutpoint(
+  store: CoinStore,
+  parentCoinInfo: string,
+  puzzleHash: string,
+  amount: string,
+): { assetId: string; coinId: string } | null {
+  if (!store.cats) return null;
+  for (const [assetId, cat] of Object.entries(store.cats)) {
+    for (const c of cat.coins) {
+      if (
+        c.parent_coin_info === parentCoinInfo &&
+        c.puzzle_hash === puzzleHash &&
+        c.amount === amount
+      ) {
+        return { assetId, coinId: c.coin_id };
+      }
+    }
+  }
+  return null;
 }

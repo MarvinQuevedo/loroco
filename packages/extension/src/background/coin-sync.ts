@@ -18,8 +18,10 @@
 
 import { callEngine } from "./engine.js";
 import {
+  type CatCoin,
   type CoinRecord,
   type NftView,
+  PENDING_TTL_MS,
   type RawAssetCandidate,
   type RawCatCandidate,
   type RawNftCandidate,
@@ -500,14 +502,56 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       },
     });
 
-    // 5. Verify still-unspent set in chunks (in case the indexer says they're
-    //    gone or now spent since the last tick).
-    const unspentIds = Object.values(store.coins)
-      .filter((c) => !c.spent)
-      .map((c) => c.coin_id);
-    for (let i = 0; i < unspentIds.length; i += 250) {
+    // 5. Verify the unspent + pending set in chunks. Three buckets of
+    //    candidates:
+    //      • XCH coins still marked unspent — detects spends from another
+    //        wallet that shares this seed (Sage, mobile, another browser).
+    //      • XCH coins marked pending=true — our own broadcasts we want to
+    //        confirm or revert if push_tx never landed.
+    //      • CAT coins (unspent + pending) across every cat bucket — same
+    //        reasoning but for tokens. Without this, external CAT spends
+    //        wouldn't show up until the next full hint rescan.
+    //
+    //    Reconciliation against the response:
+    //      • In `spent`           → set spent=true + spent_block_index,
+    //                               clear pending.
+    //      • In `missing`:
+    //          - was pending past PENDING_TTL_MS → revert. push_tx never
+    //                                              made it to the indexer.
+    //          - was pending within TTL          → leave as-is. Bundle may
+    //                                              still be propagating.
+    //          - was NOT pending                 → delete (reorg / pruned
+    //                                              coin, existing behavior,
+    //                                              XCH only — CAT rescan
+    //                                              handles its own deletion).
+    //      • Neither (still unspent on chain):
+    //          - was pending past PENDING_TTL_MS → revert. The bundle either
+    //                                              never landed or got
+    //                                              evicted from the mempool.
+    //          - was pending within TTL          → leave as-is. The bundle
+    //                                              is likely sitting in the
+    //                                              mempool waiting for a
+    //                                              block (5–30s typical).
+    //          - else                            → no-op.
+    type CatLookup = { assetId: string; coin: CatCoin };
+    const xchCandidates: CoinRecord[] = Object.values(store.coins).filter(
+      (c) => !c.spent || c.pending,
+    );
+    const catCandidates: CatLookup[] = [];
+    for (const [assetId, cat] of Object.entries(store.cats ?? {})) {
+      for (const coin of cat.coins) {
+        if (!coin.spent || coin.pending) {
+          catCandidates.push({ assetId, coin });
+        }
+      }
+    }
+    const xchById = new Map(xchCandidates.map((c) => [c.coin_id, c]));
+    const catById = new Map(catCandidates.map((e) => [e.coin.coin_id, e]));
+    const allIds = [...xchById.keys(), ...catById.keys()];
+
+    for (let i = 0; i < allIds.length; i += 250) {
       if (Date.now() > deadline) break;
-      const chunk = unspentIds.slice(i, i + 250);
+      const chunk = allIds.slice(i, i + 250);
       try {
         const res = useSidecar
           ? await sidecarCheckCoinsSpent(chunk, sidecarSettings).catch(async () =>
@@ -520,19 +564,100 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
               spent: { coin_id: string; spent_block_index: number }[];
               missing: string[];
             }>("check_coins_spent", { coin_ids: chunk, endpoint: "mainnet" });
+        const spentSet = new Set<string>();
         for (const s of res.spent) {
-          const c = store.coins[s.coin_id];
-          if (c) {
-            c.spent = true;
-            c.spent_block_index = s.spent_block_index;
+          spentSet.add(s.coin_id);
+          const xch = xchById.get(s.coin_id);
+          if (xch) {
+            xch.spent = true;
+            xch.spent_block_index = s.spent_block_index;
+            delete xch.pending;
+            delete xch.pending_at;
+          }
+          const cat = catById.get(s.coin_id);
+          if (cat) {
+            cat.coin.spent = true;
+            cat.coin.spent_block_index = s.spent_block_index;
+            delete cat.coin.pending;
+            delete cat.coin.pending_at;
           }
         }
+        const missingSet = new Set(res.missing);
+        const now = Date.now();
+        // Coin IDs that mempool-watch has confirmed are currently being
+        // spent in some mempool item. If a pending coin shows up here, the
+        // broadcast clearly landed — keep the pending flag past the normal
+        // TTL until the mempool itself loses the tx (eviction or block
+        // inclusion).
+        const mempoolSpent = new Set<string>();
+        for (const o of store.mempool?.outgoing ?? []) {
+          for (const id of o.spent_xch_coin_ids) mempoolSpent.add(id);
+          for (const ids of Object.values(o.spent_cat_coin_ids)) {
+            for (const id of ids) mempoolSpent.add(id);
+          }
+        }
+        const expired = (coinId: string, pendingAt: number | undefined) => {
+          if (mempoolSpent.has(coinId)) return false;
+          return typeof pendingAt === "number" && now - pendingAt > PENDING_TTL_MS;
+        };
         for (const missingId of res.missing) {
-          delete store.coins[missingId];
+          const xch = xchById.get(missingId);
+          if (xch) {
+            if (xch.pending) {
+              if (expired(missingId, xch.pending_at)) {
+                xch.spent = false;
+                delete xch.pending;
+                delete xch.pending_at;
+              }
+              // else: still within TTL, let the bundle keep propagating.
+            } else {
+              delete store.coins[missingId];
+            }
+          }
+          const cat = catById.get(missingId);
+          if (cat && cat.coin.pending && expired(missingId, cat.coin.pending_at)) {
+            cat.coin.spent = false;
+            delete cat.coin.pending;
+            delete cat.coin.pending_at;
+          }
+          // Non-pending CATs that go missing: leave to the CAT rescan.
+        }
+        // Anything left in the chunk that came back neither spent nor
+        // missing is still unspent on chain — revert pending only after the
+        // TTL elapses so we don't trip on mempool-but-not-yet-in-block.
+        for (const id of chunk) {
+          if (spentSet.has(id) || missingSet.has(id)) continue;
+          const xch = xchById.get(id);
+          if (xch?.pending && expired(id, xch.pending_at)) {
+            xch.spent = false;
+            delete xch.pending;
+            delete xch.pending_at;
+          }
+          const cat = catById.get(id);
+          if (cat?.coin.pending && expired(id, cat.coin.pending_at)) {
+            cat.coin.spent = false;
+            delete cat.coin.pending;
+            delete cat.coin.pending_at;
+          }
         }
       } catch {
         // best-effort; continue with next chunk
       }
+    }
+
+    // After reconciliation, rebuild each CAT bucket's totals — optimistic
+    // marks (and reverts) can flip `spent` on coins we already wrote out.
+    for (const cat of Object.values(store.cats ?? {})) {
+      let total = 0n;
+      let unspent = 0;
+      for (const c of cat.coins) {
+        if (!c.spent) {
+          total += BigInt(c.amount);
+          unspent += 1;
+        }
+      }
+      cat.total_unspent_mojos = total.toString();
+      cat.unspent_coin_count = unspent;
     }
 
     // ── ORDER NOTE ──

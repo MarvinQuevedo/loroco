@@ -138,15 +138,22 @@ export interface ChiaMethodMap {
   };
 
   // Goby extensions
+  //
+  // Also exposed as `chia_send` (Sage WC2). The WC2 shape uses `address`
+  // instead of `to` and returns `{}` instead of `{id}` — the handler
+  // detects which name the dApp used and remaps inputs + outputs accordingly.
   transfer: {
     params: {
-      to: string;
+      /** Recipient bech32m address. Required. (`address` accepted as Sage WC2 alias.) */
+      to?: string;
+      /** Sage WC2 name for `to`. Handler merges them. */
+      address?: string;
       amount: Amount;
-      assetId: Hex | "" | null;
+      assetId?: Hex | "" | null;
       memos?: Hex[];
       fee?: Amount;
     };
-    result: { id: Hex };
+    result: { id: Hex } | Record<string, never>;
   };
   sendTransaction: {
     params: { spendBundle: SpendBundle };
@@ -181,8 +188,14 @@ export interface ChiaMethodMap {
 
   /** List NFTs owned by the wallet, paginated. */
   getNFTs: {
-    params: { limit?: number; offset?: number; didId?: Hex | null } | undefined;
-    result: NftInfo[];
+    params: {
+      limit?: number;
+      offset?: number;
+      didId?: Hex | null;
+      /** Sage WC2 only — alias for didId/collection filter. */
+      collectionId?: string | null;
+    } | undefined;
+    result: NftInfo[] | { nfts: NftWcInfo[] };
   };
 
   /** Resolve a single NFT by launcher id or coin id. */
@@ -198,8 +211,67 @@ export interface ChiaMethodMap {
    */
   cancelOffer: {
     params: { id: Hex; fee?: Amount; secure?: boolean };
-    result: { id: Hex; cancelled: boolean };
+    result: { id: Hex; cancelled: boolean } | Record<string, never>;
   };
+
+  /** Sage WC2 — returns the wallet's primary receive address. */
+  getAddress: {
+    params: Record<string, never> | undefined;
+    result: { address: string };
+  };
+
+  /**
+   * Sage WC2 — bulk-mint NFTs against a DID. Stub today: throws MethodNotFound
+   * 4004 until the WASM engine endpoint (`bulk_mint_nfts`) lands. Spec mirrors
+   * `vendor/sage/src/walletconnect/commands.ts:chia_bulkMintNfts`.
+   */
+  bulkMintNfts: {
+    params: {
+      did: string;
+      fee?: Amount;
+      nfts: Array<{
+        address?: string;
+        royaltyAddress?: string;
+        royaltyTenThousandths?: number;
+        dataUris?: string[];
+        dataHash?: Hex;
+        metadataUris?: string[];
+        metadataHash?: Hex;
+        licenseUris?: string[];
+        licenseHash?: Hex;
+        editionNumber?: number;
+        editionTotal?: number;
+      }>;
+    };
+    result: { nftIds: string[] };
+  };
+}
+
+/**
+ * Sage WC2 NFT shape — camelCase, nullable fields. Returned when the dApp
+ * invoked `chia_getNfts` (vs the Loroco/Goby `getNFTs` which returns
+ * snake_case NftInfo). Mirrors `vendor/sage/src/walletconnect/commands.ts:nft`.
+ */
+export interface NftWcInfo {
+  name: string | null;
+  launcherId: Hex;
+  collectionId: string | null;
+  collectionName: string | null;
+  minterDid: Hex | null;
+  ownerDid: Hex | null;
+  createdHeight: number | null;
+  coinId: Hex;
+  address: string;
+  royaltyAddress: string;
+  royaltyTenThousandths: number;
+  dataUris: string[];
+  dataHash: Hex | null;
+  metadataUris: string[];
+  metadataHash: Hex | null;
+  licenseUris: string[];
+  licenseHash: Hex | null;
+  editionNumber: number | null;
+  editionTotal: number | null;
 }
 
 export type ChiaMethod = keyof ChiaMethodMap;

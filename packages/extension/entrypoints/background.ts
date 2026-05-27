@@ -10,6 +10,7 @@ import type { ChiaMethod } from "@ozone/goby-provider/types";
 import { handleApprovalMessage, isApprovalMessage } from "../src/background/approval";
 import { tickCoinSync } from "../src/background/coin-sync";
 import { setActiveWallet } from "../src/background/engine";
+import { ensureSocket as ensureMempoolSocket, tickMempoolWatch } from "../src/background/mempool-watch";
 import { handlePopupMessage, isPopupMessage } from "../src/background/popup-rpc";
 import { canonicalizeMethod, handleRpc } from "../src/background/rpc-router";
 import { startSyncLoop } from "../src/background/sync-loop";
@@ -55,6 +56,7 @@ export default defineBackground(() => {
   // ~30s, then schedules the next fire at 20s — comfortably under the cap.
   chrome.alarms.create("sync", { periodInMinutes: 0.5 });
   chrome.alarms.create("coin-sync", { periodInMinutes: 0.5 });
+  chrome.alarms.create("mempool-watch", { periodInMinutes: 0.5 });
   chrome.alarms.create("keepalive", { delayInMinutes: 20 / 60 });
 
   chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -62,6 +64,8 @@ export default defineBackground(() => {
       void startSyncLoop();
     } else if (alarm.name === "coin-sync") {
       void tickCoinSync();
+    } else if (alarm.name === "mempool-watch") {
+      void tickMempoolWatch().catch(() => {});
     } else if (alarm.name === "keepalive") {
       // Re-arm FIRST so a future panic in getPlatformInfo can't break the
       // chain. Then await the chrome.* call — the await is what extends
@@ -102,27 +106,31 @@ export default defineBackground(() => {
     (async () => {
       try {
         // Normalise legacy/aliased method names (chia_*, chip0002_*, snake_case)
-        // down to the CHIP-0002 canonical surface before any gating runs.
-        const method = canonicalizeMethod(String(msg.method)) as ChiaMethod;
+        // down to the CHIP-0002 canonical surface before any gating runs. We
+        // keep the *original* name around so handlers with WC2-vs-Goby shape
+        // differences (chia_getNfts, chia_send, chia_cancelOffer, …) can
+        // branch on what the dApp actually asked for.
+        const originalMethod = String(msg.method);
+        const method = canonicalizeMethod(originalMethod) as ChiaMethod;
         // Trace every dApp message at the entry point so debug captures even
         // the calls that fail at the gating layer (unauthorized / not connected).
         // Useful when a dApp shows stale state — we can correlate its UI with
         // the exact sequence of calls.
         console.log(
-          `[loroco/dapp-in] origin=${origin} method=${msg.method}${
-            method !== msg.method ? ` (alias→${method})` : ""
+          `[loroco/dapp-in] origin=${origin} method=${originalMethod}${
+            method !== originalMethod ? ` (alias→${method})` : ""
           }`,
         );
         if (method !== "connect") {
           requireConnected(origin);
         }
         await ensurePermissions(origin, method);
-        const result = await handleRpc(origin, method, msg.params);
+        const result = await handleRpc(origin, method, msg.params, originalMethod);
         sendResponse({ result });
       } catch (err) {
         const e = err as Error & { code?: number; data?: unknown };
         console.log(
-          `[loroco/dapp-err] origin=${origin} method=${msg.method} →`,
+          `[loroco/dapp-err] origin=${origin} method=${String(msg.method)} →`,
           `code=${e.code ?? -32603} msg=${(e.message ?? String(err)).slice(0, 200)}`,
         );
         sendResponse({
@@ -151,4 +159,8 @@ export default defineBackground(() => {
       // Port closed (popup closed or crashed). Nothing to clean up.
     });
   });
+
+  // Kick the mempool WebSocket immediately at boot — the 30s alarm is the
+  // safety net, but we don't want to wait up to 30s on a fresh SW.
+  ensureMempoolSocket();
 });

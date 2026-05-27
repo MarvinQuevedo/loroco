@@ -10,10 +10,12 @@
 
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as wait } from "node:timers/promises";
 
-const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+const __here = dirname(fileURLToPath(import.meta.url));
+const EXT_PATH = resolve(__here, "..", "packages/extension/.output/chrome-mv3");
 const USER_DATA = "/tmp/Loroco-PW-Cov";
 const SHOT_DIR = "/tmp/loroco-pw-cov";
 const MNEMONIC =
@@ -62,12 +64,12 @@ const METHODS = [
     params: { message: "0xdeadbeef", publicKey: "0x" + "00".repeat(48) },
     mutating: true,
   },
-  // Engine doesn't expose raw signing yet — expect 4004.
+  // signCoinSpends → sign_coin_spends in engine. Empty array → InvalidParams
+  // (we never throw 4004 anymore — the handler asks for at least one spend).
   {
     name: "signCoinSpends",
     params: { coinSpends: [], partialSign: true },
-    mutating: false,
-    expectNotImplemented: true,
+    mutating: true,
   },
   {
     name: "transfer",
@@ -78,15 +80,15 @@ const METHODS = [
     },
     mutating: true,
   },
-  // No raw-bundle submit endpoint in the engine — expect 4004.
+  // sendTransaction → submit_transaction. Empty/garbage bundle → engine
+  // rejects with a parse error from coinset (NOT 4004).
   {
     name: "sendTransaction",
     params: { spendBundle: { coin_spends: [], aggregated_signature: "0x" + "c0".repeat(96) } },
-    mutating: false,
-    expectNotImplemented: true,
+    mutating: true,
   },
-  // make_offer is explicitly out-of-scope in the WASM engine today —
-  // expect 4004 until that lands.
+  // createOffer → make_offer. With nothing offered we expect 4000 invalid
+  // params from the handler ("requires at least one offerAssets entry").
   {
     name: "createOffer",
     params: {
@@ -94,10 +96,29 @@ const METHODS = [
       requestAssets: [{ assetId: "", amount: "1" }],
       fee: 0,
     },
-    mutating: false,
-    expectNotImplemented: true,
+    mutating: true,
   },
   { name: "takeOffer", params: { offer: "offer1xxx" }, mutating: true },
+  // ─── Sage WC2 extras added in the second round ──────────────────────────
+  {
+    name: "signMessageByAddress",
+    params: {
+      message: "0xdeadbeef",
+      address: "xch10qx8jkn8sh9prltm0nemvt53vk75dn47g78d39y448cnpaaftchqkcnygl",
+    },
+    mutating: true,
+  },
+  { name: "getNFTs", params: { limit: 10, offset: 0 }, mutating: false },
+  {
+    name: "getNFTInfo",
+    params: { launcherId: "0x" + "00".repeat(32) },
+    mutating: false,
+  },
+  {
+    name: "cancelOffer",
+    params: { id: "0x" + "00".repeat(32), secure: false },
+    mutating: true,
+  },
 ];
 
 try {
