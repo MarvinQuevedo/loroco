@@ -44,7 +44,7 @@ const SELF_ADDRESS = "xch10qx8jkn8sh9prltm0nemvt53vk75dn47g78d39y448cnpaaftchqkc
 
 // Each entry:
 //   - name: canonical CHIP-0002 method
-//   - params: payload sent through window.chia.request
+//   - params: payload sent through window.loroco.request
 //   - mutating: true → auto-approve the popup before reading the result
 //   - expectInvalidParams: true → 4000 is the success signal (intended for
 //     writes invoked in dry-validation mode; bypassed when BROADCAST=1)
@@ -130,6 +130,12 @@ const METHODS = [
     mutating: true,
     expectInvalidParams: true,
   },
+
+  // ── Fase 3 stub reads (no approval, always return [] / null) ─────────
+  { name: "getDids", params: undefined, mutating: false },
+  { name: "getNftCollections", params: undefined, mutating: false },
+  { name: "getNftCollection", params: { collectionId: "0x" + "00".repeat(32) }, mutating: false },
+  { name: "getMinterDidIds", params: undefined, mutating: false },
 ];
 
 const ctx = await chromium.launchPersistentContext(USER_DATA, {
@@ -208,7 +214,7 @@ try {
 
   log("granting origin via requestAccounts…");
   const initial = dapp.evaluate(() =>
-    window.chia.request({ method: "requestAccounts" }).catch((e) => e?.message),
+    window.loroco.request({ method: "requestAccounts" }).catch((e) => e?.message),
   );
   await wait(800);
   await autoApproveIfPending();
@@ -222,7 +228,7 @@ try {
     const callP = dapp.evaluate(
       async ({ name, params }) => {
         try {
-          const r = await window.chia.request({ method: name, params });
+          const r = await window.loroco.request({ method: name, params });
           return { ok: true, result: r };
         } catch (e) {
           return { ok: false, code: e?.code, message: e?.message };
