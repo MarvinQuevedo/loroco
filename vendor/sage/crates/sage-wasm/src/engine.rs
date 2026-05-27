@@ -175,6 +175,7 @@ impl SageEngine {
             "nft_parse_candidates" => self.nft_parse_candidates(params_json).await,
             "cat_parse_candidates" => self.cat_parse_candidates(params_json).await,
             "send_cat" => self.send_cat(params_json).await,
+            "multi_send" => self.multi_send(params_json).await,
             "issue_cat" => self.issue_cat(params_json).await,
             "create_did" => self.create_did(params_json).await,
             "transfer_did" => self.transfer_did(params_json).await,
@@ -583,6 +584,507 @@ impl SageEngine {
             "cat_change_mojos": cat_change.to_string(),
             "input_count": req.input_coins.len(),
             "total_input_mojos": total_input.to_string(),
+        })
+        .to_string())
+    }
+
+    /// Send XCH and/or one CAT in a SINGLE atomic SpendBundle. Mirrors the
+    /// shape of upstream `Wallet::multi_send` but constrained to one CAT
+    /// asset per call to keep the WASM surface manageable. dApps that need
+    /// truly heterogeneous multi-CAT bundles can call this once per asset
+    /// (each call is a separate tx).
+    ///
+    /// The bundle ties XCH inputs and CAT inputs together with
+    /// `assert_concurrent_spend` so a partial broadcast is impossible — if
+    /// any input is missing, the whole bundle fails consensus.
+    ///
+    /// Params:
+    /// ```
+    /// {
+    ///   fingerprint: u32,
+    ///   xch_outputs?: [{ address, amount }],           // XCH recipients
+    ///   cat_outputs?: {                                // ONE CAT asset
+    ///     asset_id: "0x...",
+    ///     outputs: [{ address, amount }],
+    ///   },
+    ///   fee_mojos?: "0",
+    ///   xch_input_coins?: [{ parent_coin_info, puzzle_hash, amount,
+    ///                        derivation_index }],
+    ///   cat_input_coins?: [{ parent_coin_info, puzzle_hash, amount,
+    ///                        inner_puzzle_hash, derivation_index,
+    ///                        lineage_proof }],
+    ///   xch_change_index?: u32,
+    ///   cat_change_index?: u32,
+    ///   endpoint?: "mainnet" | "testnet11" | "<url>",
+    ///   broadcast?: true
+    /// }
+    /// ```
+    ///
+    /// At least one of `xch_outputs` or `cat_outputs` must be present.
+    async fn multi_send(&self, params_json: &str) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{
+            chia::{
+                bls::{sign, Signature},
+                consensus::consensus_constants::ConsensusConstants,
+                protocol::SpendBundle,
+                puzzle_types::LineageProof,
+            },
+            driver::{Cat, CatInfo, CatSpend, SpendContext, StandardLayer},
+            signer::{AggSigConstants, RequiredBlsSignature, RequiredSignature},
+            types::MAINNET_CONSTANTS,
+        };
+
+        #[derive(Deserialize)]
+        struct OutputSpec {
+            address: String,
+            amount: String,
+        }
+        #[derive(Deserialize)]
+        struct CatOutputsBlock {
+            asset_id: String,
+            outputs: Vec<OutputSpec>,
+        }
+        #[derive(Deserialize, Clone)]
+        struct XchInputCoin {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+            derivation_index: u32,
+        }
+        #[derive(Deserialize)]
+        struct LineageJson {
+            parent_name: String,
+            inner_puzzle_hash: String,
+            amount: String,
+        }
+        #[derive(Deserialize)]
+        struct CatInputCoin {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+            inner_puzzle_hash: String,
+            #[serde(default)]
+            hidden_puzzle_hash: Option<String>,
+            derivation_index: u32,
+            lineage_proof: LineageJson,
+        }
+        #[derive(Deserialize)]
+        struct Req {
+            fingerprint: u32,
+            #[serde(default)]
+            xch_outputs: Option<Vec<OutputSpec>>,
+            #[serde(default)]
+            cat_outputs: Option<CatOutputsBlock>,
+            #[serde(default = "default_zero_mojos_ms")]
+            fee_mojos: String,
+            #[serde(default)]
+            xch_input_coins: Vec<XchInputCoin>,
+            #[serde(default)]
+            cat_input_coins: Vec<CatInputCoin>,
+            #[serde(default)]
+            xch_change_index: u32,
+            #[serde(default)]
+            cat_change_index: u32,
+            #[serde(default)]
+            endpoint: Option<String>,
+            #[serde(default = "default_true_ms")]
+            broadcast: bool,
+        }
+        fn default_zero_mojos_ms() -> String {
+            "0".to_string()
+        }
+        fn default_true_ms() -> bool {
+            true
+        }
+
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let fee: u64 = req
+            .fee_mojos
+            .parse()
+            .map_err(|_| EngineError::InvalidParams("fee_mojos u64".to_string()))?;
+
+        // At least one output kind must be present.
+        let has_xch = req.xch_outputs.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+        let has_cat = req
+            .cat_outputs
+            .as_ref()
+            .map(|c| !c.outputs.is_empty())
+            .unwrap_or(false);
+        if !has_xch && !has_cat {
+            return Err(EngineError::InvalidParams(
+                "multi_send needs at least one of xch_outputs or cat_outputs".to_string(),
+            ));
+        }
+
+        // Parse XCH outputs.
+        struct ParsedOutput {
+            ph: Bytes32,
+            amount: u64,
+        }
+        let mut xch_outs: Vec<ParsedOutput> = Vec::new();
+        let mut total_xch_out: u64 = 0;
+        if let Some(outs) = &req.xch_outputs {
+            for (i, o) in outs.iter().enumerate() {
+                let amt: u64 = o
+                    .amount
+                    .parse()
+                    .map_err(|_| EngineError::InvalidParams(format!("xch_outputs[{i}].amount u64")))?;
+                if amt == 0 {
+                    return Err(EngineError::InvalidParams(format!(
+                        "xch_outputs[{i}].amount must be > 0"
+                    )));
+                }
+                let addr = Address::decode(o.address.trim())
+                    .map_err(|e| EngineError::InvalidParams(format!("xch_outputs[{i}].address: {e}")))?;
+                total_xch_out = total_xch_out
+                    .checked_add(amt)
+                    .ok_or_else(|| EngineError::InvalidParams("xch output sum overflow".to_string()))?;
+                xch_outs.push(ParsedOutput {
+                    ph: addr.puzzle_hash,
+                    amount: amt,
+                });
+            }
+        }
+
+        // Parse CAT outputs (one asset).
+        struct ParsedCatOutputs {
+            asset_id: Bytes32,
+            outs: Vec<ParsedOutput>,
+            total: u64,
+        }
+        let mut cat_block: Option<ParsedCatOutputs> = None;
+        if let Some(b) = &req.cat_outputs {
+            if b.outputs.is_empty() {
+                return Err(EngineError::InvalidParams(
+                    "cat_outputs.outputs is empty".to_string(),
+                ));
+            }
+            let asset_id = parse_bytes32(&b.asset_id)?;
+            let mut outs: Vec<ParsedOutput> = Vec::new();
+            let mut total: u64 = 0;
+            for (i, o) in b.outputs.iter().enumerate() {
+                let amt: u64 = o
+                    .amount
+                    .parse()
+                    .map_err(|_| EngineError::InvalidParams(format!("cat_outputs[{i}].amount u64")))?;
+                if amt == 0 {
+                    return Err(EngineError::InvalidParams(format!(
+                        "cat_outputs[{i}].amount must be > 0"
+                    )));
+                }
+                let addr = Address::decode(o.address.trim())
+                    .map_err(|e| EngineError::InvalidParams(format!("cat_outputs[{i}].address: {e}")))?;
+                total = total
+                    .checked_add(amt)
+                    .ok_or_else(|| EngineError::InvalidParams("cat output sum overflow".to_string()))?;
+                outs.push(ParsedOutput {
+                    ph: addr.puzzle_hash,
+                    amount: amt,
+                });
+            }
+            cat_block = Some(ParsedCatOutputs { asset_id, outs, total });
+        }
+
+        // XCH inputs are required when xch_outputs OR fee > 0 (fee always paid in XCH).
+        let xch_needed = total_xch_out
+            .checked_add(fee)
+            .ok_or_else(|| EngineError::InvalidParams("xch + fee overflow".to_string()))?;
+        if xch_needed > 0 && req.xch_input_coins.is_empty() {
+            return Err(EngineError::InvalidParams(
+                "xch_input_coins required when xch_outputs or fee > 0".to_string(),
+            ));
+        }
+        if has_cat && req.cat_input_coins.is_empty() {
+            return Err(EngineError::InvalidParams(
+                "cat_input_coins required when cat_outputs present".to_string(),
+            ));
+        }
+
+        let master_sk = self.unlocked_sk(req.fingerprint)?;
+
+        // Parse XCH inputs.
+        let mut parsed_xch: Vec<(Coin, SecretKey, PublicKey)> = Vec::new();
+        let mut total_xch_in: u64 = 0;
+        for (i, c) in req.xch_input_coins.iter().enumerate() {
+            let amt: u64 = c.amount.parse().map_err(|_| {
+                EngineError::InvalidParams(format!("xch_input_coins[{i}].amount u64"))
+            })?;
+            total_xch_in = total_xch_in
+                .checked_add(amt)
+                .ok_or_else(|| EngineError::InvalidParams("xch input sum overflow".to_string()))?;
+            let parent = parse_bytes32(&c.parent_coin_info)?;
+            let outer_ph = parse_bytes32(&c.puzzle_hash)?;
+            let coin = Coin::new(parent, outer_ph, amt);
+            let inter = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+            let synth_sk = inter.derive_synthetic();
+            let synth_pk = synth_sk.public_key();
+            let derived_ph: Bytes32 = StandardArgs::curry_tree_hash(synth_pk).into();
+            if derived_ph != outer_ph {
+                return Err(EngineError::InvalidParams(format!(
+                    "xch_input_coins[{i}] puzzle_hash doesn't match derivation_index {}",
+                    c.derivation_index
+                )));
+            }
+            parsed_xch.push((coin, synth_sk, synth_pk));
+        }
+        if xch_needed > 0 && total_xch_in < xch_needed {
+            return Err(EngineError::InvalidParams(format!(
+                "xch_input_coins sum {total_xch_in} < {xch_needed} (xch_out + fee)"
+            )));
+        }
+        let xch_change = total_xch_in.saturating_sub(xch_needed);
+
+        // Parse CAT inputs.
+        struct ParsedCatIn {
+            cat: Cat,
+            sk: SecretKey,
+            pk: PublicKey,
+        }
+        let mut parsed_cats: Vec<ParsedCatIn> = Vec::new();
+        let mut total_cat_in: u64 = 0;
+        let cat_asset_id = cat_block.as_ref().map(|b| b.asset_id);
+        if let Some(asset_id) = cat_asset_id {
+            for (i, c) in req.cat_input_coins.iter().enumerate() {
+                let amt: u64 = c.amount.parse().map_err(|_| {
+                    EngineError::InvalidParams(format!("cat_input_coins[{i}].amount u64"))
+                })?;
+                total_cat_in = total_cat_in
+                    .checked_add(amt)
+                    .ok_or_else(|| EngineError::InvalidParams("cat input sum overflow".to_string()))?;
+                let parent = parse_bytes32(&c.parent_coin_info)?;
+                let outer_ph = parse_bytes32(&c.puzzle_hash)?;
+                let inner_ph = parse_bytes32(&c.inner_puzzle_hash)?;
+                let hidden_ph = c
+                    .hidden_puzzle_hash
+                    .as_deref()
+                    .map(parse_bytes32)
+                    .transpose()?;
+                let lineage_parent_name = parse_bytes32(&c.lineage_proof.parent_name)?;
+                let lineage_inner_ph = parse_bytes32(&c.lineage_proof.inner_puzzle_hash)?;
+                let lineage_amount: u64 = c
+                    .lineage_proof
+                    .amount
+                    .parse()
+                    .map_err(|_| EngineError::InvalidParams("lineage amount u64".to_string()))?;
+
+                let inter = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+                let synth_sk = inter.derive_synthetic();
+                let synth_pk = synth_sk.public_key();
+                let derived_inner: Bytes32 = StandardArgs::curry_tree_hash(synth_pk).into();
+                if derived_inner != inner_ph {
+                    return Err(EngineError::InvalidParams(format!(
+                        "cat_input_coins[{i}] inner_puzzle_hash doesn't match derivation_index {}",
+                        c.derivation_index
+                    )));
+                }
+                let cat = Cat {
+                    coin: Coin::new(parent, outer_ph, amt),
+                    lineage_proof: Some(LineageProof {
+                        parent_parent_coin_info: lineage_parent_name,
+                        parent_inner_puzzle_hash: lineage_inner_ph,
+                        parent_amount: lineage_amount,
+                    }),
+                    info: CatInfo {
+                        asset_id,
+                        hidden_puzzle_hash: hidden_ph,
+                        p2_puzzle_hash: inner_ph,
+                    },
+                };
+                parsed_cats.push(ParsedCatIn {
+                    cat,
+                    sk: synth_sk,
+                    pk: synth_pk,
+                });
+            }
+            let cat_total_out = cat_block.as_ref().unwrap().total;
+            if total_cat_in < cat_total_out {
+                return Err(EngineError::InvalidParams(format!(
+                    "cat_input_coins sum {total_cat_in} < {cat_total_out} (CAT out)"
+                )));
+            }
+        }
+        let cat_change = cat_block
+            .as_ref()
+            .map(|b| total_cat_in - b.total)
+            .unwrap_or(0);
+
+        let mut ctx = SpendContext::new();
+
+        // Derive change puzzle hashes.
+        let xch_change_intermediate =
+            master_to_wallet_unhardened(&master_sk, req.xch_change_index);
+        let xch_change_pk = xch_change_intermediate.derive_synthetic().public_key();
+        let xch_change_ph: Bytes32 = StandardArgs::curry_tree_hash(xch_change_pk).into();
+
+        let cat_change_intermediate =
+            master_to_wallet_unhardened(&master_sk, req.cat_change_index);
+        let cat_change_pk = cat_change_intermediate.derive_synthetic().public_key();
+        let cat_change_inner_ph: Bytes32 = StandardArgs::curry_tree_hash(cat_change_pk).into();
+
+        // ─── XCH spend (head + tails) ─────────────────────────────────────
+        // The head emits all xch outputs + reserve_fee + change. Tails
+        // assert_concurrent_spend back to the head. The head also ties in
+        // the FIRST cat input (when present) so the whole bundle is atomic.
+        if !parsed_xch.is_empty() {
+            let (head_coin, _, head_pk) = parsed_xch[0].clone();
+            let head_coin_id = head_coin.coin_id();
+
+            let mut head_conds = Conditions::new();
+            for o in &xch_outs {
+                head_conds = head_conds.create_coin(
+                    o.ph,
+                    o.amount,
+                    ::chia_wallet_sdk::chia::puzzle_types::Memos::None,
+                );
+            }
+            if fee > 0 {
+                head_conds = head_conds.reserve_fee(fee);
+            }
+            if xch_change > 0 {
+                head_conds = head_conds.create_coin(
+                    xch_change_ph,
+                    xch_change,
+                    ::chia_wallet_sdk::chia::puzzle_types::Memos::None,
+                );
+            }
+            for (other_coin, _, _) in parsed_xch.iter().skip(1) {
+                head_conds = head_conds.assert_concurrent_spend(other_coin.coin_id());
+            }
+            // Tie in the first CAT input so the bundles are atomic.
+            if let Some(first_cat) = parsed_cats.first() {
+                head_conds = head_conds.assert_concurrent_spend(first_cat.cat.coin.coin_id());
+            }
+
+            StandardLayer::new(head_pk)
+                .spend(&mut ctx, head_coin, head_conds)
+                .map_err(|e| EngineError::Internal(format!("xch head spend: {e}")))?;
+
+            for (i, (coin, _, pk)) in parsed_xch.iter().enumerate().skip(1) {
+                let tail = Conditions::new().assert_concurrent_spend(head_coin_id);
+                StandardLayer::new(*pk)
+                    .spend(&mut ctx, *coin, tail)
+                    .map_err(|e| EngineError::Internal(format!("xch tail {i}: {e}")))?;
+            }
+        }
+
+        // ─── CAT spend (head + tails) ─────────────────────────────────────
+        if let Some(cat_outputs) = &cat_block {
+            let mut cat_spends: Vec<CatSpend> = Vec::with_capacity(parsed_cats.len());
+            for (i, p) in parsed_cats.iter().enumerate() {
+                let conds = if i == 0 {
+                    let mut c = Conditions::new();
+                    for o in &cat_outputs.outs {
+                        c = c.create_coin(
+                            o.ph,
+                            o.amount,
+                            ctx.hint(o.ph)
+                                .map_err(|e| EngineError::Internal(format!("cat hint: {e}")))?,
+                        );
+                    }
+                    if cat_change > 0 {
+                        c = c.create_coin(
+                            cat_change_inner_ph,
+                            cat_change,
+                            ctx.hint(cat_change_inner_ph)
+                                .map_err(|e| EngineError::Internal(format!("cat change hint: {e}")))?,
+                        );
+                    }
+                    // Tie this CAT bundle to the XCH head (when present).
+                    if let Some((head_coin, _, _)) = parsed_xch.first() {
+                        c = c.assert_concurrent_spend(head_coin.coin_id());
+                    }
+                    c
+                } else {
+                    Conditions::new()
+                };
+                let inner_spend = StandardLayer::new(p.pk)
+                    .spend_with_conditions(&mut ctx, conds)
+                    .map_err(|e| EngineError::Internal(format!("cat inner spend {i}: {e}")))?;
+                cat_spends.push(CatSpend::new(p.cat, inner_spend));
+            }
+            Cat::spend_all(&mut ctx, &cat_spends)
+                .map_err(|e| EngineError::Internal(format!("Cat::spend_all: {e}")))?;
+        }
+
+        let coin_spends = ctx.take();
+
+        // ─── Sign ──────────────────────────────────────────────────────────
+        let constants: &ConsensusConstants = &MAINNET_CONSTANTS;
+        let agg_sig_consts = AggSigConstants::new(constants.agg_sig_me_additional_data);
+        let required = RequiredSignature::from_coin_spends(
+            &mut ctx,
+            &coin_spends,
+            &agg_sig_consts,
+        )
+        .map_err(|e| EngineError::Internal(format!("required_signatures: {e}")))?;
+
+        let mut sks_by_pk: std::collections::HashMap<Vec<u8>, SecretKey> =
+            std::collections::HashMap::new();
+        for (_, sk, pk) in &parsed_xch {
+            sks_by_pk.insert(pk.to_bytes().to_vec(), sk.clone());
+        }
+        for c in &parsed_cats {
+            sks_by_pk.insert(c.pk.to_bytes().to_vec(), c.sk.clone());
+        }
+
+        let mut aggregated = Signature::default();
+        for r in required {
+            match r {
+                RequiredSignature::Bls(RequiredBlsSignature {
+                    public_key,
+                    raw_message,
+                    appended_info,
+                    domain_string,
+                }) => {
+                    let pk_bytes = public_key.to_bytes().to_vec();
+                    let sk = sks_by_pk.get(&pk_bytes).ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "no secret key for pubkey {}",
+                            hex::encode(&pk_bytes)
+                        ))
+                    })?;
+                    let mut msg = raw_message.to_vec();
+                    msg.extend_from_slice(&appended_info);
+                    if let Some(domain) = domain_string {
+                        msg.extend_from_slice(&domain);
+                    }
+                    aggregated.aggregate(&sign(sk, &msg));
+                }
+                RequiredSignature::Secp(_) => {
+                    return Err(EngineError::Internal(
+                        "SECP not supported in multi_send".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let bundle = SpendBundle::new(coin_spends.clone(), aggregated);
+        let tx_id = bundle.name();
+
+        let mut status = "DRY_RUN".to_string();
+        let mut error: Option<String> = None;
+        if req.broadcast {
+            let client = make_client(req.endpoint.as_deref());
+            let res = client
+                .push_tx(bundle.clone())
+                .await
+                .map_err(|e| EngineError::Internal(format!("push_tx: {e}")))?;
+            status = res.status;
+            error = res.error;
+        }
+
+        Ok(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode(tx_id)),
+            "status": status,
+            "error": error,
+            "spend_bundle": {
+                "coin_spends": coin_spends.iter().map(serialize_coin_spend).collect::<Vec<_>>(),
+                "aggregated_signature": format!("0x{}", hex::encode(bundle.aggregated_signature.to_bytes())),
+            },
+            "xch_change_mojos": xch_change.to_string(),
+            "cat_change_mojos": cat_change.to_string(),
         })
         .to_string())
     }
