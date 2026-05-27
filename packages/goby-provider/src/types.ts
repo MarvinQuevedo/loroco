@@ -340,6 +340,50 @@ export interface ChiaMethodMap {
     params: { id: Hex };
     result: OfferView | null;
   };
+
+  // ─── Oleada 2 — multi-output write surface ───────────────────────────────
+  // These map onto the multi-output `send_xch` / `send_cat` WASM endpoints.
+  // Result is the same TransactionResp shape as `transfer` so dApps can treat
+  // them uniformly: { id } when broadcast succeeds.
+
+  /** Send XCH to N recipients in a single SpendBundle. */
+  bulkSendXch: {
+    params: {
+      outputs: Array<{ address: string; amount: Amount }>;
+      fee?: Amount;
+    };
+    result: { id: Hex } | Record<string, never>;
+  };
+
+  /** Send a single CAT to N recipients in a single SpendBundle. */
+  bulkSendCat: {
+    params: {
+      assetId: Hex;
+      outputs: Array<{ address: string; amount: Amount }>;
+      fee?: Amount;
+    };
+    result: { id: Hex } | Record<string, never>;
+  };
+
+  /**
+   * Consolidate many small XCH coins into one (self-send). All inputs from
+   * the wallet's own derived puzzle hashes are eligible; pick the N largest
+   * up to `maxInputs` (default 10). Output goes back to a fresh derived address.
+   */
+  combine: {
+    params: { maxInputs?: number; fee?: Amount };
+    result: { id: Hex } | Record<string, never>;
+  };
+
+  /**
+   * Split a large XCH coin into N equal self-send outputs. Pick the largest
+   * unspent coin as the input; `parts` (default 2) determines how many
+   * outputs the resulting bundle creates.
+   */
+  split: {
+    params: { parts: number; fee?: Amount };
+    result: { id: Hex } | Record<string, never>;
+  };
 }
 
 // ─── View types for Loroco read extensions ─────────────────────────────────

@@ -152,6 +152,11 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   "cancelOffer",
   "walletSwitchChain",
   "walletWatchAsset",
+  // Oleada 2 — every multi-output write broadcasts a tx and requires consent.
+  "bulkSendXch",
+  "bulkSendCat",
+  "combine",
+  "split",
 ]);
 
 // ─── Method-name aliasing ────────────────────────────────────────────────
@@ -204,6 +209,11 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   chia_getPendingTransactions: "getPendingTransactions",
   chia_getOffers: "getOffers",
   chia_getOffer: "getOffer",
+  // chia_* Oleada 2 (multi-output writes)
+  chia_bulkSendXch: "bulkSendXch",
+  chia_bulkSendCat: "bulkSendCat",
+  chia_combine: "combine",
+  chia_split: "split",
   // chip0002_* (WC2 topic style — CHIP-0002 namespace)
   chip0002_chainId: "chainId",
   chip0002_connect: "connect",
@@ -240,6 +250,10 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   get_pending_transactions: "getPendingTransactions",
   get_offers: "getOffers",
   get_offer: "getOffer",
+  // snake_case Oleada 2
+  bulk_send_xch: "bulkSendXch",
+  bulk_send_cat: "bulkSendCat",
+  // (combine / split don't have a snake_case Sage equivalent — same name works)
   // Sage WC2 names with different case/spelling that map to existing handlers
   chia_send: "transfer",
   chia_getNfts: "getNFTs",
@@ -1660,7 +1674,253 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     const match = list.find((o) => strip0x(o.id) === target);
     return match ? offerToView(match) : null;
   },
+
+  // ── Oleada 2 — multi-output writes ──────────────────────────────────────
+  // Auto-select inputs from the wallet's own coin-store, build a multi-output
+  // payload, and forward to the extended send_xch / send_cat WASM endpoints.
+  // Optimistic-spent reconciliation matches the existing transfer handler.
+
+  async bulkSendXch(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["bulkSendXch"]["params"];
+    if (!p?.outputs?.length) {
+      throw Errors.invalidParams("bulkSendXch requires non-empty { outputs }");
+    }
+    const fee = BigInt(String(p.fee ?? 0));
+    const totalOut = p.outputs.reduce((s, o) => s + BigInt(String(o.amount)), 0n);
+    const need = totalOut + fee;
+    const { inputs, inputCoinIds, store } = await pickXchInputs(fp, need);
+    const res = await callEngine<{ tx_id: string; error?: string }>("send_xch", {
+      fingerprint: fp,
+      outputs: p.outputs.map((o) => ({ address: o.address, amount: String(o.amount) })),
+      fee_mojos: fee.toString(),
+      input_coins: inputs,
+      change_index: inputs[0]!.derivation_index,
+      testnet: false,
+      broadcast: true,
+    });
+    if (res.error) throw new Error(res.error);
+    markXchSpentOptimistic(store, inputCoinIds);
+    await writeCoinStore(fp, store);
+    return { id: with0x(res.tx_id) as Hex };
+  },
+
+  async bulkSendCat(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["bulkSendCat"]["params"];
+    if (!p?.assetId) throw Errors.invalidParams("bulkSendCat requires { assetId }");
+    if (!p?.outputs?.length) {
+      throw Errors.invalidParams("bulkSendCat requires non-empty { outputs }");
+    }
+    const fee = BigInt(String(p.fee ?? 0));
+    const totalOut = p.outputs.reduce((s, o) => s + BigInt(String(o.amount)), 0n);
+    const assetId = strip0x(p.assetId);
+    const phToIdx = await derivePhToIndex();
+    const store = await readCoinStore(fp);
+    const cat = (store.cats ?? {})[with0x(assetId)] ?? (store.cats ?? {})[assetId];
+    if (!cat) {
+      throw Errors.spendableBalanceExceeded(
+        `bulkSendCat: wallet doesn't track CAT ${with0x(assetId)}. ${describeAvailableCats(store)}`,
+      );
+    }
+    const sorted = cat.coins
+      .filter((c) => !c.spent && phToIdx[c.inner_puzzle_hash] !== undefined)
+      .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+    const picked: Array<{
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      inner_puzzle_hash: string;
+      derivation_index: number;
+      lineage_proof: { parent_name: string; inner_puzzle_hash: string; amount: string };
+    }> = [];
+    const pickedIds: string[] = [];
+    let running = 0n;
+    for (const c of sorted) {
+      if (running >= totalOut) break;
+      picked.push({
+        parent_coin_info: c.parent_coin_info,
+        puzzle_hash: c.puzzle_hash,
+        amount: c.amount,
+        inner_puzzle_hash: c.inner_puzzle_hash,
+        derivation_index: phToIdx[c.inner_puzzle_hash]!,
+        lineage_proof: c.lineage_proof,
+      });
+      pickedIds.push(c.coin_id);
+      running += BigInt(c.amount);
+    }
+    if (running < totalOut) {
+      throw Errors.spendableBalanceExceeded(
+        `bulkSendCat: need ${totalOut} of CAT ${with0x(assetId)}, only ${running} available`,
+      );
+    }
+    const res = await callEngine<{ tx_id: string; error?: string }>("send_cat", {
+      fingerprint: fp,
+      asset_id: with0x(assetId),
+      outputs: p.outputs.map((o) => ({ address: o.address, amount: String(o.amount) })),
+      fee_mojos: fee.toString(),
+      input_coins: picked,
+      change_index: picked[0]!.derivation_index,
+      broadcast: true,
+    });
+    if (res.error) throw new Error(res.error);
+    markCatSpentOptimistic(store, with0x(assetId), pickedIds);
+    await writeCoinStore(fp, store);
+    return { id: with0x(res.tx_id) as Hex };
+  },
+
+  async combine(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["combine"]["params"];
+    const fee = BigInt(String(p?.fee ?? 0));
+    const maxInputs = Math.max(2, Math.min(50, (p?.maxInputs ?? 10) | 0));
+    const phToIdx = await derivePhToIndex();
+    const store = await readCoinStore(fp);
+    // Take the N smallest unspent XCH coins — that's the dust-consolidation case.
+    const candidates = Object.values(store.coins)
+      .filter((c) => !c.spent && phToIdx[c.puzzle_hash] !== undefined)
+      .sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? 1 : -1))
+      .slice(0, maxInputs);
+    if (candidates.length < 2) {
+      throw Errors.invalidParams(
+        `combine needs at least 2 spendable XCH coins, found ${candidates.length}`,
+      );
+    }
+    const total = candidates.reduce((s, c) => s + BigInt(c.amount), 0n);
+    if (total <= fee) {
+      throw Errors.spendableBalanceExceeded(
+        `combine: selected ${candidates.length} coins totalling ${total} mojos, fee ${fee} leaves nothing`,
+      );
+    }
+    const out = total - fee;
+    const inputs = candidates.map((c) => ({
+      parent_coin_info: c.parent_coin_info,
+      puzzle_hash: c.puzzle_hash,
+      amount: c.amount,
+      derivation_index: phToIdx[c.puzzle_hash]!,
+    }));
+    const inputCoinIds = candidates.map((c) => c.coin_id);
+    const addrs = await deriveAddresses(1);
+    const recipient = addrs[0]!.address;
+    const res = await callEngine<{ tx_id: string; error?: string }>("send_xch", {
+      fingerprint: fp,
+      outputs: [{ address: recipient, amount: out.toString() }],
+      fee_mojos: fee.toString(),
+      input_coins: inputs,
+      change_index: inputs[0]!.derivation_index,
+      testnet: false,
+      broadcast: true,
+    });
+    if (res.error) throw new Error(res.error);
+    markXchSpentOptimistic(store, inputCoinIds);
+    await writeCoinStore(fp, store);
+    return { id: with0x(res.tx_id) as Hex };
+  },
+
+  async split(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["split"]["params"];
+    const parts = Math.max(2, Math.min(25, (p?.parts ?? 2) | 0));
+    const fee = BigInt(String(p?.fee ?? 0));
+    const phToIdx = await derivePhToIndex();
+    const store = await readCoinStore(fp);
+    // Use the largest unspent XCH coin as the single input.
+    const candidates = Object.values(store.coins)
+      .filter((c) => !c.spent && phToIdx[c.puzzle_hash] !== undefined)
+      .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+    const input = candidates[0];
+    if (!input) {
+      throw Errors.spendableBalanceExceeded("split: no spendable XCH coins");
+    }
+    const total = BigInt(input.amount);
+    if (total <= fee + BigInt(parts)) {
+      throw Errors.spendableBalanceExceeded(
+        `split: coin ${input.coin_id} (${total} mojos) too small for ${parts} parts + fee ${fee}`,
+      );
+    }
+    const usable = total - fee;
+    const each = usable / BigInt(parts);
+    if (each === 0n) {
+      throw Errors.invalidParams(
+        `split: each output would be 0 mojos (usable=${usable}, parts=${parts})`,
+      );
+    }
+    // Give the remainder to the last output so the bundle balances.
+    const remainder = usable - each * BigInt(parts);
+    const addrs = await deriveAddresses(parts);
+    const outputs = addrs.slice(0, parts).map((a, i) => ({
+      address: a.address,
+      amount: (i === parts - 1 ? each + remainder : each).toString(),
+    }));
+    const inputs = [
+      {
+        parent_coin_info: input.parent_coin_info,
+        puzzle_hash: input.puzzle_hash,
+        amount: input.amount,
+        derivation_index: phToIdx[input.puzzle_hash]!,
+      },
+    ];
+    const res = await callEngine<{ tx_id: string; error?: string }>("send_xch", {
+      fingerprint: fp,
+      outputs,
+      fee_mojos: fee.toString(),
+      input_coins: inputs,
+      change_index: inputs[0]!.derivation_index,
+      testnet: false,
+      broadcast: true,
+    });
+    if (res.error) throw new Error(res.error);
+    markXchSpentOptimistic(store, [input.coin_id]);
+    await writeCoinStore(fp, store);
+    return { id: with0x(res.tx_id) as Hex };
+  },
 };
+
+// ─── Helpers for Oleada 2 writes ───────────────────────────────────────────
+
+/**
+ * Pick wallet-owned unspent XCH coins (largest-first) covering `need` mojos.
+ * Returns the engine-shape input array and the matching coin_ids for
+ * optimistic-spent marking, plus the store so the caller can persist.
+ */
+async function pickXchInputs(
+  fp: number,
+  need: bigint,
+): Promise<{
+  inputs: Array<{ parent_coin_info: string; puzzle_hash: string; amount: string; derivation_index: number }>;
+  inputCoinIds: string[];
+  store: import("./coin-store.js").CoinStore;
+}> {
+  const phToIdx = await derivePhToIndex();
+  const store = await readCoinStore(fp);
+  const candidates = Object.values(store.coins)
+    .filter((c) => !c.spent && phToIdx[c.puzzle_hash] !== undefined)
+    .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+  const inputs: Array<{ parent_coin_info: string; puzzle_hash: string; amount: string; derivation_index: number }> = [];
+  const inputCoinIds: string[] = [];
+  let running = 0n;
+  for (const c of candidates) {
+    if (running >= need) break;
+    inputs.push({
+      parent_coin_info: c.parent_coin_info,
+      puzzle_hash: c.puzzle_hash,
+      amount: c.amount,
+      derivation_index: phToIdx[c.puzzle_hash]!,
+    });
+    inputCoinIds.push(c.coin_id);
+    running += BigInt(c.amount);
+  }
+  if (running < need) {
+    throw Errors.spendableBalanceExceeded(
+      `Need ${need} XCH mojos (incl. fee), only ${running} available`,
+    );
+  }
+  return { inputs, inputCoinIds, store };
+}
 
 // ─── Helpers for the read-only extensions ──────────────────────────────────
 

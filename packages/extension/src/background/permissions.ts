@@ -75,6 +75,11 @@ const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([
   "createOffer",
   "takeOffer",
   "cancelOffer",
+  // Oleada 2 — every multi-output write broadcasts a tx.
+  "bulkSendXch",
+  "bulkSendCat",
+  "combine",
+  "split",
 ]);
 
 export async function ensurePermissions(origin: string, method: ChiaMethod) {
