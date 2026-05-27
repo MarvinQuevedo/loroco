@@ -157,6 +157,9 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   "bulkSendCat",
   "combine",
   "split",
+  // Oleada 3 — issuance + DID creation broadcast on-chain spends.
+  "issueCat",
+  "createDid",
 ]);
 
 // ─── Method-name aliasing ────────────────────────────────────────────────
@@ -214,6 +217,9 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   chia_bulkSendCat: "bulkSendCat",
   chia_combine: "combine",
   chia_split: "split",
+  // chia_* Oleada 3 (new on-chain primitives)
+  chia_issueCat: "issueCat",
+  chia_createDid: "createDid",
   // chip0002_* (WC2 topic style — CHIP-0002 namespace)
   chip0002_chainId: "chainId",
   chip0002_connect: "connect",
@@ -254,6 +260,9 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   bulk_send_xch: "bulkSendXch",
   bulk_send_cat: "bulkSendCat",
   // (combine / split don't have a snake_case Sage equivalent — same name works)
+  // snake_case Oleada 3
+  issue_cat: "issueCat",
+  create_did: "createDid",
   // Sage WC2 names with different case/spelling that map to existing handlers
   chia_send: "transfer",
   chia_getNfts: "getNFTs",
@@ -818,7 +827,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
   // passes the assets it wants to lock (offerAssets) and the assets it wants
   // back (requestAssets). We pick coins from our local store + forward to
   // make_offer in the engine, which handles the spend bookkeeping + signs.
-  async createOffer(_origin, params) {
+  async createOffer(origin, params) {
     const fp = await loadActiveFingerprint();
     if (fp == null) throw Errors.unauthorized("No active wallet");
     const p = params as ChiaMethodMap["createOffer"]["params"];
@@ -954,6 +963,11 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     // wallet to invalidate the offer; cancelOffer({secure:false}) just
     // marks it dropped locally. Storing input_coins here saves us from
     // having to decode the offer string at cancel time.
+    //
+    // We also stamp the creating `origin`. cancelOffer enforces origin
+    // equality before either path runs — otherwise any connected dApp
+    // could enumerate and cancel another dApp's offers (and even drain
+    // the maker input back to the wallet via the secure path).
     const key = `offers.${fp}`;
     const data = await chrome.storage.local.get(key);
     const list = (data[key] as Array<{
@@ -961,6 +975,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       offer: string;
       created_at: number;
       cancelled?: boolean;
+      origin?: string;
       input_xch_coins?: Array<{
         parent_coin_info: string;
         puzzle_hash: string;
@@ -981,6 +996,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       id: res.offer_id,
       offer: res.offer,
       created_at: Date.now(),
+      origin,
       input_xch_coins: xchInputs,
       input_cat_coins: catInputs,
     });
@@ -1226,7 +1242,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
   // Sage WC2 `chia_cancelOffer` has no `secure` flag and always means
   // on-chain. We force `secure: true` when the dApp called via that alias,
   // and return `{}` instead of `{id, cancelled}` to match Sage's response.
-  async cancelOffer(_origin, params, originalMethod) {
+  async cancelOffer(origin, params, originalMethod) {
     const fp = await loadActiveFingerprint();
     if (fp == null) throw Errors.unauthorized("No active wallet");
     const p = params as ChiaMethodMap["cancelOffer"]["params"];
@@ -1241,6 +1257,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       id: string;
       offer: string;
       cancelled?: boolean;
+      origin?: string;
       input_xch_coins?: Array<{
         parent_coin_info: string;
         puzzle_hash: string;
@@ -1249,7 +1266,12 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       }>;
     }> | undefined) ?? [];
 
-    const stored = list.find((o) => strip0x(o.id) === offerId);
+    // Look up only offers this origin created. Legacy offers without an
+    // origin tag are accessible to any origin for backwards-compat — new
+    // offers (Fase 2+) always carry one.
+    const stored = list.find(
+      (o) => strip0x(o.id) === offerId && (o.origin == null || o.origin === origin),
+    );
 
     if (!secure) {
       // Local-only cancel: idempotent, silent on unknown ids (matches the
@@ -1878,6 +1900,78 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     await writeCoinStore(fp, store);
     return { id: with0x(res.tx_id) as Hex };
   },
+
+  // ── Oleada 3 — issuance + DID creation ──────────────────────────────────
+  // Each picks ONE XCH input large enough to cover `amount` (for issueCat:
+  // the eve CAT mojos) or 1 (for createDid: the singleton launcher), plus
+  // fee. The XCH coin must come from the wallet's own derivation window.
+
+  async issueCat(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["issueCat"]["params"];
+    if (!p?.recipientAddress) {
+      throw Errors.invalidParams("issueCat requires { recipientAddress }");
+    }
+    if (!p?.amount) {
+      throw Errors.invalidParams("issueCat requires { amount }");
+    }
+    const amount = BigInt(String(p.amount));
+    const fee = BigInt(String(p.fee ?? 0));
+    if (amount <= 0n) {
+      throw Errors.invalidParams("issueCat: amount must be > 0");
+    }
+    const need = amount + fee;
+    const input = await pickSingleXchInput(fp, need);
+    const res = await callEngine<{ tx_id: string; asset_id: string; error?: string }>(
+      "issue_cat",
+      {
+        fingerprint: fp,
+        recipient_address: p.recipientAddress,
+        amount_mojos: amount.toString(),
+        fee_mojos: fee.toString(),
+        input_coin: input.coin,
+        change_index: input.coin.derivation_index,
+        broadcast: true,
+      },
+    );
+    if (res.error) throw new Error(res.error);
+    markXchSpentOptimistic(input.store, [input.coinId]);
+    await writeCoinStore(fp, input.store);
+    return {
+      id: with0x(res.tx_id) as Hex,
+      assetId: with0x(res.asset_id) as Hex,
+    };
+  },
+
+  async createDid(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["createDid"]["params"];
+    const fee = BigInt(String(p?.fee ?? 0));
+    // Singleton launcher = 1 mojo, locked in by chia_wallet_sdk.
+    const need = 1n + fee;
+    const input = await pickSingleXchInput(fp, need);
+    const res = await callEngine<{
+      tx_id: string;
+      did_id: string;
+      launcher_id: string;
+      error?: string;
+    }>("create_did", {
+      fingerprint: fp,
+      fee_mojos: fee.toString(),
+      input_coin: input.coin,
+      change_index: input.coin.derivation_index,
+      broadcast: true,
+    });
+    if (res.error) throw new Error(res.error);
+    markXchSpentOptimistic(input.store, [input.coinId]);
+    await writeCoinStore(fp, input.store);
+    return {
+      id: with0x(res.tx_id) as Hex,
+      didId: with0x(res.did_id) as Hex,
+    };
+  },
 };
 
 // ─── Helpers for Oleada 2 writes ───────────────────────────────────────────
@@ -1920,6 +2014,48 @@ async function pickXchInputs(
     );
   }
   return { inputs, inputCoinIds, store };
+}
+
+/**
+ * Pick a single XCH coin from the wallet large enough to cover `need`.
+ * Sorted largest-first so the smallest viable coin wins (cheapest in terms
+ * of dust left behind as change). Throws spendable-exceeded when no coin
+ * meets the threshold; we don't combine in this path since both issueCat
+ * and createDid need a SINGLE genesis parent.
+ */
+async function pickSingleXchInput(
+  fp: number,
+  need: bigint,
+): Promise<{
+  coin: { parent_coin_info: string; puzzle_hash: string; amount: string; derivation_index: number };
+  coinId: string;
+  store: import("./coin-store.js").CoinStore;
+}> {
+  const phToIdx = await derivePhToIndex();
+  const store = await readCoinStore(fp);
+  // Smallest viable first → less change generated.
+  const candidates = Object.values(store.coins)
+    .filter((c) => !c.spent && phToIdx[c.puzzle_hash] !== undefined && BigInt(c.amount) >= need)
+    .sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? 1 : -1));
+  const picked = candidates[0];
+  if (!picked) {
+    const largest = Object.values(store.coins)
+      .filter((c) => !c.spent)
+      .reduce((m, c) => (BigInt(c.amount) > m ? BigInt(c.amount) : m), 0n);
+    throw Errors.spendableBalanceExceeded(
+      `Need a single XCH coin >= ${need} mojos (incl. fee); largest unspent is ${largest}`,
+    );
+  }
+  return {
+    coin: {
+      parent_coin_info: picked.parent_coin_info,
+      puzzle_hash: picked.puzzle_hash,
+      amount: picked.amount,
+      derivation_index: phToIdx[picked.puzzle_hash]!,
+    },
+    coinId: picked.coin_id,
+    store,
+  };
 }
 
 // ─── Helpers for the read-only extensions ──────────────────────────────────

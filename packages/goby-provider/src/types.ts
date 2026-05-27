@@ -384,6 +384,40 @@ export interface ChiaMethodMap {
     params: { parts: number; fee?: Amount };
     result: { id: Hex } | Record<string, never>;
   };
+
+  // ─── Oleada 3 — new on-chain primitives ──────────────────────────────────
+  // Each one introduces a new chia_wallet_sdk driver call on the Rust side
+  // (issue_cat / create_did) and a TS handler that auto-picks an XCH input
+  // from the coin-store.
+
+  /**
+   * Issue a brand-new CAT using a single-issuance TAIL (GenesisByCoinId).
+   * The TAIL is derived from the XCH coin used as the genesis parent, so
+   * each emission is unique and unrepeatable. Returns the resulting
+   * asset_id so the dApp can immediately reference the new CAT.
+   */
+  issueCat: {
+    params: {
+      /** Bech32m XCH address that will own the initial CAT supply. */
+      recipientAddress: string;
+      /** Initial CAT supply, in CAT mojos (1 CAT = 1000 CAT mojos). */
+      amount: Amount;
+      fee?: Amount;
+    };
+    result: { id: Hex; assetId: Hex };
+  };
+
+  /**
+   * Create a new DID singleton owned by the wallet's own p2 puzzle. Uses
+   * the simple-DID profile (no recovery list, 1 verification, NIL metadata).
+   * Returns the launcher_id (also surfaced as `didId`).
+   */
+  createDid: {
+    params: {
+      fee?: Amount;
+    };
+    result: { id: Hex; didId: Hex };
+  };
 }
 
 // ─── View types for Loroco read extensions ─────────────────────────────────

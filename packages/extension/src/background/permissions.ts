@@ -80,6 +80,9 @@ const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([
   "bulkSendCat",
   "combine",
   "split",
+  // Oleada 3 — new on-chain primitives.
+  "issueCat",
+  "createDid",
 ]);
 
 export async function ensurePermissions(origin: string, method: ChiaMethod) {
