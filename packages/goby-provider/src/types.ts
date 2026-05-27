@@ -522,6 +522,31 @@ export interface ChiaMethodMap {
     };
     result: Array<{ id: Hex; launcherId: Hex }>;
   };
+
+  /**
+   * Send XCH and/or one CAT to multiple recipients in ONE atomic bundle.
+   * If both `xchOutputs` and `catOutputs` are present, the spend bundle
+   * ties the XCH and CAT inputs together with assert_concurrent_spend so
+   * a partial broadcast is impossible.
+   *
+   * Limited to ONE CAT asset per call — for multi-asset bundles, call
+   * multiSend once per asset. (This keeps the WASM endpoint manageable
+   * without sacrificing the common single-CAT use case.)
+   *
+   * Inputs are auto-selected from the local coin-store, same policy
+   * as bulkSendXch / bulkSendCat.
+   */
+  multiSend: {
+    params: {
+      xchOutputs?: Array<{ address: string; amount: Amount }>;
+      catOutputs?: {
+        assetId: Hex;
+        outputs: Array<{ address: string; amount: Amount }>;
+      };
+      fee?: Amount;
+    };
+    result: { id: Hex } | Record<string, never>;
+  };
 }
 
 // ─── Stub view types (filled in by Fase 3 DID sync) ──────────────────────

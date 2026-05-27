@@ -91,6 +91,7 @@ const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([
   "addNftUri",
   "transferDid",
   "normalizeDids",
+  "multiSend",
 ]);
 
 export async function ensurePermissions(origin: string, method: ChiaMethod) {

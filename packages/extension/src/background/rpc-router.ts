@@ -163,6 +163,7 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   "addNftUri",
   "transferDid",
   "normalizeDids",
+  "multiSend",
 ]);
 
 // ─── Method-name aliasing ────────────────────────────────────────────────
@@ -224,6 +225,7 @@ const BASE_ALIASES: Record<string, ChiaMethod> = {
   add_nft_uri: "addNftUri",
   transfer_did: "transferDid",
   normalize_dids: "normalizeDids",
+  multi_send: "multiSend",
   // snake_case stub reads (Fase 3 placeholders)
   get_dids: "getDids",
   get_nft_collections: "getNftCollections",
@@ -280,6 +282,7 @@ const LEGACY_GOBY_ALIASES: Record<string, ChiaMethod> = {
   // Sage WC2 spells the plural form
   chia_transferDids: "transferDid",
   chia_normalizeDids: "normalizeDids",
+  chia_multiSend: "multiSend",
   // chia_* dApp probe stubs (empty until Fase 3 DID sync)
   chia_getDids: "getDids",
   chia_getNftCollections: "getNftCollections",
@@ -2111,6 +2114,125 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       id: with0x(res.tx_id) as Hex,
       launcherId: with0x(res.launcher_id) as Hex,
     };
+  },
+
+  async multiSend(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["multiSend"]["params"];
+    const xchOutputs = p?.xchOutputs ?? [];
+    const catOutputs = p?.catOutputs;
+    if (xchOutputs.length === 0 && (!catOutputs || catOutputs.outputs.length === 0)) {
+      throw Errors.invalidParams(
+        "multiSend requires at least one xchOutputs entry or a non-empty catOutputs",
+      );
+    }
+    const fee = BigInt(String(p?.fee ?? 0));
+
+    // Pick XCH inputs to cover XCH outputs + fee.
+    const totalXchOut = xchOutputs.reduce(
+      (s, o) => s + BigInt(String(o.amount)),
+      0n,
+    );
+    const xchNeed = totalXchOut + fee;
+    let xchInputs: Array<{
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      derivation_index: number;
+    }> = [];
+    let xchInputIds: string[] = [];
+    let store: import("./coin-store.js").CoinStore;
+    if (xchNeed > 0n) {
+      const picked = await pickXchInputs(fp, xchNeed);
+      xchInputs = picked.inputs;
+      xchInputIds = picked.inputCoinIds;
+      store = picked.store;
+    } else {
+      store = await readCoinStore(fp);
+    }
+
+    // Pick CAT inputs (one asset) if present.
+    let catInputs: Array<{
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      inner_puzzle_hash: string;
+      derivation_index: number;
+      lineage_proof: { parent_name: string; inner_puzzle_hash: string; amount: string };
+    }> = [];
+    let catInputIds: string[] = [];
+    let catRequest: {
+      asset_id: string;
+      outputs: Array<{ address: string; amount: string }>;
+    } | null = null;
+    if (catOutputs) {
+      const assetId = strip0x(catOutputs.assetId);
+      const totalCatOut = catOutputs.outputs.reduce(
+        (s, o) => s + BigInt(String(o.amount)),
+        0n,
+      );
+      const cat = (store.cats ?? {})[with0x(assetId)] ?? (store.cats ?? {})[assetId];
+      if (!cat) {
+        throw Errors.spendableBalanceExceeded(
+          `multiSend: wallet doesn't track CAT ${with0x(assetId)}. ${describeAvailableCats(store)}`,
+        );
+      }
+      const phToIdx = await derivePhToIndex();
+      const sorted = cat.coins
+        .filter((c) => !c.spent && phToIdx[c.inner_puzzle_hash] !== undefined)
+        .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+      let running = 0n;
+      for (const c of sorted) {
+        if (running >= totalCatOut) break;
+        catInputs.push({
+          parent_coin_info: c.parent_coin_info,
+          puzzle_hash: c.puzzle_hash,
+          amount: c.amount,
+          inner_puzzle_hash: c.inner_puzzle_hash,
+          derivation_index: phToIdx[c.inner_puzzle_hash]!,
+          lineage_proof: c.lineage_proof,
+        });
+        catInputIds.push(c.coin_id);
+        running += BigInt(c.amount);
+      }
+      if (running < totalCatOut) {
+        throw Errors.spendableBalanceExceeded(
+          `multiSend: need ${totalCatOut} of CAT ${with0x(assetId)}, only ${running} available`,
+        );
+      }
+      catRequest = {
+        asset_id: with0x(assetId),
+        outputs: catOutputs.outputs.map((o) => ({
+          address: o.address,
+          amount: String(o.amount),
+        })),
+      };
+    }
+
+    const res = await callEngine<{ tx_id: string; error?: string }>("multi_send", {
+      fingerprint: fp,
+      xch_outputs: xchOutputs.length
+        ? xchOutputs.map((o) => ({ address: o.address, amount: String(o.amount) }))
+        : undefined,
+      cat_outputs: catRequest ?? undefined,
+      fee_mojos: fee.toString(),
+      xch_input_coins: xchInputs,
+      cat_input_coins: catInputs,
+      xch_change_index: xchInputs[0]?.derivation_index ?? 0,
+      cat_change_index: catInputs[0]?.derivation_index ?? 0,
+      broadcast: true,
+    });
+    if (res.error) throw new Error(res.error);
+
+    if (xchInputIds.length > 0) {
+      markXchSpentOptimistic(store, xchInputIds);
+    }
+    if (catInputIds.length > 0 && catRequest) {
+      markCatSpentOptimistic(store, catRequest.asset_id, catInputIds);
+    }
+    await writeCoinStore(fp, store);
+    return { id: with0x(res.tx_id) as Hex };
   },
 
   async normalizeDids(_origin, params) {
