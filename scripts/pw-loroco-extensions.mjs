@@ -76,6 +76,13 @@ const METHODS = [
     mutating: true,
     expectInvalidParams: true,
   },
+  // normalizeDids dry-fail: empty didCoinIds → 4000.
+  {
+    name: "normalizeDids",
+    params: { didCoinIds: [], didDerivationIndices: [] },
+    mutating: true,
+    expectInvalidParams: true,
+  },
   // ── Oleada 2 writes (approval required, dry-validation by default) ───
   {
     name: "bulkSendXch",
