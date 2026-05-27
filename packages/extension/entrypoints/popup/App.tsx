@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
+  analyzeCoinSpends,
   cacheHardenedPhs,
   callEngine,
   decideApproval,
   forceCoinSync,
   getCoinSnapshot,
   getCoinSyncTelemetry,
+  getCompatSettings,
   getSidecarSettings,
   getSyncState,
   getXchPriceUsd,
@@ -15,8 +17,11 @@ import {
   probeSidecar,
   revokeConnection,
   setActiveWallet,
+  setCompatSettings,
   setSidecarSettings,
   type CoinSnapshot,
+  type CoinSpendAnalysis,
+  type CompatSettings,
   type CoinSyncTelemetry,
   type ConnectionRecord,
   type DexieCatMetadata,
@@ -46,7 +51,15 @@ import {
   type StoredWallet,
 } from "../../src/popup/wallet-store";
 
-type TabName = "home" | "send" | "receive" | "nfts" | "activity" | "dev" | "settings";
+type TabName =
+  | "home"
+  | "send"
+  | "receive"
+  | "nfts"
+  | "activity"
+  | "dev"
+  | "settings"
+  | "status";
 
 const VALID_TABS: readonly TabName[] = [
   "home",
@@ -56,6 +69,7 @@ const VALID_TABS: readonly TabName[] = [
   "activity",
   "dev",
   "settings",
+  "status",
 ];
 
 function isTabName(s: string | null): s is TabName {
@@ -150,7 +164,17 @@ export function App() {
     try {
       await decideApproval(id, approved, overrides);
     } finally {
-      setPending((p) => p.filter((r) => r.id !== id));
+      setPending((p) => {
+        const next = p.filter((r) => r.id !== id);
+        // Once the queue drains, close the popup so the user is NOT left
+        // staring at the wallet (which they didn't open — the dApp did).
+        // If more approvals remain queued, keep the popup open to walk
+        // through the rest.
+        if (next.length === 0) {
+          try { window.close(); } catch { /* sandbox may block */ }
+        }
+        return next;
+      });
     }
   };
 
@@ -219,10 +243,11 @@ export function App() {
   };
 
   // If any dApp is waiting for approval, the popup pre-empts whatever tab
-  // the user was on and shows the inline approval screen. This is the
-  // MetaMask UX: clicking the extension icon (or auto-open from the SW)
-  // surfaces the pending request immediately. The body returns to the
-  // previous tab once every queued request is decided.
+  // the user was on and shows ONLY the approval screen — no wallet chip,
+  // no tabs, no settings/lock buttons. Goby/MetaMask-style: the dApp
+  // interaction is its own self-contained dialog, and the user never sees
+  // their wallet UI while a request is pending. Once the queue drains the
+  // popup auto-closes (see `decide`).
   const showApproval = pending.length > 0 && view.kind === "home";
 
   return (
@@ -258,11 +283,21 @@ export function App() {
             >
               ⚙
             </button>
+            <button
+              className={tab === "status" ? "icon-btn active" : "icon-btn"}
+              onClick={() => setTab(tab === "status" ? "home" : "status")}
+              title="Status"
+              aria-label="Status"
+            >
+              📊
+            </button>
           </div>
         )}
         {showApproval && (
           <span className="ozone-meta">
-            {pending.length > 1 ? `${pending.length} pending` : pending[0]!.method}
+            {pending.length > 1
+              ? `${pending.length} pending`
+              : pending[0]?.method ?? ""}
           </span>
         )}
       </header>
@@ -327,6 +362,15 @@ function ApprovalScreen({
   ) => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  // signCoinSpends + sendTransaction trigger async decoding of the bundle
+  // (see CoinSpendBreakdown). Until that completes the user has no idea
+  // what the bundle does, so the Approve button is gated on this flag.
+  // Reject is always available — the user can bail at any time.
+  // Default true for methods that don't decode anything (connect, transfer,
+  // etc. — those render synchronously).
+  const needsDecode =
+    request.method === "signCoinSpends" || request.method === "sendTransaction";
+  const [analysisReady, setAnalysisReady] = useState(!needsDecode);
   // Per-method override state. `createOffer` lets the user override the fee
   // a dApp proposed (Goby's combined-swap default of ~100M+ mojos is rarely
   // what the user wants — most XCH transfers need 0 or 5_000_000 mojos).
@@ -368,7 +412,7 @@ function ApprovalScreen({
         <strong>{request.origin}</strong> is requesting permission.
       </p>
 
-      <ApprovalSummary request={request} />
+      <ApprovalSummary request={request} onAnalysisReady={setAnalysisReady} />
 
       {feeOverride !== null && (
         <div className="fee-override">
@@ -407,10 +451,11 @@ function ApprovalScreen({
           {busy === "reject" ? "…" : "Reject"}
         </button>
         <button
-          disabled={busy !== null}
+          disabled={busy !== null || !analysisReady}
           onClick={() => void decide(true)}
+          title={!analysisReady ? "Waiting for the bundle to decode…" : ""}
         >
-          {busy === "approve" ? "…" : "Approve"}
+          {busy === "approve" ? "…" : !analysisReady ? "Decoding…" : "Approve"}
         </button>
       </div>
     </section>
@@ -532,7 +577,219 @@ function OfferAssetList({
   );
 }
 
-function ApprovalSummary({ request }: { request: PendingApproval }) {
+/**
+ * Decoded breakdown of a signCoinSpends / sendTransaction bundle.
+ *
+ * Calls the WASM `analyze_coin_spends` endpoint (via the popup-rpc
+ * `analyze-coin-spends` envelope, which also derives our window of
+ * owner puzzle hashes) and renders:
+ *   • Each output address with amount + asset, flagged "yours" / "external"
+ *   • Total XCH leaving the wallet vs returning as change
+ *   • Total CAT amounts leaving per asset_id
+ *   • Network fee
+ *   • A loud warning when any spend was classified "unknown" (NFT/DID
+ *     etc.) because the human-readable summary above is incomplete
+ *     for those.
+ *
+ * If the analysis call fails entirely, falls back to the raw count +
+ * a clear "could not decode" notice so the user is never silently
+ * shown stale data.
+ */
+function CoinSpendBreakdown({
+  coinSpends,
+  onAnalysisReady,
+}: {
+  coinSpends: Array<{
+    coin: { parent_coin_info: string; puzzle_hash: string; amount: string | number };
+    puzzle_reveal: string;
+    solution: string;
+  }>;
+  onAnalysisReady?: (ready: boolean) => void;
+}) {
+  const [analysis, setAnalysis] = useState<CoinSpendAnalysis | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // The `coinSpends` prop is a freshly-allocated array on every parent
+  // render. Using it as a useEffect dep re-fires the analysis on every
+  // tick, which never finishes (each completion sets state, which
+  // triggers another render, which restarts the fetch). Serialise once
+  // so the dep is stable across renders of the same bundle.
+  const cacheKey = JSON.stringify(coinSpends);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAnalysis(null);
+    setError(null);
+    onAnalysisReady?.(false);
+    if (coinSpends.length === 0) {
+      onAnalysisReady?.(true);
+      return;
+    }
+    void (async () => {
+      try {
+        const r = await analyzeCoinSpends(coinSpends);
+        if (!cancelled) {
+          setAnalysis(r);
+          onAnalysisReady?.(true);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError((err as Error).message);
+          // Even on decode failure we let the user proceed — the raw
+          // params block below shows what they'd actually approve. The
+          // error UI makes it loud.
+          onAnalysisReady?.(true);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: cacheKey is the stable derived dep; onAnalysisReady is stable from parent.
+  }, [cacheKey]);
+
+  if (coinSpends.length === 0) {
+    return <p className="muted small">No coin spends in this bundle.</p>;
+  }
+  if (error) {
+    return (
+      <div className="result">
+        <p className="error small">
+          ⚠ Could not decode this bundle: {error}.
+        </p>
+        <p className="muted small">
+          The raw params below are exactly what the wallet would sign.
+          Only approve if you trust the dApp completely.
+        </p>
+      </div>
+    );
+  }
+  if (!analysis) {
+    return (
+      <div className="result" data-testid="breakdown-loading">
+        <p className="muted small">
+          ⏳ Decoding {coinSpends.length} spend
+          {coinSpends.length === 1 ? "" : "s"}…
+        </p>
+        <p className="muted small">
+          The <strong>Approve</strong> button stays disabled until the
+          decoded summary shows up.
+        </p>
+      </div>
+    );
+  }
+
+  const { summary } = analysis;
+  const fee = BigInt(summary.total_fee_mojos);
+
+  // Group outputs by ours-vs-external for the two-column offer-summary
+  // layout. Each row shows a human-readable asset + amount.
+  type RowKind = "xch" | "cat" | "unknown";
+  interface Row {
+    label: string;
+    detail: string;
+    raw: string;
+    kind: RowKind;
+  }
+  const ours: Row[] = [];
+  const external: Row[] = [];
+  for (const s of analysis.spends) {
+    for (const o of s.outputs) {
+      const amt = BigInt(o.amount);
+      if (amt <= 0n) continue;
+      const label =
+        s.kind === "cat" && s.asset_id
+          ? `${mojosToCatUnits(o.amount)} CAT ${shortHash(s.asset_id)}`
+          : s.kind === "xch"
+            ? `${mojosToXch(o.amount)} XCH`
+            : `${o.amount} (unknown layer)`;
+      const detail = `${o.puzzle_hash.slice(0, 10)}…${o.puzzle_hash.slice(-6)}`;
+      const row: Row = { label, detail, raw: o.puzzle_hash, kind: s.kind };
+      (o.is_ours ? ours : external).push(row);
+    }
+  }
+
+  return (
+    <div className="offer-summary coin-spend-breakdown" data-testid="breakdown-ready">
+      <div className="offer-side offer-pay">
+        <span className="muted small">Going OUT (external)</span>
+        {external.length === 0 ? (
+          <p className="muted small">nothing leaves the wallet</p>
+        ) : (
+          <ul className="offer-asset-list">
+            {external.map((r, i) => (
+              <li key={i}>
+                <div>{r.label}</div>
+                <code className="muted small" title={r.raw}>→ {r.detail}</code>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="offer-arrow" aria-hidden>↕</div>
+
+      <div className="offer-side offer-receive">
+        <span className="muted small">Returning to your wallet</span>
+        {ours.length === 0 ? (
+          <p className="muted small">nothing comes back as change</p>
+        ) : (
+          <ul className="offer-asset-list">
+            {ours.map((r, i) => (
+              <li key={i}>
+                <div>{r.label}</div>
+                <code className="muted small" title={r.raw}>← yours</code>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {fee > 0n && (
+        <p className="muted small">
+          Network fee: {fee.toString()} mojos
+        </p>
+      )}
+
+      {summary.unknown_spend_count > 0 && (
+        <p className="error small" data-testid="unknown-spend-warning">
+          ⚠ {summary.unknown_spend_count} spend
+          {summary.unknown_spend_count === 1 ? "" : "s"} use a puzzle Loroco
+          can't decode (likely NFT/DID or a custom contract). The summary
+          above only covers the parts we can read — review raw params
+          before approving.
+        </p>
+      )}
+
+      {(external.length > 0 || ours.length > 0) && (
+        <details className="breakdown-details">
+          <summary className="muted small">Show full recipient list</summary>
+          <ul className="breakdown-recipients">
+            {[...external.map((r) => ({ ...r, side: "external" as const })),
+              ...ours.map((r) => ({ ...r, side: "ours" as const }))].map(
+              (r, i) => (
+                <li key={i}>
+                  <code className="ph">{r.raw}</code>
+                  <span className="muted small">
+                    {r.label} · {r.side}
+                  </span>
+                </li>
+              ),
+            )}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function ApprovalSummary({
+  request,
+  onAnalysisReady,
+}: {
+  request: PendingApproval;
+  onAnalysisReady?: (ready: boolean) => void;
+}) {
   const params = request.params as Record<string, unknown> | null;
 
   switch (request.method) {
@@ -585,7 +842,11 @@ function ApprovalSummary({ request }: { request: PendingApproval }) {
     }
 
     case "transfer": {
-      const to = params?.to;
+      // WC2 `chia_send` uses `address`; Goby `transfer` uses `to`. The
+      // handler accepts either, so the popup must too — otherwise a
+      // malicious dApp sending only `{address: "evil"}` leaves the "to"
+      // field blank and the user has no idea where funds are headed.
+      const to = params?.to ?? params?.address;
       const amount = params?.amount;
       const assetId = params?.assetId;
       const fee = params?.fee;
@@ -677,31 +938,41 @@ function ApprovalSummary({ request }: { request: PendingApproval }) {
     }
 
     case "sendTransaction": {
-      const sb = params?.spendBundle as { coin_spends?: unknown[] } | undefined;
-      const spendCount = Array.isArray(sb?.coin_spends) ? sb!.coin_spends.length : 0;
+      const sb = params?.spendBundle as
+        | {
+            coin_spends?: Array<{
+              coin: { parent_coin_info: string; puzzle_hash: string; amount: string | number };
+              puzzle_reveal: string;
+              solution: string;
+            }>;
+          }
+        | undefined;
+      const cs = sb?.coin_spends ?? [];
       return (
         <div className="result">
           <p className="muted small">
-            This site asks the wallet to broadcast a pre-built spend bundle to
-            the network. You will sign nothing — but you will publish it.
+            This site asks the wallet to broadcast a pre-built spend bundle.
+            You will sign nothing — but you will publish it.
           </p>
-          <div>
-            <span className="muted">coin spends</span>
-            <code>{spendCount}</code>
-          </div>
+          <CoinSpendBreakdown coinSpends={cs} onAnalysisReady={onAnalysisReady} />
         </div>
       );
     }
 
     case "signCoinSpends": {
-      const cs = (params?.coinSpends as unknown[] | undefined) ?? [];
+      const cs = (params?.coinSpends as Array<{
+        coin: { parent_coin_info: string; puzzle_hash: string; amount: string | number };
+        puzzle_reveal: string;
+        solution: string;
+      }> | undefined) ?? [];
       return (
         <div className="result">
           <p className="muted small">
             This site asks the wallet to sign {cs.length} coin spend
-            {cs.length === 1 ? "" : "s"}. Signing means the spends become
-            broadcastable — only approve if you trust the site.
+            {cs.length === 1 ? "" : "s"}. Signing makes them broadcastable —
+            review what's moving below.
           </p>
+          <CoinSpendBreakdown coinSpends={cs} onAnalysisReady={onAnalysisReady} />
         </div>
       );
     }
@@ -1400,8 +1671,8 @@ function HomeScreen({
   }, [wallet.fingerprint]);
 
   // Show the compact balance row only on tabs that aren't already showing
-  // it themselves (Settings has its own scrollable surface).
-  const showBalanceBar = tab !== "settings";
+  // it themselves (Settings/Status have their own scrollable surfaces).
+  const showBalanceBar = tab !== "settings" && tab !== "status";
 
   return (
     <section className="screen has-bottom-nav">
@@ -1448,12 +1719,12 @@ function HomeScreen({
           <SettingsTab
             wallet={wallet}
             wallets={wallets}
-            sync={sync}
             onLock={onLock}
             onSwitchWallet={onSwitchWallet}
             onAddWallet={onAddWallet}
           />
         )}
+        {tab === "status" && <StatusTab sync={sync} />}
       </div>
 
       <nav className="tabs tabs-bottom">
@@ -1507,41 +1778,30 @@ function HomeScreen({
   );
 }
 
+type SettingsModal =
+  | null
+  | "recovery"
+  | "connections"
+  | "sidecar"
+  | "compat"
+  | "offer";
+
 function SettingsTab({
   wallet,
   wallets,
-  sync,
   onLock,
   onSwitchWallet,
   onAddWallet,
 }: {
   wallet: StoredWallet;
   wallets: StoredWallet[];
-  sync: SyncState | null;
   onLock: () => void | Promise<void>;
   onSwitchWallet: (fp: number) => void | Promise<void>;
   onAddWallet: () => void;
 }) {
-  const [revealing, setRevealing] = useState(false);
-  const [revealPwd, setRevealPwd] = useState("");
-  const [revealedMnemonic, setRevealedMnemonic] = useState<string | null>(null);
-  const [revealError, setRevealError] = useState<string | null>(null);
+  const [modal, setModal] = useState<SettingsModal>(null);
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [copiedFingerprint, setCopiedFingerprint] = useState(false);
-
-  const revealSeed = async () => {
-    setRevealError(null);
-    try {
-      const res = await callEngine<{ mnemonic: string }>("unlock_keychain", {
-        keychain_blob: wallet.keychainBlob,
-        fingerprint: wallet.fingerprint,
-        password: revealPwd,
-      });
-      setRevealedMnemonic(res.mnemonic);
-    } catch (err) {
-      setRevealError((err as Error).message);
-    }
-  };
 
   const copyFp = async () => {
     await navigator.clipboard.writeText(wallet.fingerprint.toString());
@@ -1554,6 +1814,8 @@ function SettingsTab({
     await callEngine("lock_keychain", { fingerprint: wallet.fingerprint });
     await onLock();
   };
+
+  const closeModal = () => setModal(null);
 
   return (
     <div className="tab-body">
@@ -1600,90 +1862,47 @@ function SettingsTab({
         </div>
       </div>
 
+      <h3>Security &amp; access</h3>
+      <ul className="settings-section-list">
+        <SettingsSectionRow
+          icon="🔐"
+          title="Recovery phrase"
+          sub="Reveal the 24-word seed for this wallet"
+          onClick={() => setModal("recovery")}
+        />
+        <SettingsSectionRow
+          icon="🔗"
+          title="Connected sites"
+          sub="dApps that can talk to this wallet"
+          onClick={() => setModal("connections")}
+        />
+      </ul>
+
       <h3>Network</h3>
-      <div className="result">
-        <div>
-          <span className="muted">endpoint</span>
-          <code>api.coinset.org · mainnet</code>
-        </div>
-        {sync && (
-          <div>
-            <span className="muted">peak height</span>
-            <code>#{sync.peak_height.toLocaleString()}</code>
-          </div>
-        )}
-      </div>
+      <ul className="settings-section-list">
+        <SettingsSectionRow
+          icon="🛰"
+          title="Local peer sync"
+          sub="Use ozone-sidecar instead of coinset.org"
+          onClick={() => setModal("sidecar")}
+        />
+        <SettingsSectionRow
+          icon="🧩"
+          title="Goby compatibility"
+          sub="Inject window.chia + chia_* aliases"
+          onClick={() => setModal("compat")}
+        />
+      </ul>
 
-      <h3>Local peer sync</h3>
-      <LocalPeerSyncSection />
-
-      <h3>Sync details</h3>
-      <SyncDetailsPanel />
-
-      <h3>Recovery phrase</h3>
-      {!revealing && !revealedMnemonic && (
-        <button className="secondary" onClick={() => setRevealing(true)}>
-          Show recovery phrase
-        </button>
-      )}
-      {revealing && !revealedMnemonic && (
-        <>
-          <p className="muted">Enter your password to view the 24-word seed.</p>
-          <input
-            type="password"
-            placeholder="Password"
-            value={revealPwd}
-            onChange={(e) => setRevealPwd(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && revealPwd) void revealSeed();
-            }}
-          />
-          {revealError && <p className="error">{revealError}</p>}
-          <div className="row">
-            <button
-              className="secondary"
-              onClick={() => {
-                setRevealing(false);
-                setRevealPwd("");
-                setRevealError(null);
-              }}
-            >
-              Cancel
-            </button>
-            <button onClick={() => void revealSeed()} disabled={!revealPwd}>
-              Reveal
-            </button>
-          </div>
-        </>
-      )}
-      {revealedMnemonic && (
-        <>
-          <div className="seed-grid">
-            {revealedMnemonic.split(/\s+/).map((w, i) => (
-              <span className="seed-pill" key={i}>
-                <span className="seed-pill-index">{i + 1}</span>
-                <span className="seed-pill-word">{w}</span>
-              </span>
-            ))}
-          </div>
-          <button
-            className="secondary"
-            onClick={() => {
-              setRevealedMnemonic(null);
-              setRevealPwd("");
-              setRevealing(false);
-            }}
-          >
-            Hide
-          </button>
-        </>
-      )}
-
-      <h3>Connected sites</h3>
-      <ConnectionsList />
-
-      <h3>Inspect offer</h3>
-      <OfferInspector />
+      <h3>Tools</h3>
+      <ul className="settings-section-list">
+        <SettingsSectionRow
+          icon="🔎"
+          title="Inspect offer"
+          sub="Decode an offer1… string"
+          onClick={() => setModal("offer")}
+        />
+      </ul>
 
       <h3>Danger zone</h3>
       {!confirmingReset && (
@@ -1707,6 +1926,277 @@ function SettingsTab({
           </div>
         </>
       )}
+
+      {modal === "recovery" && (
+        <Modal title="Recovery phrase" onClose={closeModal}>
+          <RecoveryPhraseSection wallet={wallet} />
+        </Modal>
+      )}
+      {modal === "connections" && (
+        <Modal title="Connected sites" onClose={closeModal}>
+          <ConnectionsList />
+        </Modal>
+      )}
+      {modal === "sidecar" && (
+        <Modal title="Local peer sync" onClose={closeModal}>
+          <LocalPeerSyncSection />
+        </Modal>
+      )}
+      {modal === "compat" && (
+        <Modal title="Goby compatibility" onClose={closeModal}>
+          <DAppCompatSection />
+        </Modal>
+      )}
+      {modal === "offer" && (
+        <Modal title="Inspect offer" onClose={closeModal}>
+          <OfferInspector />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function SettingsSectionRow({
+  icon,
+  title,
+  sub,
+  onClick,
+}: {
+  icon: string;
+  title: string;
+  sub?: string;
+  onClick: () => void;
+}) {
+  return (
+    <li>
+      <button type="button" className="settings-section-row" onClick={onClick}>
+        <span className="settings-section-icon" aria-hidden>
+          {icon}
+        </span>
+        <span className="settings-section-meta">
+          <span className="settings-section-title">{title}</span>
+          {sub && <span className="settings-section-sub">{sub}</span>}
+        </span>
+        <span className="settings-section-chev" aria-hidden>
+          ›
+        </span>
+      </button>
+    </li>
+  );
+}
+
+function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+    >
+      <div className="modal-card">
+        <div className="modal-header">
+          <h3 className="modal-title">{title}</h3>
+          <button
+            type="button"
+            className="modal-close"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function RecoveryPhraseSection({ wallet }: { wallet: StoredWallet }) {
+  const [revealPwd, setRevealPwd] = useState("");
+  const [revealedMnemonic, setRevealedMnemonic] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
+
+  const revealSeed = async () => {
+    setRevealError(null);
+    try {
+      const res = await callEngine<{ mnemonic: string }>("unlock_keychain", {
+        keychain_blob: wallet.keychainBlob,
+        fingerprint: wallet.fingerprint,
+        password: revealPwd,
+      });
+      setRevealedMnemonic(res.mnemonic);
+    } catch (err) {
+      setRevealError((err as Error).message);
+    }
+  };
+
+  if (revealedMnemonic) {
+    return (
+      <>
+        <p className="muted small">
+          Write these 24 words on paper and keep them offline. Anyone with this
+          phrase controls the wallet.
+        </p>
+        <div className="seed-grid">
+          {revealedMnemonic.split(/\s+/).map((w, i) => (
+            <span className="seed-pill" key={i}>
+              <span className="seed-pill-index">{i + 1}</span>
+              <span className="seed-pill-word">{w}</span>
+            </span>
+          ))}
+        </div>
+        <button
+          className="secondary"
+          onClick={() => {
+            setRevealedMnemonic(null);
+            setRevealPwd("");
+          }}
+        >
+          Hide
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <p className="muted">Enter your password to view the 24-word seed.</p>
+      <input
+        type="password"
+        placeholder="Password"
+        value={revealPwd}
+        onChange={(e) => setRevealPwd(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && revealPwd) void revealSeed();
+        }}
+        autoFocus
+      />
+      {revealError && <p className="error">{revealError}</p>}
+      <button onClick={() => void revealSeed()} disabled={!revealPwd}>
+        Reveal
+      </button>
+    </>
+  );
+}
+
+function StatusTab({ sync }: { sync: SyncState | null }) {
+  return (
+    <div className="tab-body">
+      <h3>Network</h3>
+      <div className="result">
+        <div>
+          <span className="muted">endpoint</span>
+          <code>api.coinset.org · mainnet</code>
+        </div>
+        {sync && (
+          <div>
+            <span className="muted">peak height</span>
+            <code>#{sync.peak_height.toLocaleString()}</code>
+          </div>
+        )}
+        {sync?.error && (
+          <div>
+            <span className="muted">last error</span>
+            <code className="error">{sync.error}</code>
+          </div>
+        )}
+      </div>
+
+      <h3>Sync details</h3>
+      <SyncDetailsPanel />
+
+      <h3>Local peer</h3>
+      <LocalPeerStatus />
+    </div>
+  );
+}
+
+function LocalPeerStatus() {
+  const [settings, setSettings] = useState<SidecarSettings | null>(null);
+  const [probe, setProbeState] = useState<SidecarProbe | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const s = await getSidecarSettings();
+        if (!cancelled) setSettings(s);
+      } catch {
+        // best-effort
+      }
+    };
+    void refresh();
+  }, []);
+
+  useEffect(() => {
+    if (!settings) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const p = await probeSidecar();
+        if (!cancelled) setProbeState(p);
+      } catch (err) {
+        if (!cancelled) setProbeState({ reachable: false, error: (err as Error).message });
+      }
+    };
+    void tick();
+    const id = setInterval(() => void tick(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [settings?.enabled, settings?.url]);
+
+  if (!settings) return <p className="muted small">Loading…</p>;
+
+  const reachable =
+    probe && "peer_connected" in probe && probe.peer_connected === true;
+  const probeError = probe && "error" in probe && probe.error ? probe.error : null;
+
+  return (
+    <div className="result">
+      <div>
+        <span className="muted">mode</span>
+        <code>{settings.enabled ? "sidecar (when reachable)" : "coinset.org only"}</code>
+      </div>
+      <div>
+        <span className="muted">url</span>
+        <code>{settings.url}</code>
+      </div>
+      <div>
+        <span className="muted">status</span>
+        {reachable ? (
+          <code style={{ color: "var(--ok, #4ade80)" }}>
+            connected · {probe?.peer_addr ?? "?"} · peak #
+            {probe?.peak_height?.toLocaleString() ?? "?"}
+          </code>
+        ) : settings.enabled ? (
+          <code style={{ color: "var(--warn, #fbbf24)" }}>
+            unreachable {probeError ? `(${probeError})` : ""}
+          </code>
+        ) : (
+          <code className="muted">disabled</code>
+        )}
+      </div>
     </div>
   );
 }
@@ -1805,7 +2295,7 @@ function SyncBadge({
   // Compute overall % across all 3 stages so the collapsed badge can show a
   // single progress hint without the user having to expand. Each stage
   // contributes equally — the bar advances as XCH → CATs → NFTs complete.
-  const overall = computeOverallProgress(stage, xchP, catsP, nftsP);
+  const overall = computeOverallProgress(stage, xchP, nftsP);
 
   // Elapsed seconds since the tick started — gives the user a "we're alive"
   // signal even when chunk counters are slow.
@@ -1863,8 +2353,7 @@ function SyncBadge({
           <ul className="sync-stage-list">
             <SyncStageItem
               label="XCH"
-              currentStage={stage}
-              myStage="xch"
+              active={stage === "xch"}
               prog={xchP}
               count={xchCoins}
               countLabel={xchCoins === 1 ? "coin" : "coins"}
@@ -1872,17 +2361,16 @@ function SyncBadge({
             />
             <SyncStageItem
               label="CATs"
-              currentStage={stage}
-              myStage="cats"
-              prog={catsP}
+              active={stage === "cats" || stage === "nfts"}
+              prog={stage === "nfts" ? nftsP : catsP}
               count={catAssets}
               countLabel={catAssets === 1 ? "token" : "tokens"}
               hadFullSync={hadFullSync}
+              sharedNote={stage === "nfts" ? "shared scan with NFTs" : undefined}
             />
             <SyncStageItem
               label="NFTs"
-              currentStage={stage}
-              myStage="nfts"
+              active={stage === "nfts"}
               prog={nftsP}
               count={nfts}
               countLabel={nfts === 1 ? "NFT" : "NFTs"}
@@ -1921,22 +2409,21 @@ function SyncBadge({
 
 function SyncStageItem({
   label,
-  currentStage,
-  myStage,
+  active,
   prog,
   count,
   countLabel,
   hadFullSync,
+  sharedNote,
 }: {
   label: string;
-  currentStage: SyncStage;
-  myStage: SyncStage;
+  active: boolean;
   prog: StageProgress;
   count: number;
   countLabel: string;
   hadFullSync: boolean;
+  sharedNote?: string;
 }) {
-  const active = currentStage === myStage;
   const done = prog.total > 0 && prog.done >= prog.total;
   const pct = prog.total > 0 ? Math.min(100, (prog.done / prog.total) * 100) : 0;
 
@@ -1962,12 +2449,12 @@ function SyncStageItem({
       </span>
       {active && (
         <span className="sync-stage-detail">
-          {prog.done}/{prog.total}
-          {prog.detail ? ` · ${prog.detail}` : ""}
-          {stageElapsedSec > 0 ? ` · ${stageElapsedSec}s` : ""}
+          {sharedNote
+            ? sharedNote
+            : `${prog.done}/${prog.total}${prog.detail ? ` · ${prog.detail}` : ""}${stageElapsedSec > 0 ? ` · ${stageElapsedSec}s` : ""}`}
         </span>
       )}
-      {active && (
+      {active && !sharedNote && (
         <div className="sync-stage-bar" aria-hidden>
           <div className="sync-stage-bar-fill" style={{ width: `${pct}%` }} />
         </div>
@@ -1979,19 +2466,19 @@ function SyncStageItem({
 function computeOverallProgress(
   stage: SyncStage,
   xch: StageProgress,
-  cats: StageProgress,
   nfts: StageProgress,
 ): number {
-  // Each of the three scan stages contributes a third of the bar.
+  // The background runs xch → nfts → done. The nfts stage's hint scan
+  // populates both CAT and NFT queues; the "cats" SyncStage value exists for
+  // per-substage progress but is never set as the active stage. So the bar
+  // is split in halves: XCH first half, shared NFT+CAT scan second half.
   const ratio = (p: StageProgress) =>
     p.total > 0 ? Math.min(1, p.done / p.total) : 0;
   const xchR = ratio(xch);
-  const catsR = ratio(cats);
   const nftsR = ratio(nfts);
   if (stage === "deriving") return 0.02;
-  if (stage === "xch") return xchR / 3;
-  if (stage === "cats") return 1 / 3 + catsR / 3;
-  if (stage === "nfts") return 2 / 3 + nftsR / 3;
+  if (stage === "xch") return xchR / 2;
+  if (stage === "nfts" || stage === "cats") return 0.5 + nftsR / 2;
   if (stage === "done") return 1;
   return 0;
 }
@@ -2003,9 +2490,9 @@ function stageDisplay(stage: SyncStage): string {
     case "xch":
       return "Scanning XCH";
     case "cats":
-      return "Scanning CATs";
+      return "Parsing CATs";
     case "nfts":
-      return "Scanning NFTs";
+      return "Scanning hints (CATs + NFTs)";
     case "done":
       return "Idle";
     case "idle":
@@ -2374,51 +2861,110 @@ function LocalPeerSyncSection() {
     probe && "error" in probe && probe.error ? probe.error : null;
 
   return (
-    <div className="result">
-      <p className="muted small">
+    <>
+      <p className="form-note">
         Run a local <code>ozone-sidecar</code> daemon to sync your wallet
         through real Chia peers (mTLS) instead of coinset.org. The extension
         falls back automatically if the sidecar is unreachable.
       </p>
-      <div className="row" style={{ alignItems: "center", gap: 12 }}>
-        <label className="row" style={{ alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={settings.enabled}
-            disabled={busy}
-            onChange={(e) => void toggle(e.target.checked)}
-          />
-          <span>Use sidecar when reachable</span>
-        </label>
-      </div>
-      <div className="row" style={{ alignItems: "center", gap: 8, marginTop: 8 }}>
+      <label className="form-check">
+        <input
+          type="checkbox"
+          checked={settings.enabled}
+          disabled={busy}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        <span>Use sidecar when reachable</span>
+      </label>
+      <div className="form-input-row">
         <input
           type="text"
           value={urlInput}
           onChange={(e) => setUrlInput(e.target.value)}
           placeholder="http://127.0.0.1:8765"
-          style={{ flex: 1 }}
         />
-        <button className="secondary" disabled={busy || urlInput === settings.url} onClick={() => void saveUrl()}>
+        <button
+          className="secondary modal-inline-btn"
+          disabled={busy || urlInput === settings.url}
+          onClick={() => void saveUrl()}
+        >
           Save
         </button>
       </div>
-      <div style={{ marginTop: 8 }}>
-        <span className="muted">status </span>
+      <div className="form-status">
+        <span className="label">status</span>
         {reachable ? (
-          <code style={{ color: "var(--ok, #4ade80)" }}>
-            connected · {probe?.peer_addr ?? "?"} · peak #{probe?.peak_height?.toLocaleString() ?? "?"}
+          <code className="ok">
+            connected · {probe?.peer_addr ?? "?"} · peak #
+            {probe?.peak_height?.toLocaleString() ?? "?"}
           </code>
         ) : settings.enabled ? (
-          <code style={{ color: "var(--warn, #fbbf24)" }}>
-            sidecar not reachable {probeError ? `(${probeError})` : ""}
+          <code className="warn">
+            unreachable {probeError ? `(${probeError})` : ""}
           </code>
         ) : (
           <code className="muted">disabled — coinset.org in use</code>
         )}
       </div>
       {error && <p className="error">{error}</p>}
-    </div>
+    </>
+  );
+}
+
+function DAppCompatSection() {
+  const [settings, setSettings] = useState<CompatSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await getCompatSettings();
+        setSettings(s);
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    })();
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    setBusy(true);
+    try {
+      const s = await setCompatSettings({ legacyGoby: next });
+      setSettings(s);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!settings) return <p className="muted small">Loading…</p>;
+
+  return (
+    <>
+      <p className="form-note">
+        When enabled, Loroco also claims <code>window.chia</code> and accepts
+        Goby-style method names (<code>chia_*</code>, <code>chip0002_*</code>).
+        Turn this on to drive dApps that only support Goby. Turn it off in
+        production so real Goby keeps <code>window.chia</code> free — Loroco
+        still works for dApps that target <code>window.loroco</code> directly.
+      </p>
+      <label className="form-check">
+        <input
+          type="checkbox"
+          checked={settings.legacyGoby}
+          disabled={busy}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        <span>Enable Goby compatibility</span>
+      </label>
+      <p className="muted small">
+        Reload any open dApp tabs after changing this — the wallet only
+        injects its provider once per page load.
+      </p>
+      {error && <p className="error">{error}</p>}
+    </>
   );
 }
 
@@ -2527,7 +3073,7 @@ function OfferInspector() {
   };
 
   return (
-    <div>
+    <>
       <textarea
         rows={3}
         value={text}
@@ -2541,14 +3087,16 @@ function OfferInspector() {
       {error && <p className="error">{error}</p>}
       {result && (
         <div className="result">
-          <div>
-            <span className="muted">offered XCH</span>
-            <code>{result.offered.xch_mojos} mojos</code>
-          </div>
+          {BigInt(result.offered.xch_mojos || "0") > 0n && (
+            <div>
+              <span className="muted">offered XCH</span>
+              <code>{mojosToXch(result.offered.xch_mojos)} XCH</code>
+            </div>
+          )}
           {result.offered.cats.map((c) => (
             <div key={c.asset_id}>
               <span className="muted">offered CAT {shortHash(c.asset_id)}</span>
-              <code>{c.amount}</code>
+              <code>{mojosToCatUnits(c.amount)} CAT</code>
             </div>
           ))}
           {result.offered.nft_launcher_ids.map((l) => (
@@ -2557,14 +3105,16 @@ function OfferInspector() {
               <code>{shortHash(l)}</code>
             </div>
           ))}
-          <div>
-            <span className="muted">requested XCH</span>
-            <code>{result.requested.xch_mojos} mojos</code>
-          </div>
+          {BigInt(result.requested.xch_mojos || "0") > 0n && (
+            <div>
+              <span className="muted">requested XCH</span>
+              <code>{mojosToXch(result.requested.xch_mojos)} XCH</code>
+            </div>
+          )}
           {result.requested.cats.map((c) => (
             <div key={c.asset_id}>
               <span className="muted">requested CAT {shortHash(c.asset_id)}</span>
-              <code>{c.amount}</code>
+              <code>{mojosToCatUnits(c.amount)} CAT</code>
             </div>
           ))}
           {result.requested.nft_launcher_ids.map((l) => (
@@ -2589,7 +3139,7 @@ function OfferInspector() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -3217,6 +3767,9 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
   const [sending, setSending] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [sent, setSent] = useState<SendXchResult | null>(null);
+  // Tracks which chip ("to" | "tx") flashed "copied" after a click — null when
+  // nothing was recently copied. Auto-clears after the 1.2s feedback timeout.
+  const [copied, setCopied] = useState<string | null>(null);
 
   // Pull the latest local coin snapshot so we can pick a coin to spend.
   useEffect(() => {
@@ -3331,28 +3884,83 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
     setSubmitError(null);
     setSent(null);
     try {
+      // Two derivation maps: unhardened from `derive_addresses` (live), and
+      // hardened from the cached `store.hardened_phs` (populated once after
+      // unlock). When picking inputs we check both; coins whose puzzle hash
+      // sits in the hardened set must travel to the engine with
+      // `derivation_kind: "hardened"` so the engine signs with
+      // master_to_wallet_hardened instead of unhardened — without that the
+      // signature won't verify against the coin's locked puzzle.
+      //
+      // Match coin-sync's 200-address window for unhardened. With only 50
+      // we'd miss coins that live at index 50–199 in wallets that have
+      // cycled through many receive addresses.
       const derived = await callEngine<{
         addresses: { index: number; puzzle_hash: string }[];
       }>("derive_addresses", {
         fingerprint: wallet.fingerprint,
         start: 0,
-        count: 50,
+        count: 200,
         testnet: false,
       });
-      const phToIndex: Record<string, number> = {};
+      const unhardenedPhToIndex: Record<string, number> = {};
       for (const a of derived.addresses) {
-        phToIndex[a.puzzle_hash] = a.index;
+        unhardenedPhToIndex[a.puzzle_hash] = a.index;
       }
-
       const fresh = await getCoinSnapshot(wallet.fingerprint);
+      const hardenedPhToIndex: Record<string, number> = {};
+      for (const [ph, idx] of Object.entries(fresh.hardened_phs ?? {})) {
+        // Cache stores both 0x-prefixed and stripped forms historically;
+        // normalise to one shape we can look up consistently.
+        hardenedPhToIndex[ph.startsWith("0x") ? ph : `0x${ph}`] = idx;
+      }
+      // Returns { index, kind } if we own the ph at either path, else null.
+      const lookupPh = (
+        ph: string,
+      ): { index: number; kind: "hardened" | "unhardened" } | null => {
+        const with0x = ph.startsWith("0x") ? ph : `0x${ph}`;
+        const without0x = ph.startsWith("0x") ? ph.slice(2) : ph;
+        const u =
+          unhardenedPhToIndex[with0x] ?? unhardenedPhToIndex[without0x];
+        if (u !== undefined) return { index: u, kind: "unhardened" };
+        const h =
+          hardenedPhToIndex[with0x] ?? hardenedPhToIndex[without0x];
+        if (h !== undefined) return { index: h, kind: "hardened" };
+        return null;
+      };
 
       if (selectedAsset.kind === "xch") {
-        const picked = pickCoinsForSendMulti(
-          fresh.coins,
-          phToIndex,
-          amountMojos + feeMojos,
-        );
-        if (!picked) {
+        // pickCoinsForSendMulti only knows unhardened; pick by hand to
+        // include hardened too. Largest-first, like the helper.
+        const candidates = Object.values(fresh.coins)
+          .filter((c) => !c.spent)
+          .map((c) => ({ coin: c, owner: lookupPh(c.puzzle_hash) }))
+          .filter((x) => x.owner !== null)
+          .sort((a, b) =>
+            BigInt(b.coin.amount) > BigInt(a.coin.amount) ? 1 : -1,
+          );
+        let running = 0n;
+        const picked: Array<{
+          coin_id: string;
+          parent_coin_info: string;
+          puzzle_hash: string;
+          amount: string;
+          derivation_index: number;
+          derivation_kind?: "hardened" | "unhardened";
+        }> = [];
+        for (const { coin, owner } of candidates) {
+          if (running >= amountMojos + feeMojos) break;
+          picked.push({
+            coin_id: coin.coin_id,
+            parent_coin_info: coin.parent_coin_info,
+            puzzle_hash: coin.puzzle_hash,
+            amount: coin.amount,
+            derivation_index: owner!.index,
+            ...(owner!.kind === "hardened" ? { derivation_kind: "hardened" } : {}),
+          });
+          running += BigInt(coin.amount);
+        }
+        if (running < amountMojos + feeMojos) {
           setSubmitError("Wallet balance changed. Refresh and try again.");
           return;
         }
@@ -3363,6 +3971,9 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
           fee_mojos: feeMojos.toString(),
           input_coins: picked,
           change_index: picked[0]!.derivation_index,
+          ...(picked[0]!.derivation_kind === "hardened"
+            ? { change_kind: "hardened" }
+            : {}),
           testnet: false,
           broadcast: true,
         });
@@ -3375,8 +3986,10 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
           return;
         }
         const sortedCoins = catAsset.coins
-          .filter((c) => !c.spent && phToIndex[c.inner_puzzle_hash] !== undefined)
-          .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+          .filter((c) => !c.spent)
+          .map((c) => ({ coin: c, owner: lookupPh(c.inner_puzzle_hash) }))
+          .filter((x) => x.owner !== null)
+          .sort((a, b) => (BigInt(b.coin.amount) > BigInt(a.coin.amount) ? 1 : -1));
         let running = 0n;
         const picked: Array<{
           parent_coin_info: string;
@@ -3384,23 +3997,25 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
           amount: string;
           inner_puzzle_hash: string;
           derivation_index: number;
+          derivation_kind?: "hardened" | "unhardened";
           lineage_proof: {
             parent_name: string;
             inner_puzzle_hash: string;
             amount: string;
           };
         }> = [];
-        for (const c of sortedCoins) {
+        for (const { coin, owner } of sortedCoins) {
           if (running >= amountMojos) break;
           picked.push({
-            parent_coin_info: c.parent_coin_info,
-            puzzle_hash: c.puzzle_hash,
-            amount: c.amount,
-            inner_puzzle_hash: c.inner_puzzle_hash,
-            derivation_index: phToIndex[c.inner_puzzle_hash]!,
-            lineage_proof: c.lineage_proof,
+            parent_coin_info: coin.parent_coin_info,
+            puzzle_hash: coin.puzzle_hash,
+            amount: coin.amount,
+            inner_puzzle_hash: coin.inner_puzzle_hash,
+            derivation_index: owner!.index,
+            ...(owner!.kind === "hardened" ? { derivation_kind: "hardened" } : {}),
+            lineage_proof: coin.lineage_proof,
           });
-          running += BigInt(c.amount);
+          running += BigInt(coin.amount);
         }
         if (running < amountMojos) {
           setSubmitError("Not enough CAT coins to cover the amount.");
@@ -3414,6 +4029,9 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
           fee_mojos: feeMojos.toString(),
           input_coins: picked,
           change_index: picked[0]!.derivation_index,
+          ...(picked[0]!.derivation_kind === "hardened"
+            ? { change_kind: "hardened" }
+            : {}),
           broadcast: true,
         });
         setSent(result);
@@ -3430,6 +4048,112 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
     selectedAsset.available_mojos.toString(),
     selectedAsset.decimals,
   );
+
+  const resetForm = () => {
+    setTo("");
+    setAmount("");
+    setFee("0");
+    setSent(null);
+    setSubmitError(null);
+    setAddressValid(null);
+    setAddressInfo(null);
+  };
+
+  // After a successful submit replace the form with a clean confirmation
+  // screen — minimal hero layout, no nested cards. Form state (to/amount/fee)
+  // is still in scope so we can show what the user just sent without
+  // buffering it into a separate "lastSent".
+  if (sent) {
+    const sentOk = sent.status === "SUCCESS";
+    const txIdHex = sent.tx_id.startsWith("0x") ? sent.tx_id : `0x${sent.tx_id}`;
+    const explorerUrl = `https://www.spacescan.io/tx/${txIdHex}`;
+    const copy = (text: string, key: string) => {
+      void navigator.clipboard
+        .writeText(text)
+        .then(() => {
+          setCopied(key);
+          setTimeout(() => setCopied(null), 1200);
+        })
+        .catch(() => {
+          // clipboard may be denied; silent — the title attr has the full value
+        });
+    };
+    return (
+      <div className="tab-body send-success">
+        <div className="send-success-hero">
+          <span className={`send-success-badge ${sentOk ? "ok" : "warn"}`} aria-hidden="true">
+            {sentOk ? (
+              <svg viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M5 12.5l4.5 4.5L19 7.5"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M12 7v6" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                <circle cx="12" cy="17" r="1.25" fill="currentColor" />
+              </svg>
+            )}
+          </span>
+          <span className="send-success-eyebrow">{sentOk ? "Sent" : "Submitted"}</span>
+        </div>
+
+        <div className="send-success-amount">
+          <span className="send-success-amount-num">{amount}</span>
+          <span className="send-success-amount-ticker">{selectedAsset.ticker}</span>
+        </div>
+
+        <div className="send-success-lines">
+          <button
+            type="button"
+            className="send-success-line"
+            onClick={() => copy(to.trim(), "to")}
+            title={`Copy ${to.trim()}`}
+          >
+            <span className="send-success-line-label">to</span>
+            <span className="send-success-line-chip">{shortHash(to.trim())}</span>
+            {copied === "to" && <span className="send-success-line-copied">copied</span>}
+          </button>
+          <button
+            type="button"
+            className="send-success-line"
+            onClick={() => copy(sent.tx_id, "tx")}
+            title={`Copy ${sent.tx_id}`}
+          >
+            <span className="send-success-line-label">tx</span>
+            <span className="send-success-line-chip">{shortHash(sent.tx_id)}</span>
+            {copied === "tx" && <span className="send-success-line-copied">copied</span>}
+          </button>
+          <div className="send-success-line static">
+            <span className="send-success-line-label">status</span>
+            <span className={`send-success-line-chip ${sentOk ? "ok" : "warn"}`}>{sent.status}</span>
+          </div>
+          {BigInt(sent.change_mojos ?? "0") > 0n && (
+            <div className="send-success-line static">
+              <span className="send-success-line-label">change</span>
+              <span className="send-success-line-chip">{mojosToXch(sent.change_mojos)} XCH</span>
+            </div>
+          )}
+        </div>
+
+        <div className="send-success-actions">
+          <button onClick={resetForm}>Send another</button>
+          <a
+            className="send-success-link"
+            href={explorerUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View on explorer ↗
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="tab-body">
@@ -3510,24 +4234,6 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
       </button>
 
       {submitError && <p className="error">{submitError}</p>}
-      {sent && (
-        <div className="result">
-          <div>
-            <span className="muted">tx id</span>
-            <code>{sent.tx_id}</code>
-          </div>
-          <div>
-            <span className="muted">status</span>
-            <code className={sent.status === "SUCCESS" ? "ok" : "warn"}>{sent.status}</code>
-          </div>
-          {BigInt(sent.change_mojos ?? "0") > 0n && (
-            <div>
-              <span className="muted">XCH change</span>
-              <code>{mojosToXch(sent.change_mojos)} XCH</code>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

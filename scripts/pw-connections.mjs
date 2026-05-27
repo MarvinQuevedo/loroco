@@ -95,9 +95,16 @@ try {
   await wait(600);
   await popup.screenshot({ path: `${SHOT_DIR}/01-settings.png` });
 
-  // Look for the host inside the connections list.
+  // Connected sites now lives behind a section row that opens a modal.
+  await popup
+    .locator(".settings-section-row", { hasText: /Connected sites/i })
+    .first()
+    .click();
+  await wait(500);
+
+  // Look for the host inside the connections list (rendered inside the modal).
   const hostCells = await popup
-    .locator(".connection-host")
+    .locator(".modal-card .connection-host")
     .allInnerTexts();
   log("connection hosts in popup:", hostCells);
   if (!hostCells.includes("dexie.space")) {
@@ -108,14 +115,16 @@ try {
   log("clicking Disconnect on dexie.space");
   // Find the row containing dexie.space and click its Disconnect button.
   const dexieRow = popup
-    .locator(".connection-row")
+    .locator(".modal-card .connection-row")
     .filter({ hasText: /dexie\.space/ })
     .first();
   await dexieRow.locator("button:has-text('Disconnect')").click();
   await wait(1500);
   await popup.screenshot({ path: `${SHOT_DIR}/02-after-revoke.png` });
 
-  const hostsAfter = await popup.locator(".connection-host").allInnerTexts();
+  const hostsAfter = await popup
+    .locator(".modal-card .connection-host")
+    .allInnerTexts();
   log("connection hosts after revoke:", hostsAfter);
   if (hostsAfter.includes("dexie.space")) {
     fail("dexie.space still listed after Disconnect");

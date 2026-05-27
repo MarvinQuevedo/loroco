@@ -69,11 +69,22 @@ try {
 
   // Settings (gear icon) — verify it still works without showing the
   // balance bar twice.
-  const gear = popup.locator(".header-actions .icon-btn").last();
+  const gear = popup
+    .locator(".header-actions .icon-btn[aria-label='Settings']")
+    .first();
   await gear.click();
   await wait(800);
   await popup.screenshot({ path: `${SHOT_DIR}/tab-settings.png` });
   log("settings shot");
+
+  // Status tab (📊) — separate screen for network/sync detail.
+  const statusBtn = popup
+    .locator(".header-actions .icon-btn[aria-label='Status']")
+    .first();
+  await statusBtn.click();
+  await wait(800);
+  await popup.screenshot({ path: `${SHOT_DIR}/tab-status.png` });
+  log("status shot");
 } catch (err) {
   console.error("[layout] ERROR:", err);
   process.exit(1);

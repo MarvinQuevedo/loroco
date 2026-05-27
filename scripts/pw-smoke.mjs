@@ -168,32 +168,36 @@ try {
   await popup.screenshot({ path: `${SHOT_DIR}/08-settings.png` });
   log("settings body preview:", settingsBody.slice(0, 120).replace(/\s+/g, " "));
 
-  // Verify Offer Inspector renders inside Settings.
-  const offerTextarea = popup.locator("textarea").filter({ hasNotText: /./ }).first();
-  // Click Settings (the icon was already clicked above) — now inspect the
-  // textarea labelled with the offer1 placeholder.
+  // Settings now lists "Inspect offer" as a section row that opens a modal.
+  // Click the row, then verify the OfferInspector textarea renders inside it.
+  await popup
+    .locator(".settings-section-row", { hasText: /Inspect offer/i })
+    .first()
+    .click();
+  await wait(400);
+
   const placeholderMatch = await popup
-    .locator("textarea[placeholder='offer1...']")
+    .locator(".modal-card textarea[placeholder='offer1...']")
     .count();
   log("offer inspector textarea present:", placeholderMatch);
   if (placeholderMatch < 1) fail("OfferInspector textarea not rendered");
 
   // Submit a deliberately invalid offer string — engine should reject.
   await popup
-    .locator("textarea[placeholder='offer1...']")
+    .locator(".modal-card textarea[placeholder='offer1...']")
     .first()
     .fill("offer1xxxinvalid");
-  await popup.locator("button", { hasText: /^Decode offer$/ }).first().click();
+  await popup
+    .locator(".modal-card button", { hasText: /^Decode offer$/ })
+    .first()
+    .click();
   await wait(800);
   const offerErr = await popup
-    .locator(".error")
+    .locator(".modal-card .error")
     .filter({ hasText: /decode_offer|InvalidParams|bech32|Invalid/i })
     .count();
   log("offer inspector error path:", offerErr);
   if (offerErr < 1) fail("OfferInspector did not surface decode error for bad string");
-
-  // Suppress unused-variable warning
-  void offerTextarea;
 
   await popup.screenshot({ path: `${SHOT_DIR}/09-offer-inspector.png` });
 
