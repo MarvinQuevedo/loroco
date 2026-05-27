@@ -476,6 +476,27 @@ export interface ChiaMethodMap {
     params: { limit?: number; offset?: number } | undefined;
     result: Hex[];
   };
+
+  /**
+   * Transfer ownership of a DID to a new p2 owner. Caller passes the
+   * DID's current head coin id + the derivation_index of the wallet
+   * key that currently owns it; the engine refetches the parent spend,
+   * reconstructs the singleton, and emits a re-spend to the recipient.
+   *
+   * Until Fase 3 lands JS-side DID tracking, the dApp must supply
+   * `didCoinId` + `didDerivationIndex` directly (same constraint as
+   * bulkMintNfts). When DID sync is wired we'll resolve from `didId`
+   * (launcher_id) alone.
+   */
+  transferDid: {
+    params: {
+      didCoinId: Hex;
+      didDerivationIndex: number;
+      recipientAddress: string;
+      fee?: Amount;
+    };
+    result: { id: Hex; launcherId: Hex };
+  };
 }
 
 // ─── Stub view types (filled in by Fase 3 DID sync) ──────────────────────

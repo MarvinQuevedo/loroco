@@ -161,6 +161,7 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   "issueCat",
   "createDid",
   "addNftUri",
+  "transferDid",
 ]);
 
 // ─── Method-name aliasing ────────────────────────────────────────────────
@@ -220,6 +221,7 @@ const BASE_ALIASES: Record<string, ChiaMethod> = {
   issue_cat: "issueCat",
   create_did: "createDid",
   add_nft_uri: "addNftUri",
+  transfer_did: "transferDid",
   // snake_case stub reads (Fase 3 placeholders)
   get_dids: "getDids",
   get_nft_collections: "getNftCollections",
@@ -272,6 +274,9 @@ const LEGACY_GOBY_ALIASES: Record<string, ChiaMethod> = {
   chia_issueCat: "issueCat",
   chia_createDid: "createDid",
   chia_addNftUri: "addNftUri",
+  chia_transferDid: "transferDid",
+  // Sage WC2 spells the plural form
+  chia_transferDids: "transferDid",
   // chia_* dApp probe stubs (empty until Fase 3 DID sync)
   chia_getDids: "getDids",
   chia_getNftCollections: "getNftCollections",
@@ -2099,6 +2104,60 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       markXchSpentOptimistic(store, feeInputIds);
     }
     await writeCoinStore(fp, store);
+    return {
+      id: with0x(res.tx_id) as Hex,
+      launcherId: with0x(res.launcher_id) as Hex,
+    };
+  },
+
+  async transferDid(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["transferDid"]["params"];
+    if (!p?.didCoinId) {
+      throw Errors.invalidParams("transferDid requires { didCoinId }");
+    }
+    if (p?.didDerivationIndex === undefined || p.didDerivationIndex === null) {
+      throw Errors.invalidParams("transferDid requires { didDerivationIndex }");
+    }
+    if (!p?.recipientAddress) {
+      throw Errors.invalidParams("transferDid requires { recipientAddress }");
+    }
+
+    const fee = BigInt(String(p.fee ?? 0));
+    let feeInputs: Array<{
+      parent_coin_info: string;
+      puzzle_hash: string;
+      amount: string;
+      derivation_index: number;
+    }> = [];
+    let feeInputIds: string[] = [];
+    let store: import("./coin-store.js").CoinStore | null = null;
+    if (fee > 0n) {
+      const picked = await pickXchInputs(fp, fee);
+      feeInputs = picked.inputs;
+      feeInputIds = picked.inputCoinIds;
+      store = picked.store;
+    }
+
+    const res = await callEngine<{ tx_id: string; launcher_id: string; error?: string }>(
+      "transfer_did",
+      {
+        fingerprint: fp,
+        did_coin_id: with0x(strip0x(p.didCoinId)),
+        did_derivation_index: p.didDerivationIndex,
+        recipient_address: p.recipientAddress,
+        fee_mojos: fee.toString(),
+        fee_input_coins: feeInputs,
+        fee_change_index: p.didDerivationIndex,
+        broadcast: true,
+      },
+    );
+    if (res.error) throw new Error(res.error);
+    if (store && feeInputIds.length > 0) {
+      markXchSpentOptimistic(store, feeInputIds);
+      await writeCoinStore(fp, store);
+    }
     return {
       id: with0x(res.tx_id) as Hex,
       launcherId: with0x(res.launcher_id) as Hex,
