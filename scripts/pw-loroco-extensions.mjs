@@ -76,12 +76,12 @@ const METHODS = [
     mutating: true,
     expectInvalidParams: true,
   },
-  // normalizeDids dry-fail: empty didCoinIds → 4000.
+  // normalizeDids is POPUP-ONLY too — expect 4004 from a dApp origin.
   {
     name: "normalizeDids",
     params: { didCoinIds: [], didDerivationIndices: [] },
-    mutating: true,
-    expectInvalidParams: true,
+    mutating: false,
+    expectMethodNotFound: true,
   },
   // multiSend dry-fail: no outputs at all → 4000.
   {
@@ -111,17 +111,22 @@ const METHODS = [
     mutating: true,
     expectInvalidParams: !BROADCAST,
   },
+  // combine / split / normalizeDids are POPUP-ONLY. From a dApp these
+  // must come back as 4004 MethodNotFound — they're wallet-management
+  // primitives a third-party site has no business asking the user for.
+  // The popup itself uses them via callEngine direct, bypassing this
+  // gate. expectMethodNotFound:true → 4004 is the SUCCESS signal here.
   {
     name: "combine",
-    params: BROADCAST ? { maxInputs: 2, fee: 0 } : { maxInputs: 1 },
-    mutating: true,
-    expectInvalidParams: !BROADCAST,
+    params: { maxInputs: 2, fee: 0 },
+    mutating: false, // gate fires before approval, so no popup pops
+    expectMethodNotFound: true,
   },
   {
     name: "split",
-    params: BROADCAST ? { parts: 2, fee: 0 } : { parts: 1 },
-    mutating: true,
-    expectInvalidParams: !BROADCAST,
+    params: { parts: 2, fee: 0 },
+    mutating: false,
+    expectMethodNotFound: true,
   },
 
   // ── Oleada 3 writes (approval required, dry-validation by default) ───
@@ -269,7 +274,12 @@ try {
       await autoApproveIfPending();
     }
     const out = await callP;
-    results.push({ name: m.name, expectInvalidParams: m.expectInvalidParams, ...out });
+    results.push({
+      name: m.name,
+      expectInvalidParams: m.expectInvalidParams,
+      expectMethodNotFound: m.expectMethodNotFound,
+      ...out,
+    });
     log(`   ←`, JSON.stringify(out).slice(0, 200));
     await wait(400);
   }
@@ -280,12 +290,25 @@ try {
   for (const r of results) {
     let tag;
     if (r.ok) {
-      tag = "OK";
+      if (r.expectMethodNotFound) {
+        // Popup-only method silently succeeded — that's a security regression.
+        tag = "LEAKED (should be 4004)";
+        regressions += 1;
+      } else {
+        tag = "OK";
+      }
+    } else if (r.code === 4004 && r.expectMethodNotFound) {
+      tag = "POPUP-ONLY (4004)";
     } else if (r.code === 4004) {
       tag = "METHOD-NOT-FOUND";
       regressions += 1;
     } else if (r.code === 4000 && r.expectInvalidParams) {
       tag = "DRY-OK (4000)";
+    } else if (r.expectMethodNotFound) {
+      // dApp got some other error (param/auth/etc) instead of 4004 — means
+      // the gate is missing or the handler ran before the gate fired.
+      tag = `LEAKED (got ${r.code ?? "?"})`;
+      regressions += 1;
     } else {
       // Any other structured code is a legitimate wallet-side rejection —
       // the method IS implemented, the params/wallet state just doesn't
