@@ -46,7 +46,7 @@ import {
   writeCoinStore,
 } from "./coin-store.js";
 import { callEngine } from "./engine.js";
-import { grantConnection, isConnected } from "./permissions.js";
+import { grantConnection, isConnected, POPUP_ONLY_METHODS } from "./permissions.js";
 
 /** How many derived XCH addresses we expose to dApps via `accounts`. */
 const ACCOUNTS_COUNT = 5;
@@ -2779,6 +2779,17 @@ export async function handleRpc<M extends ChiaMethod>(
   params: ChiaMethodMap[M]["params"],
   originalMethod: string = method,
 ): Promise<ChiaMethodMap[M]["result"]> {
+  // Popup-only lockdown: a small set of wallet-management primitives (coin
+  // combine/split, DID normalization) must NEVER be reachable from a dApp,
+  // even with an approval popup. The popup itself calls these directly via
+  // the engine using `from: "popup"` envelopes (see popup/engine-client.ts),
+  // so this lockdown doesn't affect legitimate first-party usage. We throw
+  // MethodNotFound instead of Unauthorized to avoid leaking that the
+  // handler exists at all.
+  if (POPUP_ONLY_METHODS.has(method)) {
+    throw Errors.methodNotFound(method);
+  }
+
   // Approval gate for methods that mutate state, sign things, or transmit.
   // `connect` / `requestAccounts` pop their own approval inside the handler.
   let effectiveParams = params;

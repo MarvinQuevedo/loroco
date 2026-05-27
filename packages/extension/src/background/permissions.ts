@@ -38,6 +38,23 @@ export function requireConnected(origin: string): asserts origin is string {
   if (!origin) throw Errors.unauthorized("No origin");
 }
 
+/**
+ * Methods that MUST NOT be reachable from a dApp, period. These are wallet-
+ * management primitives whose only legitimate caller is the wallet's own
+ * popup UI (which goes engine-direct via `from: "popup"` envelopes, not
+ * through this router). A dApp asking the user to combine/split coins or
+ * normalize their DIDs is almost always a phishing pattern — even with an
+ * approval popup the request itself shouldn't appear.
+ *
+ * The check fires before any approval/permission gate so dApps get a clean
+ * MethodNotFound (4004) instead of leaking that the handler exists.
+ */
+export const POPUP_ONLY_METHODS = new Set<ChiaMethod>([
+  "combine",
+  "split",
+  "normalizeDids",
+]);
+
 const NO_APPROVAL_METHODS = new Set<ChiaMethod>([
   "chainId",
   "getPublicKeys",
