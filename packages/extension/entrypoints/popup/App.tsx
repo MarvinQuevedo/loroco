@@ -1414,8 +1414,10 @@ function LockScreen({
   onSwitchWallet: (fp: number) => void | Promise<void>;
 }) {
   const [password, setPassword] = useState("");
+  const [showPwd, setShowPwd] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showSwitcher, setShowSwitcher] = useState(false);
   const [confirmingForget, setConfirmingForget] = useState(false);
 
   const forget = async () => {
@@ -1423,22 +1425,16 @@ function LockScreen({
     setError(null);
     try {
       await removeWallet(wallet.fingerprint);
-      // Pick another wallet if there's one left; otherwise the parent will
-      // route back to onboarding next render.
       const remaining = wallets.filter((w) => w.fingerprint !== wallet.fingerprint);
       if (remaining.length > 0) {
         await onSwitchWallet(remaining[0]!.fingerprint);
       } else {
-        // No more wallets — clear active state so the popup re-renders into
-        // the onboarding screen on the next read.
         await chrome.storage.session.remove("activeFingerprint");
         await chrome.runtime.sendMessage({
           from: "popup",
           kind: "set-active-wallet",
           walletId: null,
         });
-        // Hard reload so the parent re-fetches the wallet list (which is
-        // now empty) and routes to onboarding.
         window.location.reload();
       }
     } catch (err) {
@@ -1462,14 +1458,10 @@ function LockScreen({
         fingerprint: wallet.fingerprint,
         password,
       });
-      // Backfill master_public_key for wallets imported before we tracked it.
       const w = !wallet.masterPublicKey && res.master_public_key
         ? { ...wallet, masterPublicKey: res.master_public_key }
         : wallet;
       if (w !== wallet) await saveWallet(w);
-      // Derive + cache hardened PHs while the wallet is unlocked. The sync
-      // loop reuses them across SW restarts; without this call we'd miss
-      // every receive on a hardened address (Sage's default path).
       void cacheHardenedPhs(w.fingerprint).catch((err) => {
         console.warn("[Loroco] cacheHardenedPhs failed:", err);
       });
@@ -1481,85 +1473,153 @@ function LockScreen({
     }
   };
 
+  const displayLabel =
+    wallet.label === `Wallet ${wallet.fingerprint}`
+      ? `Wallet ${wallet.fingerprint}`
+      : wallet.label;
+
   return (
-    <section className="screen">
-      <img src="/icon/128.png" alt="" className="screen-logo" />
-      <h1>Unlock</h1>
-      {wallets.length > 1 ? (
-        <label className="field">
-          <span>Wallet</span>
-          <select
-            value={wallet.fingerprint}
-            onChange={(e) => void onSwitchWallet(Number(e.target.value))}
-          >
-            {wallets.map((w) => (
-              <option key={w.fingerprint} value={w.fingerprint}>
-                {w.label === `Wallet ${w.fingerprint}`
-                  ? ` ${w.fingerprint}`
-                  : `${w.label} ·  ${w.fingerprint}`}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : (
-        <p className="muted">{wallet.label}</p>
-      )}
-      <label className="field">
-        <span>Password</span>
-        <input
-          type="password"
-          autoFocus
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !busy && password) void unlock();
-          }}
-        />
-      </label>
-      {error && <p className="error">{error}</p>}
-      <button onClick={unlock} disabled={busy || !password}>
-        {busy ? "Unlocking…" : "Unlock"}
+    <section className="screen lock-screen">
+      <div className="lock-hero">
+        <img src="/icon/128.png" alt="" className="lock-logo" />
+        <h1 className="lock-title">Welcome back</h1>
+        <p className="lock-sub">Enter your password to unlock</p>
+      </div>
+
+      <button
+        type="button"
+        className="lock-wallet-chip"
+        onClick={() => wallets.length > 1 && setShowSwitcher(true)}
+        disabled={wallets.length <= 1}
+        aria-label="Switch wallet"
+      >
+        <span className="lock-wallet-avatar" aria-hidden>
+          {displayLabel.slice(0, 1).toUpperCase()}
+        </span>
+        <span className="lock-wallet-meta">
+          <span className="lock-wallet-label">{displayLabel}</span>
+          <span className="lock-wallet-fp">#{wallet.fingerprint}</span>
+        </span>
+        {wallets.length > 1 && (
+          <span className="lock-wallet-switch" aria-hidden>
+            ⇅
+          </span>
+        )}
       </button>
 
-      <div className="lock-forget">
-        {!confirmingForget && (
+      <form
+        className="lock-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy && password) void unlock();
+        }}
+      >
+        <div className={"lock-input" + (error ? " has-error" : "")}>
+          <span className="lock-input-icon" aria-hidden>🔒</span>
+          <input
+            type={showPwd ? "text" : "password"}
+            autoFocus
+            value={password}
+            placeholder="Password"
+            onChange={(e) => {
+              setPassword(e.target.value);
+              if (error) setError(null);
+            }}
+          />
           <button
             type="button"
-            className="link-button"
-            onClick={() => setConfirmingForget(true)}
+            className="lock-input-eye"
+            onClick={() => setShowPwd((v) => !v)}
+            aria-label={showPwd ? "Hide password" : "Show password"}
+            tabIndex={-1}
+          >
+            {showPwd ? "🙈" : "👁"}
+          </button>
+        </div>
+        {error && <p className="error lock-error">{error}</p>}
+        <button
+          type="submit"
+          className="lock-submit"
+          disabled={busy || !password}
+        >
+          {busy ? "Unlocking…" : "Unlock"}
+        </button>
+      </form>
+
+      <button
+        type="button"
+        className="lock-forgot"
+        onClick={() => setConfirmingForget(true)}
+        disabled={busy}
+      >
+        Forgot password?
+      </button>
+
+      {showSwitcher && (
+        <Modal title="Switch wallet" onClose={() => setShowSwitcher(false)}>
+          <ul className="settings-section-list">
+            {wallets.map((w) => (
+              <li key={w.fingerprint}>
+                <button
+                  type="button"
+                  className={
+                    "settings-section-row" +
+                    (w.fingerprint === wallet.fingerprint ? " active" : "")
+                  }
+                  onClick={() => {
+                    setShowSwitcher(false);
+                    if (w.fingerprint !== wallet.fingerprint) {
+                      void onSwitchWallet(w.fingerprint);
+                    }
+                  }}
+                >
+                  <span className="settings-section-icon" aria-hidden>
+                    {(w.label === `Wallet ${w.fingerprint}` ? "W" : w.label.slice(0, 1)).toUpperCase()}
+                  </span>
+                  <span className="settings-section-meta">
+                    <span className="settings-section-title">
+                      {w.label === `Wallet ${w.fingerprint}`
+                        ? `Wallet ${w.fingerprint}`
+                        : w.label}
+                    </span>
+                    <span className="settings-section-sub">#{w.fingerprint}</span>
+                  </span>
+                  <span className="settings-section-chev" aria-hidden>
+                    {w.fingerprint === wallet.fingerprint ? "●" : "›"}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Modal>
+      )}
+
+      {confirmingForget && (
+        <Modal title="Remove this wallet?" onClose={() => setConfirmingForget(false)}>
+          <p className="form-note">
+            This deletes the encrypted seed for{" "}
+            <strong>{displayLabel}</strong> from this browser. Make sure you
+            have your <strong>recovery phrase</strong> before continuing — it's
+            the only way to restore the wallet.
+          </p>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => void forget()}
             disabled={busy}
           >
-            Forgot password? Remove this wallet
+            {busy ? "Removing…" : "Yes, remove this wallet"}
           </button>
-        )}
-        {confirmingForget && (
-          <>
-            <p className="muted small">
-              This deletes the encrypted seed for{" "}
-              <strong>{wallet.label === `Wallet ${wallet.fingerprint}` ? ` ${wallet.fingerprint}` : wallet.label}</strong>{" "}
-              from this browser. Make sure you have your recovery phrase before continuing.
-            </p>
-            <div className="row">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setConfirmingForget(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger"
-                onClick={() => void forget()}
-                disabled={busy}
-              >
-                {busy ? "Removing…" : "Remove wallet"}
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => setConfirmingForget(false)}
+            disabled={busy}
+          >
+            Cancel
+          </button>
+        </Modal>
+      )}
     </section>
   );
 }

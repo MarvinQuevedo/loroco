@@ -1878,28 +1878,6 @@ button.connection-revoke {
   overflow: hidden;
 }
 
-/* ── Lock screen "Forgot password?" affordance ─────────────────────── */
-.lock-forget {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid color-mix(in srgb, var(--text-mute) 18%, transparent);
-}
-
-.link-button {
-  background: none;
-  border: none;
-  color: var(--text-mute);
-  text-decoration: underline;
-  cursor: pointer;
-  padding: 4px 0;
-  font: inherit;
-  display: inline-block;
-}
-
-.link-button:hover {
-  color: var(--text);
-}
-
 /* ── Bottom-nav layout for the unlocked wallet view ─────────────────────
  * The .screen normally just lays out a column with padding + gap and lets
  * the popup grow. When the inner UI has a sticky bottom nav we instead
@@ -2251,4 +2229,225 @@ button.connection-revoke {
 /* Result blocks inside modal stay tidy */
 .modal-body .result {
   margin: 0;
+}
+
+/* ── Unlock / LockScreen ──────────────────────────────────────────────── */
+.lock-screen {
+  padding: var(--space-5);
+  gap: var(--space-4);
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+.lock-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+.lock-logo {
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+  border-radius: 22px;
+  filter: drop-shadow(0 6px 18px color-mix(in srgb, var(--ozone-primary) 30%, transparent));
+}
+
+.lock-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--text-strong);
+}
+
+.lock-sub {
+  font-size: 13px;
+  color: var(--text-mute);
+  margin: 0;
+}
+
+.lock-wallet-chip {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--ozone-radius-md);
+  padding: 10px 14px;
+  width: 100%;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+  font-family: var(--font-family);
+  min-height: 0;
+}
+
+.lock-wallet-chip:disabled {
+  cursor: default;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.lock-wallet-chip:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ozone-primary) 6%, var(--surface));
+  border-color: color-mix(in srgb, var(--ozone-primary) 35%, var(--border));
+}
+
+.lock-wallet-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 14px;
+  background: color-mix(in srgb, var(--ozone-primary) 22%, var(--surface));
+  color: var(--text-strong);
+}
+
+.lock-wallet-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.lock-wallet-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lock-wallet-fp {
+  font-size: 11px;
+  color: var(--text-mute);
+  font-family: var(--font-mono);
+}
+
+.lock-wallet-switch {
+  color: var(--text-mute);
+  font-size: 14px;
+}
+
+.lock-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.lock-input {
+  display: grid;
+  grid-template-columns: 32px 1fr 36px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--ozone-radius-md);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.lock-input:focus-within {
+  border-color: var(--ozone-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ozone-primary) 18%, transparent);
+}
+
+.lock-input.has-error {
+  border-color: var(--ozone-red);
+}
+
+.lock-input-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-mute);
+  font-size: 14px;
+}
+
+.lock-input input {
+  background: transparent;
+  border: none;
+  padding: 14px 0;
+  font-size: 15px;
+  letter-spacing: 0.03em;
+  outline: none;
+  color: var(--text-strong);
+  width: 100%;
+}
+
+.lock-input input:focus {
+  border: none;
+}
+
+.lock-input-eye {
+  background: transparent;
+  border: none;
+  color: var(--text-mute);
+  font-size: 14px;
+  cursor: pointer;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  min-height: 0;
+  padding: 0;
+}
+
+.lock-input-eye:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text-strong);
+}
+
+.lock-error {
+  margin: 0;
+  font-size: 12px;
+}
+
+.lock-submit {
+  width: 100%;
+  min-height: 48px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.lock-forgot {
+  background: transparent;
+  border: none;
+  color: var(--text-mute);
+  font-size: 12px;
+  text-align: center;
+  margin: 8px auto 0;
+  padding: 6px 12px;
+  min-height: 0;
+  width: auto;
+  cursor: pointer;
+  border-radius: 8px;
+  align-self: center;
+}
+
+.lock-forgot:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text-strong);
+  text-decoration: underline;
+}
+
+.lock-forgot:disabled {
+  background: transparent;
+  color: var(--text-mute);
+}
+
+.settings-section-row.active {
+  border-color: color-mix(in srgb, var(--ozone-primary) 40%, var(--border));
+  background: color-mix(in srgb, var(--ozone-primary) 8%, var(--surface));
 }
