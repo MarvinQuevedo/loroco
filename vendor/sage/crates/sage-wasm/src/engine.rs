@@ -178,6 +178,7 @@ impl SageEngine {
             "issue_cat" => self.issue_cat(params_json).await,
             "create_did" => self.create_did(params_json).await,
             "transfer_nft" => self.transfer_nft(params_json).await,
+            "add_nft_uri" => self.add_nft_uri(params_json).await,
             "decode_offer" => self.decode_offer(params_json).await,
             "take_offer" => self.take_offer(params_json).await,
             "make_offer" => self.make_offer(params_json).await,
@@ -1339,6 +1340,361 @@ impl SageEngine {
             },
             "launcher_id": format!("0x{}", hex::encode(nft.info.launcher_id)),
             "recipient_puzzle_hash": format!("0x{}", hex::encode(recipient_ph)),
+        })
+        .to_string())
+    }
+
+    /// Append a new URI to an NFT's metadata. Re-spends the NFT singleton
+    /// to itself (same p2 owner) with a MetadataUpdate inner condition.
+    ///
+    /// `uri_kind` selects which list the URI lands in:
+    ///   - "data"     → data_uris (front-of-list)
+    ///   - "metadata" → metadata_uris
+    ///   - "license"  → license_uris
+    ///
+    /// The new URI is prepended in upstream metadata semantics; older URIs
+    /// remain accessible. Hash fields are NOT changed by this op — set them
+    /// at mint or via a separate spend.
+    ///
+    /// Params (same shape as transfer_nft, swapping recipient_address for
+    /// the URI fields):
+    /// ```
+    /// {
+    ///   fingerprint: u32,
+    ///   coin_id: "0x...",
+    ///   parent_coin_info?: "0x...",          // optional, looked up if absent
+    ///   derivation_index: u32,
+    ///   uri_kind: "data" | "metadata" | "license",
+    ///   uri: "ipfs://...",
+    ///   fee_mojos?: "0",
+    ///   fee_input_coins?: [{ parent_coin_info, puzzle_hash, amount,
+    ///                        derivation_index }],
+    ///   fee_change_index?: u32,
+    ///   endpoint?: "mainnet" | "testnet11" | "<url>",
+    ///   broadcast?: true
+    /// }
+    /// ```
+    async fn add_nft_uri(&self, params_json: &str) -> Result<String, EngineError> {
+        use chia_wallet_sdk::{
+            chia::{
+                bls::{sign, Signature},
+                consensus::consensus_constants::ConsensusConstants,
+                protocol::SpendBundle,
+            },
+            clvmr::serde::node_from_bytes,
+            driver::{MetadataUpdate, Nft, Puzzle, SpendContext, StandardLayer, UriKind},
+            signer::{AggSigConstants, RequiredBlsSignature, RequiredSignature},
+            types::MAINNET_CONSTANTS,
+        };
+
+        #[derive(Deserialize)]
+        struct FeeCoinJson {
+            parent_coin_info: String,
+            puzzle_hash: String,
+            amount: String,
+            derivation_index: u32,
+        }
+        #[derive(Deserialize)]
+        struct Req {
+            fingerprint: u32,
+            coin_id: String,
+            #[serde(default)]
+            parent_coin_info: Option<String>,
+            derivation_index: u32,
+            uri_kind: String,
+            uri: String,
+            #[serde(default = "default_zero_mojos_uri")]
+            fee_mojos: String,
+            #[serde(default)]
+            fee_input_coins: Vec<FeeCoinJson>,
+            #[serde(default)]
+            fee_change_index: Option<u32>,
+            #[serde(default)]
+            endpoint: Option<String>,
+            #[serde(default = "default_true_uri")]
+            broadcast: bool,
+        }
+        fn default_zero_mojos_uri() -> String {
+            "0".to_string()
+        }
+        fn default_true_uri() -> bool {
+            true
+        }
+
+        let req: Req = serde_json::from_str(params_json)
+            .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
+
+        let fee: u64 = req
+            .fee_mojos
+            .parse()
+            .map_err(|_| EngineError::InvalidParams("fee_mojos u64".to_string()))?;
+        if fee > 0 && req.fee_input_coins.is_empty() {
+            return Err(EngineError::InvalidParams(
+                "fee_input_coins required when fee_mojos > 0".to_string(),
+            ));
+        }
+        if req.uri.trim().is_empty() {
+            return Err(EngineError::InvalidParams(
+                "uri must be a non-empty string".to_string(),
+            ));
+        }
+        let uri_kind = match req.uri_kind.as_str() {
+            "data" => UriKind::Data,
+            "metadata" => UriKind::Metadata,
+            "license" => UriKind::License,
+            other => {
+                return Err(EngineError::InvalidParams(format!(
+                    "uri_kind must be \"data\", \"metadata\", or \"license\" — got {other:?}"
+                )));
+            }
+        };
+
+        let coin_id = parse_bytes32(&req.coin_id)?;
+
+        // Resolve parent_id same as transfer_nft.
+        let client = make_client(req.endpoint.as_deref());
+        let parent_id: Bytes32 = match req.parent_coin_info.as_deref() {
+            Some(s) => parse_bytes32(s)?,
+            None => {
+                let rec = client
+                    .get_coin_record_by_name(coin_id)
+                    .await
+                    .map_err(|e| EngineError::Internal(format!("coin lookup: {e}")))?
+                    .coin_record
+                    .ok_or_else(|| {
+                        EngineError::InvalidParams(format!(
+                            "coin {} not found",
+                            hex::encode(coin_id)
+                        ))
+                    })?;
+                rec.coin.parent_coin_info
+            }
+        };
+
+        let parent_rec = client
+            .get_coin_record_by_name(parent_id)
+            .await
+            .map_err(|e| EngineError::Internal(format!("parent lookup: {e}")))?
+            .coin_record
+            .ok_or_else(|| {
+                EngineError::InvalidParams(format!(
+                    "parent coin {} not found",
+                    hex::encode(parent_id)
+                ))
+            })?;
+        if !parent_rec.spent {
+            return Err(EngineError::InvalidParams(
+                "parent coin not spent — NFT not yet on chain?".to_string(),
+            ));
+        }
+        let parent_spend_res = client
+            .get_puzzle_and_solution(parent_id, Some(parent_rec.spent_block_index))
+            .await
+            .map_err(|e| EngineError::Internal(format!("parent spend: {e}")))?;
+        let parent_spend = parent_spend_res
+            .coin_solution
+            .ok_or_else(|| EngineError::Internal("missing parent coin solution".to_string()))?;
+
+        let mut ctx = SpendContext::new();
+        let parent_puzzle_ptr = node_from_bytes(&mut *ctx, parent_spend.puzzle_reveal.as_ref())
+            .map_err(|e| EngineError::Internal(format!("parent puzzle parse: {e}")))?;
+        let parent_solution_ptr = node_from_bytes(&mut *ctx, parent_spend.solution.as_ref())
+            .map_err(|e| EngineError::Internal(format!("parent solution parse: {e}")))?;
+        let parent_puzzle = Puzzle::parse(&ctx, parent_puzzle_ptr);
+
+        let nft = Nft::parse_child(
+            &mut *ctx,
+            parent_spend.coin,
+            parent_puzzle,
+            parent_solution_ptr,
+        )
+        .map_err(|e| EngineError::Internal(format!("Nft::parse_child: {e}")))?
+        .ok_or_else(|| {
+            EngineError::Internal(
+                "parent didn't produce a parseable NFT child".to_string(),
+            )
+        })?;
+
+        if nft.coin.coin_id() != coin_id {
+            return Err(EngineError::Internal(format!(
+                "parent's NFT child coin {} != requested {}",
+                hex::encode(nft.coin.coin_id()),
+                hex::encode(coin_id)
+            )));
+        }
+
+        // Verify ownership via the derivation_index our wallet thinks owns it.
+        let master_sk = self.unlocked_sk(req.fingerprint)?;
+        let our_intermediate = master_to_wallet_unhardened(&master_sk, req.derivation_index);
+        let our_synthetic = our_intermediate.derive_synthetic();
+        let our_pk = our_synthetic.public_key();
+        let our_inner_ph: Bytes32 = StandardArgs::curry_tree_hash(our_pk).into();
+        if our_inner_ph != nft.info.p2_puzzle_hash {
+            return Err(EngineError::InvalidParams(format!(
+                "derivation_index {} doesn't match NFT's p2_puzzle_hash {}",
+                req.derivation_index,
+                hex::encode(nft.info.p2_puzzle_hash)
+            )));
+        }
+
+        // Build the metadata-update inner spend and re-spend the NFT to self.
+        let metadata_update = MetadataUpdate {
+            kind: uri_kind,
+            uri: req.uri.clone(),
+        }
+        .spend(&mut ctx)
+        .map_err(|e| EngineError::Internal(format!("MetadataUpdate::spend: {e}")))?;
+
+        let standard_layer = StandardLayer::new(our_pk);
+        let _new_nft = nft
+            .transfer_with_metadata(
+                &mut ctx,
+                &standard_layer,
+                our_inner_ph, // self-owner — only the metadata is changing
+                metadata_update,
+                Conditions::new(),
+            )
+            .map_err(|e| {
+                EngineError::Internal(format!("Nft::transfer_with_metadata: {e}"))
+            })?;
+
+        // Pay the optional XCH fee (same flow as transfer_nft).
+        struct FeeKey {
+            sk: SecretKey,
+            pk: PublicKey,
+        }
+        let mut fee_keys: Vec<FeeKey> = Vec::new();
+        if fee > 0 {
+            let total_in: u64 = req.fee_input_coins.iter().try_fold(0u64, |acc, c| {
+                let amt: u64 = c
+                    .amount
+                    .parse()
+                    .map_err(|_| EngineError::InvalidParams("fee coin amount u64".to_string()))?;
+                acc.checked_add(amt)
+                    .ok_or_else(|| EngineError::InvalidParams("fee sum overflow".to_string()))
+            })?;
+            if total_in < fee {
+                return Err(EngineError::InvalidParams(format!(
+                    "fee_input_coins sum {total_in} < fee {fee}"
+                )));
+            }
+            let change_index = req.fee_change_index.unwrap_or(req.derivation_index);
+            let change_intermediate = master_to_wallet_unhardened(&master_sk, change_index);
+            let change_pk = change_intermediate.derive_synthetic().public_key();
+            let change_ph: Bytes32 = StandardArgs::curry_tree_hash(change_pk).into();
+            let change = total_in - fee;
+
+            for (i, c) in req.fee_input_coins.iter().enumerate() {
+                let parent = parse_bytes32(&c.parent_coin_info)?;
+                let outer_ph = parse_bytes32(&c.puzzle_hash)?;
+                let amt: u64 = c.amount.parse().unwrap();
+                let coin = Coin::new(parent, outer_ph, amt);
+
+                let fee_intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+                let fee_synthetic = fee_intermediate.derive_synthetic();
+                let fee_pk = fee_synthetic.public_key();
+                let derived_ph: Bytes32 = StandardArgs::curry_tree_hash(fee_pk).into();
+                if derived_ph != outer_ph {
+                    return Err(EngineError::InvalidParams(format!(
+                        "fee_input_coins[{i}] puzzle_hash doesn't match derivation_index"
+                    )));
+                }
+
+                let conditions = if i == 0 {
+                    let mut c = Conditions::new().reserve_fee(fee);
+                    if change > 0 {
+                        c = c.create_coin(change_ph, change, ctx.hint(change_ph).unwrap());
+                    }
+                    c
+                } else {
+                    Conditions::new()
+                };
+                let p2_spend = StandardLayer::new(fee_pk)
+                    .spend_with_conditions(&mut ctx, conditions)
+                    .map_err(|e| EngineError::Internal(format!("fee p2 spend: {e}")))?;
+                ctx.spend(coin, p2_spend)
+                    .map_err(|e| EngineError::Internal(format!("fee spend: {e}")))?;
+                fee_keys.push(FeeKey {
+                    sk: fee_synthetic,
+                    pk: fee_pk,
+                });
+            }
+        }
+
+        let coin_spends = ctx.take();
+
+        let constants: &ConsensusConstants = &MAINNET_CONSTANTS;
+        let agg_sig_consts = AggSigConstants::new(constants.agg_sig_me_additional_data);
+        let required = RequiredSignature::from_coin_spends(
+            &mut ctx,
+            &coin_spends,
+            &agg_sig_consts,
+        )
+        .map_err(|e| EngineError::Internal(format!("required_signatures: {e}")))?;
+
+        let mut sks_by_pk: std::collections::HashMap<Vec<u8>, SecretKey> =
+            std::collections::HashMap::new();
+        sks_by_pk.insert(our_pk.to_bytes().to_vec(), our_synthetic.clone());
+        for k in &fee_keys {
+            sks_by_pk.insert(k.pk.to_bytes().to_vec(), k.sk.clone());
+        }
+
+        let mut aggregated = Signature::default();
+        for r in required {
+            match r {
+                RequiredSignature::Bls(RequiredBlsSignature {
+                    public_key,
+                    raw_message,
+                    appended_info,
+                    domain_string,
+                }) => {
+                    let pk_bytes = public_key.to_bytes().to_vec();
+                    let sk = sks_by_pk.get(&pk_bytes).ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "no secret key for pubkey {}",
+                            hex::encode(&pk_bytes)
+                        ))
+                    })?;
+                    let mut msg = raw_message.to_vec();
+                    msg.extend_from_slice(&appended_info);
+                    if let Some(domain) = domain_string {
+                        msg.extend_from_slice(&domain);
+                    }
+                    aggregated.aggregate(&sign(sk, &msg));
+                }
+                RequiredSignature::Secp(_) => {
+                    return Err(EngineError::Internal(
+                        "SECP not supported in add_nft_uri".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let bundle = SpendBundle::new(coin_spends.clone(), aggregated);
+        let tx_id = bundle.name();
+
+        let mut status = "DRY_RUN".to_string();
+        let mut error: Option<String> = None;
+        if req.broadcast {
+            let res = client
+                .push_tx(bundle.clone())
+                .await
+                .map_err(|e| EngineError::Internal(format!("push_tx: {e}")))?;
+            status = res.status;
+            error = res.error;
+        }
+
+        Ok(serde_json::json!({
+            "tx_id": format!("0x{}", hex::encode(tx_id)),
+            "status": status,
+            "error": error,
+            "spend_bundle": {
+                "coin_spends": coin_spends.iter().map(serialize_coin_spend).collect::<Vec<_>>(),
+                "aggregated_signature": format!("0x{}", hex::encode(bundle.aggregated_signature.to_bytes())),
+            },
+            "launcher_id": format!("0x{}", hex::encode(nft.info.launcher_id)),
+            "uri_kind": req.uri_kind,
+            "uri": req.uri,
         })
         .to_string())
     }
