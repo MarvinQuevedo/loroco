@@ -244,12 +244,27 @@ impl SageEngine {
             derivation_index: u32,
             lineage_proof: LineageJson,
         }
+        // Oleada-2 multi-output for CATs: each entry maps 1:1 to a CREATE_COIN
+        // on the head CAT inner spend, automatically hinted with the inner_ph
+        // so the recipient's wallet can index by hint.
+        #[derive(Deserialize)]
+        struct OutputSpec {
+            address: String,
+            amount: String,
+        }
         #[derive(Deserialize)]
         struct Req {
             fingerprint: u32,
             asset_id: String,
-            recipient_address: String,
-            amount_mojos: String,
+            // Legacy single-output. Either (recipient_address+amount_mojos) OR
+            // `outputs` MUST be present, never both.
+            #[serde(default)]
+            recipient_address: Option<String>,
+            #[serde(default)]
+            amount_mojos: Option<String>,
+            // New multi-output (Oleada 2). Use for bulkSendCat.
+            #[serde(default)]
+            outputs: Option<Vec<OutputSpec>>,
             #[serde(default = "default_zero_mojos_cat")]
             fee_mojos: String,
             input_coins: Vec<InputCoinJson>,
@@ -270,18 +285,84 @@ impl SageEngine {
         let req: Req = serde_json::from_str(params_json)
             .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
 
-        let amount: u64 = req
-            .amount_mojos
-            .parse()
-            .map_err(|_| EngineError::InvalidParams("amount_mojos must be u64".to_string()))?;
+        // Normalise legacy single-output / new multi-output into one Vec.
+        struct ParsedOutput {
+            inner_ph: Bytes32,
+            amount: u64,
+        }
+        let mut outputs: Vec<ParsedOutput> = Vec::new();
+        match (&req.outputs, &req.recipient_address, &req.amount_mojos) {
+            (Some(outs), None, None) => {
+                if outs.is_empty() {
+                    return Err(EngineError::InvalidParams(
+                        "outputs is empty — provide at least one entry".to_string(),
+                    ));
+                }
+                if outs.len() > 25 {
+                    return Err(EngineError::InvalidParams(format!(
+                        "too many outputs ({}), max 25 per CAT send",
+                        outs.len()
+                    )));
+                }
+                for (i, o) in outs.iter().enumerate() {
+                    let amt: u64 = o.amount.parse().map_err(|_| {
+                        EngineError::InvalidParams(format!(
+                            "outputs[{i}].amount must be u64"
+                        ))
+                    })?;
+                    if amt == 0 {
+                        return Err(EngineError::InvalidParams(format!(
+                            "outputs[{i}].amount must be > 0"
+                        )));
+                    }
+                    let addr = Address::decode(o.address.trim()).map_err(|e| {
+                        EngineError::InvalidParams(format!("outputs[{i}].address: {e}"))
+                    })?;
+                    outputs.push(ParsedOutput {
+                        inner_ph: addr.puzzle_hash,
+                        amount: amt,
+                    });
+                }
+            }
+            (None, Some(addr), Some(amount_str)) => {
+                let amt: u64 = amount_str.parse().map_err(|_| {
+                    EngineError::InvalidParams("amount_mojos must be u64".to_string())
+                })?;
+                if amt == 0 {
+                    return Err(EngineError::InvalidParams(
+                        "amount_mojos must be > 0".to_string(),
+                    ));
+                }
+                let recipient = Address::decode(addr.trim())
+                    .map_err(|e| EngineError::InvalidParams(format!("recipient: {e}")))?;
+                outputs.push(ParsedOutput {
+                    inner_ph: recipient.puzzle_hash,
+                    amount: amt,
+                });
+            }
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                return Err(EngineError::InvalidParams(
+                    "send_cat: pass either `outputs` OR (`recipient_address` + `amount_mojos`), not both"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                return Err(EngineError::InvalidParams(
+                    "send_cat needs `outputs` or (`recipient_address` + `amount_mojos`)"
+                        .to_string(),
+                ));
+            }
+        };
+
         let fee: u64 = req
             .fee_mojos
             .parse()
             .map_err(|_| EngineError::InvalidParams("fee_mojos must be u64".to_string()))?;
-        if amount == 0 {
-            return Err(EngineError::InvalidParams(
-                "amount_mojos must be > 0".to_string(),
-            ));
+        let mut amount: u64 = 0;
+        for o in &outputs {
+            amount = amount.checked_add(o.amount).ok_or_else(|| {
+                EngineError::InvalidParams("output sum overflow".to_string())
+            })?;
         }
         if req.input_coins.is_empty() {
             return Err(EngineError::InvalidParams("input_coins is empty".to_string()));
@@ -294,9 +375,6 @@ impl SageEngine {
         }
 
         let asset_id = parse_bytes32(&req.asset_id)?;
-        let recipient = Address::decode(req.recipient_address.trim())
-            .map_err(|e| EngineError::InvalidParams(format!("recipient: {e}")))?;
-        let recipient_inner_ph = recipient.puzzle_hash;
 
         // 1. Reconstruct each input Cat + derive its synthetic SK
         let master_sk = self.unlocked_sk(req.fingerprint)?;
@@ -389,12 +467,15 @@ impl SageEngine {
         let mut cat_spends: Vec<CatSpend> = Vec::with_capacity(parsed.len());
         for (i, p) in parsed.iter().enumerate() {
             let conditions = if i == 0 {
-                let mut c = Conditions::new().create_coin(
-                    recipient_inner_ph,
-                    amount,
-                    ctx.hint(recipient_inner_ph)
-                        .map_err(|e| EngineError::Internal(format!("hint memos: {e}")))?,
-                );
+                let mut c = Conditions::new();
+                for o in &outputs {
+                    c = c.create_coin(
+                        o.inner_ph,
+                        o.amount,
+                        ctx.hint(o.inner_ph)
+                            .map_err(|e| EngineError::Internal(format!("hint memos: {e}")))?,
+                    );
+                }
                 if fee > 0 {
                     c = c.reserve_fee(fee);
                 }
@@ -3120,11 +3201,27 @@ impl SageEngine {
             amount: String,
             derivation_index: u32,
         }
+        // Oleada-2 multi-output: each entry maps 1:1 to a CREATE_COIN on the
+        // head spend. No memos here — callers that need memos use the legacy
+        // single-output mode (recipient_address + amount_mojos).
+        #[derive(Deserialize)]
+        struct OutputSpec {
+            address: String,
+            amount: String,
+        }
         #[derive(Deserialize)]
         struct Req {
             fingerprint: u32,
-            recipient_address: String,
-            amount_mojos: String,
+            // Legacy single-output mode. Either (recipient_address+amount_mojos)
+            // or `outputs` MUST be present, never both.
+            #[serde(default)]
+            recipient_address: Option<String>,
+            #[serde(default)]
+            amount_mojos: Option<String>,
+            // New multi-output mode (Oleada 2). Each entry becomes one
+            // CREATE_COIN on the head spend. Use for bulkSendXch/combine/split.
+            #[serde(default)]
+            outputs: Option<Vec<OutputSpec>>,
             #[serde(default = "default_zero_mojos")]
             fee_mojos: String,
             #[serde(default)]
@@ -3151,22 +3248,90 @@ impl SageEngine {
             .map_err(|e| EngineError::InvalidParams(e.to_string()))?;
 
         // 1. Parse + validate
-        let amount: u64 = req
-            .amount_mojos
-            .parse()
-            .map_err(|_| EngineError::InvalidParams("amount_mojos must be u64".to_string()))?;
+        // Resolve to a unified Vec<(recipient_ph, amount, memos)> regardless
+        // of which input shape the caller used.
+        struct ParsedOutput {
+            ph: Bytes32,
+            amount: u64,
+        }
+        let mut outputs: Vec<ParsedOutput> = Vec::new();
+        match (&req.outputs, &req.recipient_address, &req.amount_mojos) {
+            (Some(outs), None, None) => {
+                if outs.is_empty() {
+                    return Err(EngineError::InvalidParams(
+                        "outputs is empty — provide at least one entry".to_string(),
+                    ));
+                }
+                if outs.len() > 25 {
+                    return Err(EngineError::InvalidParams(format!(
+                        "too many outputs ({}), max 25 per bundle",
+                        outs.len()
+                    )));
+                }
+                for (i, o) in outs.iter().enumerate() {
+                    let amt: u64 = o.amount.parse().map_err(|_| {
+                        EngineError::InvalidParams(format!(
+                            "outputs[{i}].amount must be u64"
+                        ))
+                    })?;
+                    if amt == 0 {
+                        return Err(EngineError::InvalidParams(format!(
+                            "outputs[{i}].amount must be > 0"
+                        )));
+                    }
+                    let addr = Address::decode(o.address.trim()).map_err(|e| {
+                        EngineError::InvalidParams(format!("outputs[{i}].address: {e}"))
+                    })?;
+                    outputs.push(ParsedOutput {
+                        ph: addr.puzzle_hash,
+                        amount: amt,
+                    });
+                }
+            }
+            (None, Some(addr), Some(amount_str)) => {
+                let amt: u64 = amount_str.parse().map_err(|_| {
+                    EngineError::InvalidParams("amount_mojos must be u64".to_string())
+                })?;
+                if amt == 0 {
+                    return Err(EngineError::InvalidParams(
+                        "amount_mojos must be > 0".to_string(),
+                    ));
+                }
+                let recipient = Address::decode(addr.trim())
+                    .map_err(|e| EngineError::InvalidParams(format!("recipient: {e}")))?;
+                outputs.push(ParsedOutput {
+                    ph: recipient.puzzle_hash,
+                    amount: amt,
+                });
+            }
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                return Err(EngineError::InvalidParams(
+                    "send_xch: pass either `outputs` OR (`recipient_address` + `amount_mojos`), not both"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                return Err(EngineError::InvalidParams(
+                    "send_xch needs `outputs` or (`recipient_address` + `amount_mojos`)"
+                        .to_string(),
+                ));
+            }
+        };
+
         let fee: u64 = req
             .fee_mojos
             .parse()
             .map_err(|_| EngineError::InvalidParams("fee_mojos must be u64".to_string()))?;
-        if amount == 0 {
-            return Err(EngineError::InvalidParams(
-                "amount_mojos must be > 0".to_string(),
-            ));
+        // total_output_amount + fee = what we need from inputs.
+        let mut total_output: u64 = 0;
+        for o in &outputs {
+            total_output = total_output
+                .checked_add(o.amount)
+                .ok_or_else(|| EngineError::InvalidParams("output sum overflow".to_string()))?;
         }
-        let needed = amount
+        let needed = total_output
             .checked_add(fee)
-            .ok_or_else(|| EngineError::InvalidParams("amount + fee overflow".to_string()))?;
+            .ok_or_else(|| EngineError::InvalidParams("total + fee overflow".to_string()))?;
 
         let inputs = req
             .input_coins
@@ -3225,28 +3390,26 @@ impl SageEngine {
         }
         let change = total_input - needed;
 
-        let recipient = Address::decode(req.recipient_address.trim())
-            .map_err(|e| EngineError::InvalidParams(format!("recipient: {e}")))?;
-        let recipient_ph = recipient.puzzle_hash;
-
         let change_intermediate_sk = master_to_wallet_unhardened(&master_sk, req.change_index);
         let change_synthetic_pk = change_intermediate_sk.derive_synthetic().public_key();
         let change_ph: Bytes32 = StandardArgs::curry_tree_hash(change_synthetic_pk).into();
 
         // 2. Build conditions
-        // First coin: outputs + reserve_fee + assert_concurrent_spend for the rest.
+        // First coin: every output + reserve_fee + assert_concurrent_spend for the rest.
         // Other coins: assert_concurrent_spend back to the first.
         let mut ctx = SpendContext::new();
 
         let (head_coin, head_sk, head_pk, _) = parsed[0].clone();
         let head_coin_id = head_coin.coin_id();
 
-        let mut head_conditions = Conditions::new()
-            .create_coin(
-                recipient_ph,
-                amount,
+        let mut head_conditions = Conditions::new();
+        for o in &outputs {
+            head_conditions = head_conditions.create_coin(
+                o.ph,
+                o.amount,
                 ::chia_wallet_sdk::chia::puzzle_types::Memos::None,
             );
+        }
         if fee > 0 {
             head_conditions = head_conditions.reserve_fee(fee);
         }
