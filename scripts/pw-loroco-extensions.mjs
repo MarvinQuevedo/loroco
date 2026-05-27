@@ -83,6 +83,13 @@ const METHODS = [
     mutating: true,
     expectInvalidParams: true,
   },
+  // multiSend dry-fail: no outputs at all → 4000.
+  {
+    name: "multiSend",
+    params: {},
+    mutating: true,
+    expectInvalidParams: true,
+  },
   // ── Oleada 2 writes (approval required, dry-validation by default) ───
   {
     name: "bulkSendXch",
