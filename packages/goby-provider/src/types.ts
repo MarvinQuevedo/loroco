@@ -245,6 +245,168 @@ export interface ChiaMethodMap {
     };
     result: { nftIds: string[] };
   };
+
+  // ─── Loroco read-only extensions (WC-bypass surface) ─────────────────────
+  // These mirror endpoints from the upstream Sage API (vendor/sage/.../endpoints/*)
+  // that DON'T require new Rust work — they're served straight from the
+  // JS-side coin-store (chrome.storage.local["coins.<fp>"]) so any dApp
+  // hitting `chia_*` / `chip0002_*` / snake_case gets WC-compatible reads
+  // without us shipping a new WASM build.
+
+  /** List coins of an asset type (XCH/CAT/NFT), paginated. Includes spent flag. */
+  getCoins: {
+    params:
+      | {
+          type?: AssetType;
+          assetId?: Hex | null;
+          limit?: number;
+          offset?: number;
+          /** Default: false — only return unspent coins. */
+          includeSpent?: boolean;
+        }
+      | undefined;
+    result: CoinView[];
+  };
+
+  /** Resolve coins by their coin_id. Unknown ids are silently omitted. */
+  getCoinsByIds: {
+    params: { coinIds: Hex[] };
+    result: CoinView[];
+  };
+
+  /**
+   * Does the wallet own at least one unspent coin for this asset?
+   * `type` selects which bucket to look in (cat / nft / did).
+   */
+  isAssetOwned: {
+    params: { type: "cat" | "did" | "nft"; assetId: Hex };
+    result: boolean;
+  };
+
+  /** Owned CAT assets (asset_id + unspent totals). */
+  getCats: {
+    params: { limit?: number; offset?: number } | undefined;
+    result: CatAssetView[];
+  };
+
+  /** Alias of `getCats` — Sage WC2 name. Returns the same shape. */
+  getAllCats: {
+    params: { limit?: number; offset?: number } | undefined;
+    result: CatAssetView[];
+  };
+
+  /** Lookup a single CAT asset by id. Null when the wallet doesn't track it. */
+  getToken: {
+    params: { assetId: Hex };
+    result: CatAssetView | null;
+  };
+
+  /**
+   * Derived addresses for the active wallet. Hardened branch requires an
+   * unlocked wallet (master SK access); unhardened is served from cached
+   * `master_public_key`.
+   */
+  getDerivations: {
+    params:
+      | { offset?: number; limit?: number; hardened?: boolean }
+      | undefined;
+    result: Derivation[];
+  };
+
+  /**
+   * Flat tx history derived from coin observations + mempool snapshot.
+   * One entry per (coin_id, direction) pair. Pending entries carry the
+   * mempool tx_id; confirmed entries fall back to the coin_id as id.
+   */
+  getTransactions: {
+    params: { limit?: number; offset?: number; pendingOnly?: boolean } | undefined;
+    result: TransactionView[];
+  };
+
+  /** Convenience filter for `getTransactions({ pendingOnly: true })`. */
+  getPendingTransactions: {
+    params: void | undefined;
+    result: TransactionView[];
+  };
+
+  /** Offers persisted in `offers.<fp>` after createOffer/takeOffer. */
+  getOffers: {
+    params: { limit?: number; offset?: number; includeCancelled?: boolean } | undefined;
+    result: OfferView[];
+  };
+
+  /** Single offer by id. Null when unknown. */
+  getOffer: {
+    params: { id: Hex };
+    result: OfferView | null;
+  };
+}
+
+// ─── View types for Loroco read extensions ─────────────────────────────────
+
+/** Flattened on-chain coin view served from the JS coin-store. */
+export interface CoinView {
+  coinId: Hex;
+  parentCoinInfo: Hex;
+  puzzleHash: Hex;
+  /** mojos as a string — XCH coins can exceed 2^53. */
+  amount: string;
+  confirmedBlockIndex: number;
+  spent: boolean;
+  spentBlockIndex: number;
+  /** "xch" | "cat" | "nft". DIDs surface here once Fase 3 lands. */
+  assetType: "xch" | "cat" | "nft";
+  /** asset_id for CAT, launcher_id for NFT, null for XCH. */
+  assetId: Hex | null;
+  /** Optimistic-spent marker (broadcast but not yet confirmed). */
+  pending?: boolean;
+}
+
+/** CAT asset summary — what `chia_getCats` / `getToken` return. */
+export interface CatAssetView {
+  assetId: Hex;
+  /** unspent mojos as a string. */
+  balance: string;
+  /** unspent coin count. */
+  coinCount: number;
+  /** Optional metadata. Empty until a metadata source (Dexie/Spacescan) is wired. */
+  name?: string | null;
+  symbol?: string | null;
+  iconUrl?: string | null;
+}
+
+/** Derived address row — matches `derive_addresses` engine response shape. */
+export interface Derivation {
+  index: number;
+  hardened: boolean;
+  publicKey: Hex;
+  address: string;
+  puzzleHash: Hex;
+}
+
+/** One row in the dApp-facing tx history. */
+export interface TransactionView {
+  /** mempool tx_id for pending, coin_id for confirmed. */
+  id: Hex;
+  direction: "incoming" | "outgoing";
+  status: "pending" | "confirmed";
+  /** Confirmed block height, null when pending. */
+  height: number | null;
+  /** ms epoch when the coin was created/spent. null when unknown. */
+  timestamp: number | null;
+  asset: { type: "xch" | "cat"; assetId: Hex | null };
+  /** Coin amount in mojos as a string. */
+  amount: string;
+}
+
+/** Offer summary persisted in `offers.<fp>`. */
+export interface OfferView {
+  id: Hex;
+  offer: string;
+  /** Local-cancel marker (secure=false) or post-on-chain-cancel marker. */
+  cancelled: boolean;
+  /** When this offer was created/taken (ms epoch). 0 when not tracked. */
+  createdAt: number;
 }
 
 /**

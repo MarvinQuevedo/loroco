@@ -47,6 +47,19 @@ const NO_APPROVAL_METHODS = new Set<ChiaMethod>([
   "accounts",
   "getNFTs",
   "getNFTInfo",
+  // Loroco read-only extensions — connected dApps get them without prompt.
+  "getCoins",
+  "getCoinsByIds",
+  "isAssetOwned",
+  "getCats",
+  "getAllCats",
+  "getToken",
+  "getDerivations",
+  "getTransactions",
+  "getPendingTransactions",
+  "getOffers",
+  "getOffer",
+  "getAddress",
 ]);
 
 const ALWAYS_APPROVAL_METHODS = new Set<ChiaMethod>([

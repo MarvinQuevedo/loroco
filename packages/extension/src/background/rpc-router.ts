@@ -25,11 +25,16 @@
 import { Errors } from "@ozone/goby-provider/errors";
 import type {
   AssetBalance,
+  CatAssetView,
   ChiaMethod,
   ChiaMethodMap,
   Coin,
+  CoinView,
+  Derivation,
   Hex,
+  OfferView,
   SpendableCoin,
+  TransactionView,
 } from "@ozone/goby-provider/types";
 import { requestApproval } from "./approval.js";
 import {
@@ -187,6 +192,18 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   chia_bulkMintNfts: "bulkMintNfts",
   chia_walletSwitchChain: "walletSwitchChain",
   chia_walletWatchAsset: "walletWatchAsset",
+  // chia_* read-only extensions (Loroco WC-bypass surface)
+  chia_getCoins: "getCoins",
+  chia_getCoinsByIds: "getCoinsByIds",
+  chia_isAssetOwned: "isAssetOwned",
+  chia_getCats: "getCats",
+  chia_getAllCats: "getAllCats",
+  chia_getToken: "getToken",
+  chia_getDerivations: "getDerivations",
+  chia_getTransactions: "getTransactions",
+  chia_getPendingTransactions: "getPendingTransactions",
+  chia_getOffers: "getOffers",
+  chia_getOffer: "getOffer",
   // chip0002_* (WC2 topic style — CHIP-0002 namespace)
   chip0002_chainId: "chainId",
   chip0002_connect: "connect",
@@ -211,6 +228,18 @@ const METHOD_ALIASES: Record<string, ChiaMethod> = {
   cancel_offer: "cancelOffer",
   bulk_mint_nfts: "bulkMintNfts",
   get_address: "getAddress",
+  // snake_case for the read-only extensions
+  get_coins: "getCoins",
+  get_coins_by_ids: "getCoinsByIds",
+  is_asset_owned: "isAssetOwned",
+  get_cats: "getCats",
+  get_all_cats: "getAllCats",
+  get_token: "getToken",
+  get_derivations: "getDerivations",
+  get_transactions: "getTransactions",
+  get_pending_transactions: "getPendingTransactions",
+  get_offers: "getOffers",
+  get_offer: "getOffer",
   // Sage WC2 names with different case/spelling that map to existing handlers
   chia_send: "transfer",
   chia_getNfts: "getNFTs",
@@ -1461,7 +1490,426 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       nftIds: res.nft_launcher_ids.map((id) => with0x(strip0x(id))),
     } as ChiaMethodMap["bulkMintNfts"]["result"];
   },
+
+  // ── Loroco read-only extensions (WC-bypass surface) ──────────────────────
+  // Served from the JS coin-store without engine round-trips. dApps targeting
+  // Sage WC2 / upstream Sage API get a working read surface even though we
+  // haven't ported those endpoints to sage-wasm yet.
+
+  async getCoins(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["getCoins"]["params"];
+    const limit = (p?.limit ?? 1000) | 0;
+    const offset = (p?.offset ?? 0) | 0;
+    const includeSpent = p?.includeSpent === true;
+    const store = await readCoinStore(fp);
+    const out = collectCoinViews(store, p?.type ?? null, p?.assetId ?? null, includeSpent);
+    return out.slice(offset, offset + limit);
+  },
+
+  async getCoinsByIds(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["getCoinsByIds"]["params"];
+    if (!p?.coinIds || !Array.isArray(p.coinIds)) {
+      throw Errors.invalidParams("getCoinsByIds requires { coinIds: Hex[] }");
+    }
+    const wanted = new Set(p.coinIds.map((id) => strip0x(id)));
+    const store = await readCoinStore(fp);
+    const all = collectCoinViews(store, null, null, true)
+      .concat(collectCoinViews(store, "cat", null, true))
+      .concat(collectCoinViews(store, "nft", null, true));
+    return all.filter((c) => wanted.has(strip0x(c.coinId)));
+  },
+
+  async isAssetOwned(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["isAssetOwned"]["params"];
+    if (!p?.type || !p?.assetId) {
+      throw Errors.invalidParams("isAssetOwned requires { type, assetId }");
+    }
+    const store = await readCoinStore(fp);
+    const targetId = strip0x(p.assetId);
+    if (p.type === "cat") {
+      const cat = (store.cats ?? {})[with0x(targetId)] ?? (store.cats ?? {})[targetId];
+      return Boolean(cat?.coins?.some((c) => !c.spent));
+    }
+    if (p.type === "nft") {
+      return Object.values(store.nfts ?? {}).some(
+        (n) => !n.spent && strip0x(n.launcher_id) === targetId,
+      );
+    }
+    // DID tracking pending — Fase 3.
+    return false;
+  },
+
+  async getCats(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["getCats"]["params"];
+    const limit = (p?.limit ?? 200) | 0;
+    const offset = (p?.offset ?? 0) | 0;
+    const store = await readCoinStore(fp);
+    const list = collectCatAssetViews(store);
+    return list.slice(offset, offset + limit);
+  },
+
+  async getAllCats(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["getAllCats"]["params"];
+    const limit = (p?.limit ?? 200) | 0;
+    const offset = (p?.offset ?? 0) | 0;
+    const store = await readCoinStore(fp);
+    const list = collectCatAssetViews(store);
+    return list.slice(offset, offset + limit);
+  },
+
+  async getToken(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["getToken"]["params"];
+    if (!p?.assetId) throw Errors.invalidParams("getToken requires { assetId }");
+    const store = await readCoinStore(fp);
+    const targetId = strip0x(p.assetId);
+    const cat = (store.cats ?? {})[with0x(targetId)] ?? (store.cats ?? {})[targetId];
+    return cat ? catAssetToView(targetId, cat) : null;
+  },
+
+  async getDerivations(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["getDerivations"]["params"];
+    const limit = (p?.limit ?? 50) | 0;
+    const offset = (p?.offset ?? 0) | 0;
+    const hardened = p?.hardened === true;
+    if (hardened) {
+      // Hardened needs the unlocked SK; engine refuses otherwise.
+      const res = await callEngine<{
+        addresses: Array<{ index: number; address: string; puzzle_hash: string; public_key: string }>;
+      }>("derive_addresses_hardened", { fingerprint: fp, start: offset, count: limit, testnet: false });
+      return res.addresses.map<Derivation>((a) => ({
+        index: a.index,
+        hardened: true,
+        publicKey: with0x(a.public_key) as Hex,
+        address: a.address,
+        puzzleHash: with0x(a.puzzle_hash) as Hex,
+      }));
+    }
+    const masterPk = await loadActiveMasterPk();
+    if (!masterPk) throw Errors.unauthorized("No active wallet");
+    const res = await callEngine<{
+      addresses: Array<{ index: number; address: string; puzzle_hash: string; public_key: string }>;
+    }>("derive_addresses", {
+      master_public_key: masterPk,
+      start: offset,
+      count: limit,
+      testnet: false,
+    });
+    return res.addresses.map<Derivation>((a) => ({
+      index: a.index,
+      hardened: false,
+      publicKey: with0x(a.public_key) as Hex,
+      address: a.address,
+      puzzleHash: with0x(a.puzzle_hash) as Hex,
+    }));
+  },
+
+  async getTransactions(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["getTransactions"]["params"];
+    const limit = (p?.limit ?? 100) | 0;
+    const offset = (p?.offset ?? 0) | 0;
+    const pendingOnly = p?.pendingOnly === true;
+    const store = await readCoinStore(fp);
+    const txs = buildTransactionHistory(store, pendingOnly);
+    return txs.slice(offset, offset + limit);
+  },
+
+  async getPendingTransactions(_origin) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const store = await readCoinStore(fp);
+    return buildTransactionHistory(store, true);
+  },
+
+  async getOffers(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = (params ?? {}) as ChiaMethodMap["getOffers"]["params"];
+    const limit = (p?.limit ?? 100) | 0;
+    const offset = (p?.offset ?? 0) | 0;
+    const includeCancelled = p?.includeCancelled === true;
+    const list = await loadOffers(fp);
+    const filtered = list
+      .filter((o) => includeCancelled || !o.cancelled)
+      .map(offerToView);
+    return filtered.slice(offset, offset + limit);
+  },
+
+  async getOffer(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) throw Errors.unauthorized("No active wallet");
+    const p = params as ChiaMethodMap["getOffer"]["params"];
+    if (!p?.id) throw Errors.invalidParams("getOffer requires { id }");
+    const list = await loadOffers(fp);
+    const target = strip0x(p.id);
+    const match = list.find((o) => strip0x(o.id) === target);
+    return match ? offerToView(match) : null;
+  },
 };
+
+// ─── Helpers for the read-only extensions ──────────────────────────────────
+
+function collectCoinViews(
+  store: import("./coin-store.js").CoinStore,
+  type: "xch" | "cat" | "did" | "nft" | null,
+  assetId: Hex | null,
+  includeSpent: boolean,
+): CoinView[] {
+  const out: CoinView[] = [];
+  if (!type || type === "xch") {
+    for (const c of Object.values(store.coins)) {
+      if (c.spent && !includeSpent) continue;
+      out.push({
+        coinId: with0x(c.coin_id) as Hex,
+        parentCoinInfo: with0x(c.parent_coin_info) as Hex,
+        puzzleHash: with0x(c.puzzle_hash) as Hex,
+        amount: c.amount,
+        confirmedBlockIndex: c.confirmed_block_index,
+        spent: c.spent,
+        spentBlockIndex: c.spent_block_index,
+        assetType: "xch",
+        assetId: null,
+        pending: c.pending,
+      });
+    }
+  }
+  if (type === "cat") {
+    const buckets = assetId
+      ? [
+          (store.cats ?? {})[with0x(strip0x(assetId))] ??
+            (store.cats ?? {})[strip0x(assetId)],
+        ].filter(Boolean)
+      : Object.values(store.cats ?? {});
+    for (const cat of buckets) {
+      if (!cat) continue;
+      for (const c of cat.coins) {
+        if (c.spent && !includeSpent) continue;
+        out.push({
+          coinId: with0x(c.coin_id) as Hex,
+          parentCoinInfo: with0x(c.parent_coin_info) as Hex,
+          puzzleHash: with0x(c.puzzle_hash) as Hex,
+          amount: c.amount,
+          confirmedBlockIndex: c.confirmed_block_index,
+          spent: c.spent,
+          spentBlockIndex: c.spent_block_index,
+          assetType: "cat",
+          assetId: with0x(cat.asset_id) as Hex,
+          pending: c.pending,
+        });
+      }
+    }
+  }
+  if (type === "nft") {
+    for (const nft of Object.values(store.nfts ?? {})) {
+      if (nft.spent && !includeSpent) continue;
+      if (assetId && strip0x(assetId) !== strip0x(nft.launcher_id)) continue;
+      out.push({
+        coinId: with0x(nft.coin_id) as Hex,
+        parentCoinInfo: with0x(nft.parent_coin_info) as Hex,
+        puzzleHash: with0x(nft.puzzle_hash) as Hex,
+        amount: nft.amount,
+        confirmedBlockIndex: nft.confirmed_block_index,
+        spent: nft.spent,
+        spentBlockIndex: nft.spent_block_index,
+        assetType: "nft",
+        assetId: with0x(nft.launcher_id) as Hex,
+      });
+    }
+  }
+  return out;
+}
+
+function collectCatAssetViews(
+  store: import("./coin-store.js").CoinStore,
+): CatAssetView[] {
+  const out: CatAssetView[] = [];
+  for (const [, cat] of Object.entries(store.cats ?? {})) {
+    out.push(catAssetToView(cat.asset_id, cat));
+  }
+  // Sort biggest balance first — dApp UIs assume "most relevant on top".
+  out.sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : -1));
+  return out;
+}
+
+function catAssetToView(
+  assetId: string,
+  cat: import("./coin-store.js").CatAsset,
+): CatAssetView {
+  return {
+    assetId: with0x(strip0x(assetId)) as Hex,
+    balance: cat.total_unspent_mojos,
+    coinCount: cat.unspent_coin_count,
+    name: null,
+    symbol: null,
+    iconUrl: null,
+  };
+}
+
+/**
+ * Synthesize a tx history from coin observations + the mempool snapshot.
+ * One coin creation → one "incoming" entry; one coin spend → one "outgoing"
+ * entry. Pending entries come from the mempool snapshot and use the
+ * mempool tx_id; confirmed entries fall back to the coin_id as the id.
+ *
+ * Ordering: newest first. Pending always before confirmed when heights tie.
+ */
+function buildTransactionHistory(
+  store: import("./coin-store.js").CoinStore,
+  pendingOnly: boolean,
+): TransactionView[] {
+  const out: TransactionView[] = [];
+
+  const mempool = store.mempool ?? { incoming: [], outgoing: [], last_polled_at: 0 };
+  for (const inc of mempool.incoming) {
+    out.push({
+      id: with0x(inc.tx_id) as Hex,
+      direction: "incoming",
+      status: "pending",
+      height: null,
+      timestamp: inc.seen_at,
+      asset: {
+        type: inc.asset_id ? "cat" : "xch",
+        assetId: inc.asset_id ? (with0x(inc.asset_id) as Hex) : null,
+      },
+      amount: inc.amount,
+    });
+  }
+  for (const out_ of mempool.outgoing) {
+    // Surface one entry per spent coin so the dApp can render asset-aware rows.
+    for (const xchId of out_.spent_xch_coin_ids) {
+      const c = store.coins[xchId];
+      out.push({
+        id: with0x(out_.tx_id) as Hex,
+        direction: "outgoing",
+        status: "pending",
+        height: null,
+        timestamp: out_.seen_at,
+        asset: { type: "xch", assetId: null },
+        amount: c?.amount ?? "0",
+      });
+    }
+    for (const [assetId, coinIds] of Object.entries(out_.spent_cat_coin_ids)) {
+      const cat = (store.cats ?? {})[assetId] ?? (store.cats ?? {})[with0x(assetId)];
+      for (const coinId of coinIds) {
+        const c = cat?.coins.find((x) => x.coin_id === coinId);
+        out.push({
+          id: with0x(out_.tx_id) as Hex,
+          direction: "outgoing",
+          status: "pending",
+          height: null,
+          timestamp: out_.seen_at,
+          asset: { type: "cat", assetId: with0x(strip0x(assetId)) as Hex },
+          amount: c?.amount ?? "0",
+        });
+      }
+    }
+  }
+
+  if (pendingOnly) {
+    return out.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+  }
+
+  // Confirmed XCH: one entry on creation, one more when spent (post-confirm).
+  for (const c of Object.values(store.coins)) {
+    if (c.pending) continue; // pending-spent already shown via mempool
+    if (c.confirmed_block_index > 0) {
+      out.push({
+        id: with0x(c.coin_id) as Hex,
+        direction: "incoming",
+        status: "confirmed",
+        height: c.confirmed_block_index,
+        timestamp: c.timestamp ? c.timestamp * 1000 : null,
+        asset: { type: "xch", assetId: null },
+        amount: c.amount,
+      });
+    }
+    if (c.spent && c.spent_block_index > 0) {
+      out.push({
+        id: with0x(c.coin_id) as Hex,
+        direction: "outgoing",
+        status: "confirmed",
+        height: c.spent_block_index,
+        timestamp: null,
+        asset: { type: "xch", assetId: null },
+        amount: c.amount,
+      });
+    }
+  }
+
+  // Confirmed CATs.
+  for (const cat of Object.values(store.cats ?? {})) {
+    const assetIdHex = with0x(strip0x(cat.asset_id)) as Hex;
+    for (const c of cat.coins) {
+      if (c.pending) continue;
+      if (c.confirmed_block_index > 0) {
+        out.push({
+          id: with0x(c.coin_id) as Hex,
+          direction: "incoming",
+          status: "confirmed",
+          height: c.confirmed_block_index,
+          timestamp: null,
+          asset: { type: "cat", assetId: assetIdHex },
+          amount: c.amount,
+        });
+      }
+      if (c.spent && c.spent_block_index > 0) {
+        out.push({
+          id: with0x(c.coin_id) as Hex,
+          direction: "outgoing",
+          status: "confirmed",
+          height: c.spent_block_index,
+          timestamp: null,
+          asset: { type: "cat", assetId: assetIdHex },
+          amount: c.amount,
+        });
+      }
+    }
+  }
+
+  // Sort: pending first (no height), then confirmed by descending height.
+  out.sort((a, b) => {
+    if (a.status !== b.status) return a.status === "pending" ? -1 : 1;
+    return (b.height ?? 0) - (a.height ?? 0);
+  });
+  return out;
+}
+
+interface StoredOffer {
+  id: string;
+  offer: string;
+  cancelled?: boolean;
+  created_at?: number;
+}
+
+async function loadOffers(fp: number): Promise<StoredOffer[]> {
+  const key = `offers.${fp}`;
+  const data = await chrome.storage.local.get(key);
+  return ((data[key] as StoredOffer[] | undefined) ?? []).slice().reverse();
+}
+
+function offerToView(o: StoredOffer): OfferView {
+  return {
+    id: with0x(strip0x(o.id)) as Hex,
+    offer: o.offer,
+    cancelled: o.cancelled === true,
+    createdAt: o.created_at ?? 0,
+  };
+}
 
 /** Local CoinStore.NftView → wire NftInfo. */
 function nftViewToInfo(
