@@ -6,7 +6,7 @@ import { chromium } from "playwright";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 import { setTimeout as wait } from "node:timers/promises";
 
-const ENV_PATH = "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/.env";
+const ENV_PATH = "/Users/marvin/Projects/Ozone/loroco/.env";
 if (existsSync(ENV_PATH)) {
   for (const line of readFileSync(ENV_PATH, "utf8").split("\n")) {
     const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
@@ -20,7 +20,7 @@ if (existsSync(ENV_PATH)) {
 }
 
 const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+  "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 const USER_DATA = "/tmp/Loroco-Check";
 const MNEMONIC = process.env.MNEMONIC;
 const TARGET = "xch1xxq"; // Sage's active address starts with this

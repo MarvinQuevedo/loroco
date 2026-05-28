@@ -19,7 +19,7 @@ import { mkdirSync } from "node:fs";
 import { setTimeout as wait } from "node:timers/promises";
 
 const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+  "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 const USER_DATA = "/tmp/Ozone-PW-Dapps";
 const SHOT_DIR = "/tmp/ozone-pw-dapps";
 

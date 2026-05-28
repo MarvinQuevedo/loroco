@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Loroco Playground — endpoint-by-endpoint dApp</title>
+<style>
+  :root {
+    --bg: #0e1411; --panel: #16201b; --panel2: #1d2a23; --line: #2a3a31;
+    --txt: #e7f0ea; --muted: #8aa597; --accent: #7bd88f; --accent2: #4db6ac;
+    --warn: #e2b84a; --err: #ef6b6b; --ok: #7bd88f; --stub: #9a8cff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 12px 18px;
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+  header h1 span { color: var(--accent); }
+  .status { font-size: 12px; color: var(--muted); }
+  .status b { color: var(--txt); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--err); }
+  .dot.up { background: var(--ok); }
+  .toolbar { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid var(--line);
+    background: var(--panel2); color: var(--txt); border-radius: 8px;
+    padding: 6px 12px; transition: .12s;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #06130b; border-color: var(--accent); font-weight: 600; }
+  button.go { background: var(--accent2); color: #04120f; border-color: var(--accent2); }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 18px; }
+  .filterbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .filterbar input { flex: 1; min-width: 180px; background: var(--panel); border: 1px solid var(--line);
+    color: var(--txt); border-radius: 8px; padding: 8px 12px; font: inherit; }
+  .group { margin: 22px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--accent); border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .card h3 { margin: 0 0 2px; font-size: 14px; font-family: var(--mono); }
+  .card .desc { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+  .card .warn { color: var(--warn); font-size: 11px; margin: 0 0 8px; line-height: 1.35; }
+  #ctxPanel { display: none; margin: 0 0 16px; font-size: 12px; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+  #ctxPanel.show { display: block; }
+  #ctxPanel b { color: var(--txt); }
+  .cchip { display: inline-block; margin: 2px 4px 0 0; padding: 1px 7px; border-radius: 999px; font-size: 11px; }
+  .cchip.ok { background: #14322a; color: var(--ok); }
+  .cchip.no { background: #2e2418; color: var(--warn); }
+  .badge { font-size: 10px; padding: 2px 7px; border-radius: 999px; font-weight: 700; letter-spacing: .4px; vertical-align: middle; }
+  .badge.read { background: #14322a; color: var(--ok); }
+  .badge.approval { background: #3a2e12; color: var(--warn); }
+  .badge.stub { background: #221c40; color: var(--stub); }
+  .badge.popup { background: #3a1f2e; color: #ff9ecb; }
+  textarea {
+    width: 100%; min-height: 64px; resize: vertical; background: #0c1210; color: var(--txt);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: 12px/1.45 var(--mono);
+  }
+  .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .out { margin-top: 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word;
+    max-height: 240px; overflow: auto; background: #0c1210; border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; display: none; }
+  .out.show { display: block; }
+  .out.ok { border-color: #2d5a45; }
+  .out.err { border-color: #5a2d2d; }
+  .out .tag { font-weight: 700; }
+  .out.ok .tag { color: var(--ok); }
+  .out.err .tag { color: var(--err); }
+  .log { position: fixed; right: 0; bottom: 0; width: min(440px, 100%); max-height: 42vh; overflow: auto;
+    background: #0b100e; border-top: 1px solid var(--line); border-left: 1px solid var(--line);
+    font: 11px/1.4 var(--mono); padding: 8px 10px; z-index: 20; }
+  .log h4 { margin: 0 0 6px; font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+  .log .line { padding: 1px 0; border-bottom: 1px dotted #1a221d; }
+  .log .line.err { color: var(--err); } .log .line.ok { color: var(--ok); }
+  .muted { color: var(--muted); } .hidden { display: none !important; }
+  code { background: #0c1210; padding: 1px 5px; border-radius: 4px; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>Loroco</span> Playground</h1>
+  <div class="status">
+    <div><span id="dot" class="dot"></span><span id="provName">detecting provider…</span></div>
+    <div id="provMeta"></div>
+    <div>account: <b id="acct">—</b> · chain: <b id="chain">—</b></div>
+  </div>
+  <div class="toolbar">
+    <button class="primary" id="btnConnect">Connect</button>
+    <button id="btnAccounts">requestAccounts</button>
+    <button class="go" id="btnAutofill">🪄 Autofill from wallet</button>
+    <button class="go" id="btnRunReads">▶ Run all reads</button>
+    <button id="btnClearLog">Clear log</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="filterbar">
+    <input id="filter" placeholder="Filter methods… (e.g. offer, nft, getCats)" />
+    <label class="muted"><input type="checkbox" id="hideStubs" /> hide stubs</label>
+    <span class="muted" id="count"></span>
+  </div>
+  <div id="ctxPanel"></div>
+  <div id="cards"></div>
+</div>
+
+<div class="log">
+  <h4><span>activity log</span><span id="logCount">0</span></h4>
+  <div id="logBody"></div>
+</div>
+
+<script>
+// ── Method catalog — mirrors packages/goby-provider/src/types.ts (ChiaMethodMap)
+// and the approval classes in permissions.ts. Each entry:
+//   { name, group, kind: 'read'|'approval'|'stub', desc, params }
+// `params` is the default request body (editable JSON in the UI).
+const M = (name, group, kind, desc, params) => ({ name, group, kind, desc, params });
+
+// Sentinels — "🪄 Autofill from wallet" connects, runs the read chain and
+// substitutes these with real values from the wallet (or a well-formed
+// fallback when the wallet doesn't hold that asset, so the call still
+// returns a meaningful result instead of an invalid-param error).
+//   $ADDRESS        own receive address
+//   $PUBKEY         first derived public key
+//   $XCH_COIN_ID    first unspent XCH coin id
+//   $CAT_ASSET_ID   first owned CAT asset id, else an example mainnet CAT
+//   $CAT_COIN_ID    first owned CAT coin id, else zero32
+//   $NFT_LAUNCHER   first owned NFT launcher id, else zero32
+//   $OFFER_ID       first tracked offer id, else zero32
+//   $DID_COIN_ID    first owned DID coin id, else zero32
+//   $COLLECTION_ID  first collection id, else zero32
+
+const METHODS = [
+  // ── Connection & meta ──────────────────────────────────────────────
+  M("chainId", "Connection & meta", "read", "Active network id (mainnet / testnet11).", null),
+  M("connect", "Connection & meta", "approval", "Request connection grant (opens approval popup).", { eager: false }),
+  M("accounts", "Connection & meta", "read", "Connected addresses WITHOUT prompting (4900 if not connected).", null),
+  M("requestAccounts", "Connection & meta", "approval", "connect + accounts in one call. Prompts if not connected.", null),
+  M("getAddress", "Connection & meta", "read", "Wallet's primary receive address (Sage WC2).", {}),
+  M("walletSwitchChain", "Connection & meta", "approval", "Ask the wallet to switch network.", { chainId: "mainnet" }),
+  M("walletWatchAsset", "Connection & meta", "approval", "Track a CAT in the wallet UI.", { type: "CAT", options: { assetId: "$CAT_ASSET_ID", symbol: "SBX" } }),
+
+  // ── Keys & derivations ─────────────────────────────────────────────
+  M("getPublicKeys", "Keys & derivations", "read", "Derived public keys (CHIP-0002).", { limit: 5, offset: 0, hardened: false }),
+  M("getDerivations", "Keys & derivations", "read", "Derived address rows (index/pk/address/ph).", { offset: 0, limit: 5, hardened: false }),
+
+  // ── Coins (read) ────────────────────────────────────────────────────
+  M("getAssetBalance", "Coins (read)", "read", "Confirmed/spendable balance for an asset (null assetId = XCH).", { type: null, assetId: null }),
+  M("getAssetCoins", "Coins (read)", "read", "Spendable coins of an asset type (CHIP-0002).", { type: null, assetId: null, limit: 10 }),
+  M("getCoins", "Coins (read)", "read", "Flat coin view from the coin-store; includeSpent optional.", { type: "xch", limit: 10, includeSpent: false }),
+  M("getCoinsByIds", "Coins (read)", "read", "Resolve coins by coin_id.", { coinIds: ["$XCH_COIN_ID"] }),
+  M("filterUnlockedCoins", "Coins (read)", "read", "Filter coin names to the ones currently unlocked.", { coinNames: ["$XCH_COIN_ID"] }),
+  M("isAssetOwned", "Coins (read)", "read", "Does the wallet own ≥1 unspent coin of this asset?", { type: "cat", assetId: "$CAT_ASSET_ID" }),
+
+  // ── CATs / tokens ───────────────────────────────────────────────────
+  M("getCats", "CATs / tokens", "read", "Owned CAT assets (asset_id + totals).", { limit: 20, offset: 0 }),
+  M("getAllCats", "CATs / tokens", "read", "Alias of getCats (Sage WC2 name).", { limit: 20, offset: 0 }),
+  M("getToken", "CATs / tokens", "read", "Single CAT by asset_id (null if untracked).", { assetId: "$CAT_ASSET_ID" }),
+
+  // ── NFTs ────────────────────────────────────────────────────────────
+  M("getNFTs", "NFTs", "read", "Owned NFTs, paginated.", { limit: 10, offset: 0 }),
+  M("getNFTInfo", "NFTs", "read", "Resolve one NFT by launcherId or coinId.", { launcherId: "$NFT_LAUNCHER" }),
+
+  // ── DIDs / collections (Fase-3 stubs) ───────────────────────────────
+  M("getDids", "DIDs / collections", "read", "DIDs you minted via createDid (coinId + derivationIndex). Full chain sync is Fase 3.", { limit: 10, offset: 0 }),
+  M("getNftCollections", "DIDs / collections", "stub", "Collections from minter DIDs (stub).", { limit: 10, offset: 0 }),
+  M("getNftCollection", "DIDs / collections", "stub", "Single collection (null until Fase 3).", { collectionId: "$COLLECTION_ID" }),
+  M("getMinterDidIds", "DIDs / collections", "stub", "Minter DIDs across NFTs (stub).", { limit: 10, offset: 0 }),
+
+  // ── Transactions ────────────────────────────────────────────────────
+  M("getTransactions", "Transactions", "read", "Flat tx history (incoming/outgoing).", { limit: 20, offset: 0, pendingOnly: false }),
+  M("getPendingTransactions", "Transactions", "read", "Pending txs only.", null),
+
+  // ── Offers (read) ───────────────────────────────────────────────────
+  M("getOffers", "Offers (read)", "read", "Offers persisted after create/take.", { limit: 20, offset: 0, includeCancelled: true }),
+  M("getOffer", "Offers (read)", "read", "Single offer by id.", { id: "$OFFER_ID" }),
+
+  // ── Signing (approval) ──────────────────────────────────────────────
+  M("signMessage", "Signing", "approval", "Sign a hex message with a derived key.", { message: "0x48656c6c6f", publicKey: "$PUBKEY" }),
+  M("signMessageByAddress", "Signing", "approval", "Chia Signed Message by address.", { message: "0x48656c6c6f", address: "$ADDRESS" }),
+  M("signCoinSpends", "Signing", "approval", "BLS-sign coin spends. ⚠ blind-sign surface.", { coinSpends: [], partialSign: false }),
+
+  // ── Transfers (approval, broadcasts) ────────────────────────────────
+  // Defaults are SELF-SENDS (recipient = your own address, tiny amount) so
+  // approving one is harmless — funds return to the wallet.
+  M("transfer", "Transfers", "approval", "Send an asset to one recipient (to/address). Default: 1 mojo self-send.", { to: "$ADDRESS", amount: "1", fee: "0" }),
+  M("bulkSendXch", "Transfers", "approval", "Send XCH to N recipients in one bundle.", { outputs: [{ address: "$ADDRESS", amount: "1" }], fee: "0" }),
+  M("bulkSendCat", "Transfers", "approval", "Send one CAT to N recipients.", { assetId: "$CAT_ASSET_ID", outputs: [{ address: "$ADDRESS", amount: "1" }], fee: "0" }),
+  M("multiSend", "Transfers", "approval", "Atomic XCH + one CAT to many recipients.", { xchOutputs: [{ address: "$ADDRESS", amount: "1" }], fee: "0" }),
+  M("combine", "Transfers", "popup", "Popup-only by design — returns 4004 to dApps. Consolidate XCH coins (only the wallet UI can call it).", { maxInputs: 10, fee: "0" }),
+  M("split", "Transfers", "popup", "Popup-only by design — returns 4004 to dApps. Split a large XCH coin (wallet UI only).", { parts: 2, fee: "0" }),
+  M("sendTransaction", "Transfers", "approval", "Broadcast a pre-built SpendBundle (paste your own).", { spendBundle: { coin_spends: [], aggregated_signature: "0xc0c0..." } }),
+
+  // ── Offers (approval) ───────────────────────────────────────────────
+  M("createOffer", "Offers", "approval", "Create an offer: give 1 XCH mojo, request 1 mojo of a CAT.", { offerAssets: [{ assetId: "", amount: "1" }], requestAssets: [{ assetId: "$CAT_ASSET_ID", amount: "1" }], fee: "0" }),
+  M("takeOffer", "Offers", "approval", "Take an offer string (paste a real offer1… from dexie).", { offer: "offer1...", fee: "0" }),
+  M("cancelOffer", "Offers", "approval", "Cancel a wallet offer (secure=on-chain spend).", { id: "$OFFER_ID", secure: true, fee: "0" }),
+
+  // ── Issuance / DIDs / NFTs (approval) ───────────────────────────────
+  M("issueCat", "Issuance", "approval", "Mint a new single-issuance CAT to yourself.", { recipientAddress: "$ADDRESS", amount: "1000", fee: "0" }),
+  M("createDid", "Issuance", "approval", "Create a new DID. After it confirms (~1 min) re-Autofill, then it appears in getDids and transferDid/normalizeDids/bulkMintNfts can use it.", { fee: "0" }),
+  M("addNftUri", "Issuance", "approval", "Append a URI to an NFT's metadata list (needs an owned NFT).", { launcherId: "$NFT_LAUNCHER", uriKind: "data", uri: "https://example.com/x.png", fee: "0" }),
+  M("transferDid", "Issuance", "approval", "Transfer a DID. Autofills from a DID you minted (createDid → getDids).", { didCoinId: "$DID_COIN_ID", didDerivationIndex: "$DID_DERIV", recipientAddress: "$ADDRESS", fee: "0" }),
+  M("normalizeDids", "Issuance", "popup", "Popup-only by design — returns 4004 to dApps. Reset DIDs to the simple profile (wallet UI only).", { didCoinIds: ["$DID_COIN_ID"], didDerivationIndices: ["$DID_DERIV"], fee: "0" }),
+  M("bulkMintNfts", "Issuance", "approval", "Bulk-mint NFTs against a DID you minted (createDid first).", { did: "$DID_ADDR", didCoinId: "$DID_COIN_ID", didDerivationIndex: "$DID_DERIV", nfts: [{ dataUris: ["https://example.com/x.png"], dataHash: "0x0000000000000000000000000000000000000000000000000000000000000000", editionNumber: 1, editionTotal: 1 }] }),
+];
+
+// Example mainnet CAT (Spacebucks) — used as a well-formed fallback when the
+// wallet holds no CAT, so getToken/isAssetOwned/getAssetBalance return a real
+// "not owned / null / zero" answer instead of a param error.
+const EXAMPLE_CAT = "0xa628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+const ZERO32 = "0x" + "00".repeat(32);
+const ctxVals = {
+  $ADDRESS: "xch1...", $PUBKEY: "0x" + "00".repeat(48),
+  $XCH_COIN_ID: ZERO32, $CAT_ASSET_ID: EXAMPLE_CAT, $CAT_COIN_ID: ZERO32,
+  $NFT_LAUNCHER: ZERO32, $OFFER_ID: ZERO32, $DID_COIN_ID: ZERO32, $COLLECTION_ID: ZERO32,
+  $DID_DERIV: 0, $DID_ADDR: "did:chia1...",
+};
+const byName = Object.fromEntries(METHODS.map((m) => [m.name, m]));
+
+// Deep-substitute sentinel strings ($ADDRESS, …) with resolved ctxVals.
+function substitute(v) {
+  if (typeof v === "string") return Object.prototype.hasOwnProperty.call(ctxVals, v) ? ctxVals[v] : v;
+  if (Array.isArray(v)) return v.map(substitute);
+  if (v && typeof v === "object") { const o = {}; for (const k in v) o[k] = substitute(v[k]); return o; }
+  return v;
+}
+
+// ── provider plumbing ─────────────────────────────────────────────────
+let provider = null;
+const $ = (id) => document.getElementById(id);
+let logN = 0;
+function logLine(msg, cls) {
+  logN++; $("logCount").textContent = logN;
+  const d = document.createElement("div");
+  d.className = "line" + (cls ? " " + cls : "");
+  d.textContent = msg;
+  $("logBody").prepend(d);
+}
+function detectProvider() {
+  const p = window.loroco || window.chia || window.ozone || null;
+  if (p && p === provider) return true;
+  if (p) {
+    provider = p;
+    $("dot").classList.add("up");
+    $("provName").textContent = (p.isLoroco ? "window.loroco" : p.isGoby ? "window.chia" : "provider") + " connected";
+    $("provMeta").innerHTML = `name <b>${p.name || "?"}</b> · v <b>${p.version || "?"}</b> · isGoby:${!!p.isGoby} isLoroco:${!!p.isLoroco}`;
+    logLine("provider detected: " + (p.name || "?") + " v" + (p.version || "?"), "ok");
+    return true;
+  }
+  return false;
+}
+async function call(method, params) {
+  if (!detectProvider()) throw new Error("no provider on window");
+  const args = { method };
+  if (params !== null && params !== undefined) args.params = params;
+  return provider.request(args);
+}
+
+// ── render cards ───────────────────────────────────────────────────────
+function renderCards() {
+  const host = $("cards");
+  host.innerHTML = "";
+  const groups = [...new Set(METHODS.map((m) => m.group))];
+  let shown = 0;
+  for (const g of groups) {
+    const inGroup = METHODS.filter((m) => m.group === g);
+    const gh = document.createElement("div"); gh.className = "group"; gh.textContent = g;
+    const grid = document.createElement("div"); grid.className = "grid";
+    let any = false;
+    for (const m of inGroup) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.dataset.name = m.name.toLowerCase();
+      card.dataset.kind = m.kind;
+      const badge = m.kind === "read" ? '<span class="badge read">READ</span>'
+        : m.kind === "stub" ? '<span class="badge stub">STUB</span>'
+        : m.kind === "popup" ? '<span class="badge popup">POPUP-ONLY</span>'
+        : '<span class="badge approval">APPROVAL</span>';
+      const hasParams = m.params !== null && m.params !== undefined;
+      const paramsStr = hasParams ? JSON.stringify(substitute(m.params), null, 2) : "";
+      card.innerHTML = `
+        <h3>${m.name} ${badge}</h3>
+        <p class="desc">${m.desc}</p>
+        ${hasParams ? `<textarea spellcheck="false">${paramsStr}</textarea>` : `<div class="muted" style="font-size:12px">no params</div>`}
+        <div class="row"><button class="call">Call</button></div>
+        <div class="out"></div>`;
+      const btn = card.querySelector(".call");
+      const ta = card.querySelector("textarea");
+      const out = card.querySelector(".out");
+      btn.addEventListener("click", async () => {
+        let params = null;
+        if (hasParams) {
+          try { params = ta.value.trim() ? JSON.parse(ta.value) : undefined; }
+          catch (e) { showOut(out, false, "invalid JSON params: " + e.message); return; }
+        }
+        btn.disabled = true; btn.textContent = "…";
+        logLine("→ " + m.name);
+        try {
+          const r = await call(m.name, params);
+          showOut(out, true, r);
+          logLine("✓ " + m.name, "ok");
+          maybeCaptureState(m.name, r);
+        } catch (e) {
+          showOut(out, false, fmtErr(e));
+          logLine("✗ " + m.name + " — " + (e && (e.code ?? "") + " " + (e.message || e)), "err");
+        } finally { btn.disabled = false; btn.textContent = "Call"; }
+      });
+      grid.appendChild(card); any = true; shown++;
+    }
+    if (any) { host.appendChild(gh); host.appendChild(grid); }
+  }
+  $("count").textContent = METHODS.length + " endpoints";
+  applyFilter();
+}
+function showOut(out, ok, val) {
+  out.className = "out show " + (ok ? "ok" : "err");
+  const body = typeof val === "string" ? val : JSON.stringify(val, null, 2);
+  out.innerHTML = `<span class="tag">${ok ? "✓ result" : "✗ error"}</span>\n` + escapeHtml(body);
+}
+function fmtErr(e) {
+  if (e && typeof e === "object") return `code ${e.code ?? "?"}: ${e.message ?? e}`;
+  return String(e);
+}
+function escapeHtml(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+// Auto-capture useful values so the user doesn't retype addresses.
+function maybeCaptureState(name, r) {
+  if (name === "chainId" && typeof r === "string") $("chain").textContent = r;
+  if ((name === "accounts" || name === "requestAccounts") && Array.isArray(r) && r[0]) $("acct").textContent = r[0];
+  if (name === "getAddress" && r && r.address) $("acct").textContent = r.address;
+  if (name === "connect") logLine("connect → " + JSON.stringify(r), "ok");
+}
+
+// ── filter ─────────────────────────────────────────────────────────────
+function applyFilter() {
+  const q = $("filter").value.trim().toLowerCase();
+  const hideStubs = $("hideStubs").checked;
+  document.querySelectorAll(".card").forEach((c) => {
+    const matchQ = !q || c.dataset.name.includes(q) || c.querySelector(".desc").textContent.toLowerCase().includes(q);
+    const matchStub = !(hideStubs && c.dataset.kind === "stub");
+    c.classList.toggle("hidden", !(matchQ && matchStub));
+  });
+  document.querySelectorAll(".group").forEach((g) => {
+    let n = g.nextElementSibling; let vis = false;
+    if (n) n.querySelectorAll(".card").forEach((c) => { if (!c.classList.contains("hidden")) vis = true; });
+    g.classList.toggle("hidden", !vis);
+    if (n) n.classList.toggle("hidden", !vis);
+  });
+}
+
+// ── header actions ─────────────────────────────────────────────────────
+$("btnConnect").addEventListener("click", async () => {
+  logLine("→ connect");
+  try { const r = await call("connect", { eager: false }); logLine("✓ connect → " + JSON.stringify(r), "ok"); await refreshIdentity(); }
+  catch (e) { logLine("✗ connect — " + fmtErr(e), "err"); }
+});
+$("btnAccounts").addEventListener("click", async () => {
+  logLine("→ requestAccounts");
+  try { const r = await call("requestAccounts"); maybeCaptureState("requestAccounts", r); logLine("✓ accounts → " + JSON.stringify(r), "ok"); }
+  catch (e) { logLine("✗ requestAccounts — " + fmtErr(e), "err"); }
+});
+$("btnClearLog").addEventListener("click", () => { $("logBody").innerHTML = ""; logN = 0; $("logCount").textContent = 0; });
+$("filter").addEventListener("input", applyFilter);
+$("hideStubs").addEventListener("change", applyFilter);
+
+async function refreshIdentity() {
+  try { $("chain").textContent = await call("chainId"); } catch {}
+  try { const a = await call("accounts"); if (Array.isArray(a) && a[0]) $("acct").textContent = a[0]; } catch {}
+}
+
+let autofilled = false;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sentinelsOf = (params) => [...new Set((JSON.stringify(params).match(/\$[A-Z_]+/g) || []))];
+
+// Why a card may not work even after autofill (the sentinel had no real value).
+const SENTINEL_HELP = {
+  $CAT_ASSET_ID: "wallet holds no CAT — using an example id, so this returns empty/null",
+  $CAT_COIN_ID: "wallet holds no CAT coin",
+  $NFT_LAUNCHER: "wallet holds no NFT",
+  $OFFER_ID: "no offer tracked yet — create one with createOffer first",
+  $DID_COIN_ID: "no DID minted yet — run createDid first, then re-autofill",
+  $DID_ADDR: "no DID minted yet — run createDid first, then re-autofill",
+  $DID_DERIV: "no DID minted yet — run createDid first, then re-autofill",
+  $COLLECTION_ID: "no NFT collections (Fase 3)",
+};
+
+// Connect, run the read chain (waiting for CAT sync), and resolve every
+// sentinel from live wallet data. Then rewrite + annotate each card.
+async function doAutofill() {
+  logLine("🪄 autofill: connecting + reading wallet…");
+  const safe = async (m, p) => { try { return await call(m, p); } catch (e) { logLine("  (autofill) " + m + " — " + fmtErr(e), "err"); return null; } };
+  await safe("requestAccounts");           // ensures connected (prompts once)
+  await refreshIdentity();
+  const addr = (await safe("getAddress"))?.address || (await safe("accounts"))?.[0];
+  const pks = await safe("getPublicKeys", { limit: 1, offset: 0, hardened: false });
+  const xch = await safe("getCoins", { type: "xch", limit: 1, includeSpent: false });
+  // CAT/NFT sync can lag a few seconds after unlock — poll before giving up.
+  let cats = await safe("getCats", { limit: 5, offset: 0 }) || [];
+  if (!cats.length) {
+    logLine("  waiting for CAT/NFT sync…");
+    for (let i = 0; i < 20 && !cats.length; i++) { await sleep(1500); cats = await safe("getCats", { limit: 5, offset: 0 }) || []; }
+  }
+  const catCoins = cats[0]?.assetId ? await safe("getCoins", { type: "cat", assetId: cats[0].assetId, limit: 1 }) : null;
+  const nftsRaw = await safe("getNFTs", { limit: 1, offset: 0 });
+  const nfts = nftsRaw?.nfts || nftsRaw || [];
+  const offers = await safe("getOffers", { limit: 1, offset: 0, includeCancelled: true });
+  const dids = await safe("getDids", { limit: 1 });
+
+  const resolved = {};
+  if (addr) { ctxVals.$ADDRESS = addr; resolved.$ADDRESS = true; }
+  if (pks?.[0]) { ctxVals.$PUBKEY = pks[0]; resolved.$PUBKEY = true; }
+  if (xch?.[0]?.coinId) { ctxVals.$XCH_COIN_ID = xch[0].coinId; resolved.$XCH_COIN_ID = true; }
+  resolved.$CAT_ASSET_ID = !!cats[0]?.assetId;  if (cats[0]?.assetId) ctxVals.$CAT_ASSET_ID = cats[0].assetId;  // else keep EXAMPLE_CAT
+  resolved.$CAT_COIN_ID = !!catCoins?.[0]?.coinId; if (catCoins?.[0]?.coinId) ctxVals.$CAT_COIN_ID = catCoins[0].coinId;
+  resolved.$NFT_LAUNCHER = !!nfts[0]; if (nfts[0]) ctxVals.$NFT_LAUNCHER = nfts[0].launcher_id || nfts[0].launcherId;
+  resolved.$OFFER_ID = !!offers?.[0]?.id; if (offers?.[0]?.id) ctxVals.$OFFER_ID = offers[0].id;
+  const did0 = dids?.[0];
+  resolved.$DID_COIN_ID = !!did0?.coinId; if (did0?.coinId) ctxVals.$DID_COIN_ID = did0.coinId;
+  resolved.$DID_ADDR = !!did0?.address; if (did0?.address) ctxVals.$DID_ADDR = did0.address;
+  resolved.$DID_DERIV = did0?.derivationIndex != null; if (did0?.derivationIndex != null) ctxVals.$DID_DERIV = did0.derivationIndex;
+  resolved.$COLLECTION_ID = false;
+
+  applyAutofill();
+  annotateCards(resolved);
+  showContext(resolved, { cats: cats.length, nfts: nfts.length, offers: offers?.length || 0, dids: dids?.length || 0 });
+  autofilled = true;
+  logLine(`🪄 autofill done — ${cats.length} CAT, ${nfts.length} NFT, ${offers?.length || 0} offer, ${dids?.length || 0} DID`, "ok");
+}
+
+// Add a per-card warning when it relies on a sentinel that didn't resolve to
+// a real wallet value (so a red/empty result there is expected, not a bug).
+function annotateCards(resolved) {
+  for (const m of METHODS) {
+    const card = document.querySelector(`.card[data-name="${m.name.toLowerCase()}"]`);
+    if (!card) continue;
+    let warn = card.querySelector(".warn");
+    const unmet = m.params == null ? [] : sentinelsOf(m.params).filter((s) => resolved[s] === false && SENTINEL_HELP[s]);
+    if (unmet.length) {
+      if (!warn) { warn = document.createElement("div"); warn.className = "warn"; card.querySelector(".desc").after(warn); }
+      warn.textContent = "⚠ " + unmet.map((s) => SENTINEL_HELP[s]).join("; ");
+    } else if (warn) warn.remove();
+  }
+}
+
+function showContext(resolved, counts) {
+  const p = $("ctxPanel");
+  const chip = (k, label) => `<span class="cchip ${resolved[k] ? "ok" : "no"}">${label}: ${resolved[k] ? "✓" : "—"}</span>`;
+  p.innerHTML =
+    `<b>wallet context</b> · ${counts.cats} CAT · ${counts.nfts} NFT · ${counts.offers} offer · ${counts.dids} DID &nbsp; ` +
+    chip("$ADDRESS", "addr") + chip("$PUBKEY", "pubkey") + chip("$XCH_COIN_ID", "xchCoin") +
+    chip("$CAT_ASSET_ID", "cat") + chip("$NFT_LAUNCHER", "nft") + chip("$OFFER_ID", "offer") + chip("$DID_COIN_ID", "did");
+  p.classList.add("show");
+}
+$("btnAutofill").addEventListener("click", async () => {
+  const btn = $("btnAutofill"); btn.disabled = true; const orig = btn.textContent; btn.textContent = "🪄 …";
+  try { await doAutofill(); } catch (e) { logLine("🪄 autofill failed — " + fmtErr(e), "err"); }
+  finally { btn.disabled = false; btn.textContent = orig; }
+});
+
+// Rewrite every card's textarea from the catalog default, substituting the
+// freshly-resolved sentinels.
+function applyAutofill() {
+  for (const m of METHODS) {
+    if (m.params == null) continue;
+    const card = document.querySelector(`.card[data-name="${m.name.toLowerCase()}"]`);
+    const ta = card && card.querySelector("textarea");
+    if (ta) ta.value = JSON.stringify(substitute(m.params), null, 2);
+  }
+}
+
+// Run every READ/STUB endpoint in sequence — quick "does it all respond" pass.
+// Autofills first so param-taking reads get real values, then reads each
+// card's textarea (respecting autofill + any manual edits).
+$("btnRunReads").addEventListener("click", async () => {
+  const btn = $("btnRunReads"); btn.disabled = true; const orig = btn.textContent; btn.textContent = "▶ …";
+  try {
+    if (!autofilled) { try { await doAutofill(); } catch (e) { logLine("autofill skipped — " + fmtErr(e), "err"); } }
+    const reads = METHODS.filter((m) => m.kind === "read" || m.kind === "stub");
+    logLine("▶ running " + reads.length + " read endpoints…");
+    let ok = 0, fail = 0;
+    for (const m of reads) {
+      const card = document.querySelector(`.card[data-name="${m.name.toLowerCase()}"]`);
+      const ta = card && card.querySelector("textarea");
+      let params;
+      if (m.params == null) params = undefined;
+      else { try { params = ta && ta.value.trim() ? JSON.parse(ta.value) : substitute(m.params); }
+             catch { params = substitute(m.params); } }
+      try {
+        const r = await call(m.name, params);
+        ok++; logLine("  ✓ " + m.name, "ok");
+        if (card) showOut(card.querySelector(".out"), true, r);
+      } catch (e) {
+        fail++; logLine("  ✗ " + m.name + " — " + fmtErr(e), "err");
+        if (card) showOut(card.querySelector(".out"), false, fmtErr(e));
+      }
+    }
+    logLine(`▶ reads done — ${ok} ok / ${fail} fail`, fail ? "err" : "ok");
+  } finally { btn.disabled = false; btn.textContent = orig; }
+});
+
+// ── boot ────────────────────────────────────────────────────────────────
+renderCards();
+let tries = 0;
+const poll = setInterval(() => {
+  if (detectProvider() || ++tries > 40) { clearInterval(poll); refreshIdentity(); }
+}, 150);
+if (!detectProvider()) logLine("waiting for window.loroco …");
+</script>
+</body>
+</html>

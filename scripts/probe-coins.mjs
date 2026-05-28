@@ -1,5 +1,5 @@
 import { chromium } from "playwright";
-const EXT = "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+const EXT = "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 const ctx = await chromium.launchPersistentContext("/tmp/Loroco-Manual", {
   headless: true, channel: "chromium",
   args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, "--no-first-run"]

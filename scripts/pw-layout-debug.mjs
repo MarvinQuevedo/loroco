@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 import { setTimeout as wait } from "node:timers/promises";
 
 const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+  "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 const USER_DATA = "/tmp/Loroco-PW-Debug";
 const MNEMONIC =
   "charge day cloth frame purpose lake method segment fat gadget regret open better rent visual picnic crater degree budget satoshi shop maple depart host";

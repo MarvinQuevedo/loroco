@@ -5,7 +5,7 @@
 import { chromium } from "playwright";
 
 const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+  "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 const USER_DATA = "/tmp/Loroco-Manual";
 
 const ctx = await chromium.launchPersistentContext(USER_DATA, {

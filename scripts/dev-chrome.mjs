@@ -11,9 +11,11 @@
 
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
 
-const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const EXT_PATH = join(repoRoot, "packages/extension/.output/chrome-mv3");
 
 const USER_DATA = process.env.PROFILE ?? "/Users/marvin/Library/Application Support/LorocoManual";
 

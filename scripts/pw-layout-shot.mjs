@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 import { setTimeout as wait } from "node:timers/promises";
 
 const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+  "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 const USER_DATA = "/tmp/Loroco-PW-Layout";
 const SHOT_DIR = "/tmp/loroco-pw-layout";
 const MNEMONIC =

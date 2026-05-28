@@ -22,7 +22,7 @@ function randomBlsSk() {
 }
 
 const EXT_PATH =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+  "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 const USER_DATA = "/tmp/Ozone-PW-Multi";
 const SHOT_DIR = "/tmp/ozone-pw-multi";
 const MNEMONIC_24 =

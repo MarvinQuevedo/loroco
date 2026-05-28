@@ -14,7 +14,7 @@
 import { chromium } from "playwright";
 
 const EXT =
-  "/Users/marvin/Projects/Ozone/sage-web/ozone-web-extension/packages/extension/.output/chrome-mv3";
+  "/Users/marvin/Projects/Ozone/loroco/packages/extension/.output/chrome-mv3";
 
 // Connect to the SAME Chromium instance already running (via the user-data-dir).
 // The browser MUST already be open from pw-manual.mjs.
