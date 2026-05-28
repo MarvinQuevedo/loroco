@@ -46,6 +46,7 @@ import {
   writeCoinStore,
 } from "./coin-store.js";
 import { callEngine } from "./engine.js";
+import { resolveCatMetadata } from "./dexie.js";
 import { grantConnection, isConnected, POPUP_ONLY_METHODS } from "./permissions.js";
 
 /** How many derived XCH addresses we expose to dApps via `accounts`. */
@@ -1696,7 +1697,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     const offset = (p?.offset ?? 0) | 0;
     const store = await readCoinStore(fp);
     const list = collectCatAssetViews(store);
-    return list.slice(offset, offset + limit);
+    return enrichCatViews(list.slice(offset, offset + limit));
   },
 
   async getAllCats(_origin, params) {
@@ -1707,7 +1708,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     const offset = (p?.offset ?? 0) | 0;
     const store = await readCoinStore(fp);
     const list = collectCatAssetViews(store);
-    return list.slice(offset, offset + limit);
+    return enrichCatViews(list.slice(offset, offset + limit));
   },
 
   async getToken(_origin, params) {
@@ -1718,7 +1719,9 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     const store = await readCoinStore(fp);
     const targetId = strip0x(p.assetId);
     const cat = (store.cats ?? {})[with0x(targetId)] ?? (store.cats ?? {})[targetId];
-    return cat ? catAssetToView(targetId, cat) : null;
+    if (!cat) return null;
+    const [enriched] = await enrichCatViews([catAssetToView(targetId, cat)]);
+    return enriched ?? null;
   },
 
   async getDerivations(_origin, params) {
@@ -2615,6 +2618,31 @@ function collectCoinViews(
     }
   }
   return out;
+}
+
+/**
+ * Fill name/symbol/iconUrl on CAT views from the Dexie metadata cache (same
+ * source the popup uses). Best-effort: network failures leave the nulls
+ * intact. resolveCatMetadata keys its result by raw / normalized / 0x forms,
+ * so a single lookup covers all id shapes.
+ */
+async function enrichCatViews(views: CatAssetView[]): Promise<CatAssetView[]> {
+  if (views.length === 0) return views;
+  try {
+    const meta = await resolveCatMetadata(views.map((v) => strip0x(v.assetId)));
+    return views.map((v) => {
+      const m = meta[strip0x(v.assetId)] ?? meta[v.assetId];
+      if (!m) return v;
+      return {
+        ...v,
+        symbol: m.code ?? v.symbol,
+        name: m.name ?? v.name,
+        iconUrl: m.image_url ?? v.iconUrl,
+      };
+    });
+  } catch {
+    return views;
+  }
 }
 
 function collectCatAssetViews(
