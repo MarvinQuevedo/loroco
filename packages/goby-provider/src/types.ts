@@ -416,7 +416,12 @@ export interface ChiaMethodMap {
     params: {
       fee?: Amount;
     };
-    result: { id: Hex; didId: Hex };
+    /**
+     * `didCoinId` + `didDerivationIndex` are surfaced so the caller can
+     * immediately drive transferDid / normalizeDids / bulkMintNfts against the
+     * fresh DID without a separate getDids round-trip.
+     */
+    result: { id: Hex; didId: Hex; didCoinId: Hex; didDerivationIndex: number };
   };
 
   /**
@@ -558,6 +563,12 @@ export interface DidInfo {
   address: string;
   /** Off-chain display name from the DID's metadata, when present. */
   name: string | null;
+  /**
+   * Derivation index of the wallet key that owns the DID. Present for DIDs
+   * minted by this wallet (createDid) so the caller can pass it straight to
+   * transferDid / normalizeDids / bulkMintNfts.
+   */
+  derivationIndex?: number;
 }
 
 export interface NftCollectionInfo {

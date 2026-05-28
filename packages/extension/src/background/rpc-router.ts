@@ -205,6 +205,9 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
   "transferDid",
   "normalizeDids",
   "multiSend",
+  // bulkMintNfts broadcasts a mint spend (spends the DID + XCH fee) — it MUST
+  // pop an approval like every other write. (Was missing → silent mint.)
+  "bulkMintNfts",
 ]);
 
 // ─── Method-name aliasing ────────────────────────────────────────────────
@@ -2048,7 +2051,7 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     };
   },
 
-  async createDid(_origin, params) {
+  async createDid(origin, params) {
     const fp = await loadActiveFingerprint();
     if (fp == null) throw Errors.unauthorized("No active wallet");
     const p = (params ?? {}) as ChiaMethodMap["createDid"]["params"];
@@ -2060,6 +2063,8 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       tx_id: string;
       did_id: string;
       launcher_id: string;
+      did_coin_id: string;
+      did_address: string;
       error?: string;
     }>("create_did", {
       fingerprint: fp,
@@ -2071,9 +2076,26 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
     if (res.error) throw new Error(res.error);
     markXchSpentOptimistic(input.store, [input.coinId]);
     await writeCoinStore(fp, input.store);
+    // Track the minted DID in the dedicated dids.<fp> store (NOT the coin
+    // store, which sync overwrites) so getDids / transferDid / normalizeDids
+    // can find it without a full on-chain DID sync (Fase 3). The DID is owned
+    // by the change key (change_index); its eve coin is res.did_coin_id.
+    const derivationIndex = input.coin.derivation_index;
+    const didCoinId = with0x(res.did_coin_id) as Hex;
+    await saveDid(fp, {
+      launcher_id: strip0x(res.launcher_id),
+      coin_id: strip0x(res.did_coin_id),
+      derivation_index: derivationIndex,
+      address: res.did_address ?? "",
+      origin,
+      created_at: Date.now(),
+      name: null,
+    });
     return {
       id: with0x(res.tx_id) as Hex,
       didId: with0x(res.did_id) as Hex,
+      didCoinId,
+      didDerivationIndex: derivationIndex,
     };
   },
 
@@ -2404,8 +2426,26 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
   // collections on connect render gracefully. Real implementations land
   // when JS-side DID sync is wired.
 
-  async getDids() {
-    return [] as ChiaMethodMap["getDids"]["result"];
+  // Returns DIDs this wallet MINTED (via createDid), from the local dids
+  // store. Not a full chain sync — DIDs created elsewhere or imported won't
+  // appear until Fase 3 (did_scan_hints/did_parse_candidates). `coinId` is the
+  // eve coin; it's accurate until the DID is first spent (transfer/normalize).
+  async getDids(_origin, params) {
+    const fp = await loadActiveFingerprint();
+    if (fp == null) return [] as ChiaMethodMap["getDids"]["result"];
+    const p = (params ?? {}) as { limit?: number; offset?: number };
+    const rows = (await loadDids(fp))
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(p.offset ?? 0, (p.offset ?? 0) + (p.limit ?? 50));
+    return rows.map((d) => ({
+      launcherId: with0x(d.launcher_id) as Hex,
+      coinId: with0x(d.coin_id) as Hex,
+      address: d.address,
+      name: d.name ?? null,
+      // Extra fields beyond the base DidInfo so dApps can call transferDid /
+      // normalizeDids / bulkMintNfts without recomputing them.
+      derivationIndex: d.derivation_index,
+    })) as ChiaMethodMap["getDids"]["result"];
   },
 
   async getNftCollections() {
@@ -2743,6 +2783,36 @@ async function loadOffers(fp: number): Promise<StoredOffer[]> {
   const key = `offers.${fp}`;
   const data = await chrome.storage.local.get(key);
   return ((data[key] as StoredOffer[] | undefined) ?? []).slice().reverse();
+}
+
+/**
+ * DIDs minted by this wallet. Kept in a dedicated `dids.<fp>` key — NOT in the
+ * coin store — so the periodic coin-sync (which overwrites the coin store)
+ * can't clobber it. Same pattern as `offers.<fp>`. No on-chain DID sync yet
+ * (Fase 3), so this only holds DIDs created locally via createDid.
+ */
+interface StoredDid {
+  launcher_id: string;
+  coin_id: string;
+  derivation_index: number;
+  address: string;
+  origin: string;
+  created_at: number;
+  name?: string | null;
+}
+
+async function loadDids(fp: number): Promise<StoredDid[]> {
+  const key = `dids.${fp}`;
+  const data = await chrome.storage.local.get(key);
+  return (data[key] as StoredDid[] | undefined) ?? [];
+}
+
+async function saveDid(fp: number, did: StoredDid): Promise<void> {
+  const key = `dids.${fp}`;
+  const existing = await loadDids(fp);
+  // De-dup by launcher_id (latest wins).
+  const next = [did, ...existing.filter((d) => d.launcher_id !== did.launcher_id)];
+  await chrome.storage.local.set({ [key]: next });
 }
 
 function offerToView(o: StoredOffer): OfferView {

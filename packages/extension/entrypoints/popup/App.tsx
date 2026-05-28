@@ -497,6 +497,28 @@ function approvalTitle(method: string): string {
       return "Switch network";
     case "walletWatchAsset":
       return "Add custom token";
+    case "bulkSendXch":
+      return "Send XCH to many";
+    case "bulkSendCat":
+      return "Send token to many";
+    case "multiSend":
+      return "Send to many (atomic)";
+    case "combine":
+      return "Combine coins";
+    case "split":
+      return "Split coin";
+    case "issueCat":
+      return "Mint new token (CAT)";
+    case "createDid":
+      return "Create DID profile";
+    case "addNftUri":
+      return "Add NFT URI";
+    case "transferDid":
+      return "Transfer DID";
+    case "normalizeDids":
+      return "Normalize DID";
+    case "bulkMintNfts":
+      return "Mint NFTs";
     default:
       return method;
   }
@@ -1075,9 +1097,286 @@ function ApprovalSummary({
       );
     }
 
+    case "bulkSendXch": {
+      const outputs = (params?.outputs as Array<{ address: string; amount: string | number }> | undefined) ?? [];
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Send XCH to {outputs.length} recipient{outputs.length === 1 ? "" : "s"} in one transaction.
+          </p>
+          <OutputsList outputs={outputs} unit="XCH" />
+          <SumRow outputs={outputs} unit="mojos" />
+          {fee != null && (
+            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "bulkSendCat": {
+      const assetId = params?.assetId;
+      const outputs = (params?.outputs as Array<{ address: string; amount: string | number }> | undefined) ?? [];
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Send a token (CAT) to {outputs.length} recipient{outputs.length === 1 ? "" : "s"}.
+          </p>
+          <div><span className="muted">asset id</span><code>{String(assetId ?? "")}</code></div>
+          <OutputsList outputs={outputs} unit="CAT mojos" />
+          <SumRow outputs={outputs} unit="CAT mojos" />
+          {fee != null && (
+            <div><span className="muted">fee (XCH mojos)</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "multiSend": {
+      const xchOutputs = (params?.xchOutputs as Array<{ address: string; amount: string | number }> | undefined) ?? [];
+      const catBlock = params?.catOutputs as { assetId?: string; outputs?: Array<{ address: string; amount: string | number }> } | undefined;
+      const catOutputs = catBlock?.outputs ?? [];
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Send to multiple recipients in ONE atomic transaction (all-or-nothing).
+          </p>
+          {xchOutputs.length > 0 && (
+            <>
+              <span className="muted small">XCH outputs</span>
+              <OutputsList outputs={xchOutputs} unit="XCH mojos" />
+            </>
+          )}
+          {catOutputs.length > 0 && (
+            <>
+              <div><span className="muted">CAT asset id</span><code>{String(catBlock?.assetId ?? "")}</code></div>
+              <OutputsList outputs={catOutputs} unit="CAT mojos" />
+            </>
+          )}
+          {xchOutputs.length === 0 && catOutputs.length === 0 && (
+            <p className="muted small">No outputs specified.</p>
+          )}
+          {fee != null && (
+            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "combine": {
+      const maxInputs = params?.maxInputs ?? 10;
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Consolidate up to <strong>{String(maxInputs)}</strong> of your own XCH coins
+            into a single coin. The result is sent back to your own wallet — no
+            funds leave it.
+          </p>
+          <div><span className="muted">max inputs</span><code>{String(maxInputs)}</code></div>
+          {fee != null && (
+            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "split": {
+      const parts = params?.parts;
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Split your largest XCH coin into <strong>{String(parts ?? "?")}</strong> equal
+            coins, sent back to your own wallet — no funds leave it.
+          </p>
+          <div><span className="muted">parts</span><code>{String(parts ?? "")}</code></div>
+          {fee != null && (
+            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "issueCat": {
+      const recipient = params?.recipientAddress;
+      const amount = params?.amount;
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Mint a <strong>brand-new token (CAT)</strong>. This creates a new,
+            unrepeatable token type and gives the whole initial supply to the
+            address below.
+          </p>
+          <div><span className="muted">supply (CAT mojos)</span><code>{String(amount ?? "")}</code></div>
+          <div><span className="muted">recipient</span><code>{String(recipient ?? "")}</code></div>
+          <p className="muted small">1 CAT = 1000 CAT mojos.</p>
+          {fee != null && (
+            <div><span className="muted">fee (XCH mojos)</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "createDid": {
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Create a new <strong>DID</strong> (a decentralized-identity profile)
+            owned by this wallet. It uses 1 mojo of your XCH plus any fee, and can
+            later own NFTs or sign as you.
+          </p>
+          {fee != null && (
+            <div><span className="muted">fee (XCH mojos)</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "addNftUri": {
+      const launcherId = params?.launcherId;
+      const coinId = params?.coinId;
+      const uriKind = params?.uriKind;
+      const uri = params?.uri;
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Append a URI to one of your NFT's metadata lists. The NFT is re-spent
+            back to you — only its metadata changes.
+          </p>
+          <div><span className="muted">NFT</span><code>{String(launcherId ?? coinId ?? "")}</code></div>
+          <div><span className="muted">list</span><code>{String(uriKind ?? "")}</code></div>
+          <div><span className="muted">uri</span><code>{String(uri ?? "")}</code></div>
+          {fee != null && (
+            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "transferDid": {
+      const recipient = params?.recipientAddress;
+      const didCoinId = params?.didCoinId;
+      const idx = params?.didDerivationIndex;
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            <strong>Transfer ownership of a DID</strong> to another address. After
+            this you will no longer control this DID.
+          </p>
+          <div><span className="muted">recipient</span><code>{String(recipient ?? "")}</code></div>
+          <div><span className="muted">DID coin id</span><code>{String(didCoinId ?? "")}</code></div>
+          <div><span className="muted">derivation index</span><code>{String(idx ?? "")}</code></div>
+          {fee != null && (
+            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "normalizeDids": {
+      const coinIds = (params?.didCoinIds as string[] | undefined) ?? [];
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Reset {coinIds.length} DID{coinIds.length === 1 ? "" : "s"} to the
+            simple profile (empty recovery list, 1 verification required). Owner
+            and metadata are unchanged.
+          </p>
+          <ul className="permission-list">
+            {coinIds.map((c, i) => (
+              <li key={i}><code>{shortHash(String(c))}</code></li>
+            ))}
+          </ul>
+          {fee != null && (
+            <div><span className="muted">fee (first tx only)</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
+    case "bulkMintNfts": {
+      const did = params?.did;
+      const nfts = (params?.nfts as Array<{ dataUris?: string[]; editionNumber?: number; editionTotal?: number }> | undefined) ?? [];
+      const fee = params?.fee;
+      return (
+        <div className="result">
+          <p className="muted small">
+            Mint <strong>{nfts.length}</strong> NFT{nfts.length === 1 ? "" : "s"} under the DID below.
+          </p>
+          <div><span className="muted">DID</span><code>{String(did ?? "")}</code></div>
+          <ul className="permission-list">
+            {nfts.map((n, i) => (
+              <li key={i}>
+                <code>
+                  #{n.editionNumber ?? i + 1}
+                  {n.editionTotal ? `/${n.editionTotal}` : ""}{" "}
+                  {n.dataUris?.[0] ? n.dataUris[0] : "(no data uri)"}
+                </code>
+              </li>
+            ))}
+          </ul>
+          {fee != null && (
+            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+          )}
+        </div>
+      );
+    }
+
     default:
       return null;
   }
+}
+
+// Shared helpers for the multi-output approval summaries above.
+function OutputsList({
+  outputs,
+  unit,
+}: {
+  outputs: Array<{ address: string; amount: string | number }>;
+  unit: string;
+}) {
+  if (outputs.length === 0) return <p className="muted small">No outputs.</p>;
+  return (
+    <ul className="permission-list">
+      {outputs.map((o, i) => (
+        <li key={i}>
+          <span>
+            <code>{String(o.amount)}</code> {unit} →{" "}
+            <code>{shortHash(String(o.address))}</code>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function SumRow({
+  outputs,
+  unit,
+}: {
+  outputs: Array<{ address: string; amount: string | number }>;
+  unit: string;
+}) {
+  let total = 0n;
+  try {
+    for (const o of outputs) total += BigInt(String(o.amount ?? "0"));
+  } catch {
+    return null;
+  }
+  return (
+    <div>
+      <span className="muted">total</span>
+      <code>{total.toString()} {unit}</code>
+    </div>
+  );
 }
 
 function LoadingScreen() {

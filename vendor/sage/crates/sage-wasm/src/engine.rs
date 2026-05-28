@@ -1543,11 +1543,21 @@ impl SageEngine {
             error = res.error;
         }
 
+        // bech32m did:chia: address for the launcher — JS has no encoder, so
+        // the engine hands it over for getDids / bulkMintNfts.
+        let did_address = Address::new(launcher_id, "did:chia".to_string())
+            .encode()
+            .map_err(|e| EngineError::Internal(format!("bech32m did: {e}")))?;
         let tx_id = bundle.name();
         Ok(serde_json::json!({
             "tx_id": format!("0x{}", hex::encode(tx_id)),
             "did_id": format!("0x{}", hex::encode(launcher_id)),
             "launcher_id": format!("0x{}", hex::encode(launcher_id)),
+            // Eve DID coin created by this spend. JS persists it so getDids /
+            // transferDid / normalizeDids can reference the DID without a full
+            // on-chain DID sync (Fase 3).
+            "did_coin_id": format!("0x{}", hex::encode(did.coin.coin_id())),
+            "did_address": did_address,
             "status": status,
             "error": error,
             "spend_bundle": {
