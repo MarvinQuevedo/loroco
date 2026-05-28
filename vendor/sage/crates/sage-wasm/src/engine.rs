@@ -36,6 +36,23 @@ fn wlog(msg: &str) {
     web_sys::console::log_1(&JsValue::from_str(msg));
 }
 
+/// Derive an intermediate wallet secret key from the master, branching on
+/// the caller-supplied derivation kind. Without this branch every send_xch
+/// / send_cat / take_offer / make_offer / transfer_nft path silently fails
+/// for coins that landed at a hardened receive address — the wallet has
+/// the coin in its store (`derive_addresses_hardened` populates the hint
+/// scan set) but can't sign it because the unhardened-derived key produces
+/// a DIFFERENT puzzle hash from the one the coin is locked at.
+///
+/// `kind` defaults to unhardened so existing JS callers (the old shape
+/// without `derivation_kind`) keep working unchanged.
+fn derive_wallet_sk(master_sk: &SecretKey, index: u32, kind: Option<&str>) -> SecretKey {
+    match kind {
+        Some("hardened") => master_to_wallet_hardened(master_sk, index),
+        _ => master_to_wallet_unhardened(master_sk, index),
+    }
+}
+
 /// Current size of the wasm linear memory, in bytes. wasm32 can only GROW —
 /// it never shrinks even after dropping allocations — so if this number
 /// climbs monotonically across chunks we have a leak (or a peak that keeps
@@ -249,6 +266,9 @@ impl SageEngine {
             #[serde(default)]
             hidden_puzzle_hash: Option<String>,
             derivation_index: u32,
+            /// "hardened" | "unhardened" (default). See `derive_wallet_sk`.
+            #[serde(default)]
+            derivation_kind: Option<String>,
             lineage_proof: LineageJson,
         }
         // Oleada-2 multi-output for CATs: each entry maps 1:1 to a CREATE_COIN
@@ -277,6 +297,12 @@ impl SageEngine {
             input_coins: Vec<InputCoinJson>,
             #[serde(default)]
             change_index: u32,
+            /// "hardened" | "unhardened" (default). Picks which derive
+            /// function to use for the change p2 inner ph. JS callers
+            /// usually reuse `input_coins[0].derivation_kind` here so
+            /// change lands at the same kind as the inputs.
+            #[serde(default)]
+            change_kind: Option<String>,
             #[serde(default)]
             endpoint: Option<String>,
             #[serde(default = "default_true_cat")]
@@ -416,16 +442,25 @@ impl SageEngine {
                 .parse()
                 .map_err(|_| EngineError::InvalidParams("lineage amount u64".to_string()))?;
 
-            // Verify we own this inner_ph at derivation_index
-            let intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+            // Verify we own this inner_ph at derivation_index. `derivation_kind`
+            // selects hardened vs unhardened — without this branch a coin
+            // received at a hardened address would fail the check below
+            // because the unhardened derivation would produce a different
+            // inner_ph than the one the coin is locked at.
+            let intermediate = derive_wallet_sk(
+                &master_sk,
+                c.derivation_index,
+                c.derivation_kind.as_deref(),
+            );
             let synthetic_sk = intermediate.derive_synthetic();
             let synthetic_pk = synthetic_sk.public_key();
             let derived_inner: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
             if derived_inner != inner_ph {
                 return Err(EngineError::InvalidParams(format!(
-                    "input inner_puzzle_hash {} doesn't match derivation_index {}",
+                    "input inner_puzzle_hash {} doesn't match derivation_index {} ({})",
                     hex::encode(inner_ph),
-                    c.derivation_index
+                    c.derivation_index,
+                    c.derivation_kind.as_deref().unwrap_or("unhardened"),
                 )));
             }
 
@@ -457,7 +492,11 @@ impl SageEngine {
         let cat_change = total_input - amount;
 
         // 2. Change p2 puzzle hash (derived from change_index)
-        let change_intermediate_sk = master_to_wallet_unhardened(&master_sk, req.change_index);
+        let change_intermediate_sk = derive_wallet_sk(
+            &master_sk,
+            req.change_index,
+            req.change_kind.as_deref(),
+        );
         let change_synthetic_pk = change_intermediate_sk.derive_synthetic().public_key();
         let change_inner_ph: Bytes32 =
             StandardArgs::curry_tree_hash(change_synthetic_pk).into();
@@ -2220,6 +2259,9 @@ impl SageEngine {
             puzzle_hash: String,
             amount: String,
             derivation_index: u32,
+            /// "hardened" | "unhardened" (default). See `derive_wallet_sk`.
+            #[serde(default)]
+            derivation_kind: Option<String>,
         }
         #[derive(Deserialize)]
         struct Req {
@@ -2229,12 +2271,21 @@ impl SageEngine {
             parent_coin_info: Option<String>,
             recipient_address: String,
             derivation_index: u32,
+            /// "hardened" | "unhardened" (default). Selects the derive
+            /// function used to verify ownership of the NFT's p2 puzzle.
+            #[serde(default)]
+            derivation_kind: Option<String>,
             #[serde(default = "default_zero_mojos_nft")]
             fee_mojos: String,
             #[serde(default)]
             fee_input_coins: Vec<FeeCoinJson>,
             #[serde(default)]
             fee_change_index: Option<u32>,
+            /// "hardened" | "unhardened" (default). Derive function for
+            /// the fee change p2. Defaults to whatever the fee_input_coins[0]
+            /// used so change goes back to a same-kind address.
+            #[serde(default)]
+            fee_change_kind: Option<String>,
             #[serde(default)]
             endpoint: Option<String>,
             #[serde(default = "default_true_nft")]
@@ -2339,16 +2390,24 @@ impl SageEngine {
             )));
         }
 
-        // 3. Verify we own the NFT's p2 inner puzzle.
+        // 3. Verify we own the NFT's p2 inner puzzle. `derivation_kind`
+        //    selects hardened vs unhardened — Sage's "use hardened paths"
+        //    setting puts NFTs at hardened addresses that the unhardened
+        //    derive would not match.
         let master_sk = self.unlocked_sk(req.fingerprint)?;
-        let our_intermediate = master_to_wallet_unhardened(&master_sk, req.derivation_index);
+        let our_intermediate = derive_wallet_sk(
+            &master_sk,
+            req.derivation_index,
+            req.derivation_kind.as_deref(),
+        );
         let our_synthetic = our_intermediate.derive_synthetic();
         let our_pk = our_synthetic.public_key();
         let our_inner_ph: Bytes32 = StandardArgs::curry_tree_hash(our_pk).into();
         if our_inner_ph != nft.info.p2_puzzle_hash {
             return Err(EngineError::InvalidParams(format!(
-                "derivation_index {} doesn't match NFT's p2_puzzle_hash {}",
+                "derivation_index {} ({}) doesn't match NFT's p2_puzzle_hash {}",
                 req.derivation_index,
+                req.derivation_kind.as_deref().unwrap_or("unhardened"),
                 hex::encode(nft.info.p2_puzzle_hash)
             )));
         }
@@ -2382,7 +2441,22 @@ impl SageEngine {
                 )));
             }
             let change_index = req.fee_change_index.unwrap_or(req.derivation_index);
-            let change_intermediate = master_to_wallet_unhardened(&master_sk, change_index);
+            // Default fee_change_kind to whatever the first fee coin used
+            // so change goes back to a same-kind address. Falls through to
+            // unhardened if neither field is set (legacy behavior).
+            let fee_change_kind_default = req
+                .fee_input_coins
+                .first()
+                .and_then(|c| c.derivation_kind.clone());
+            let fee_change_kind = req
+                .fee_change_kind
+                .clone()
+                .or(fee_change_kind_default);
+            let change_intermediate = derive_wallet_sk(
+                &master_sk,
+                change_index,
+                fee_change_kind.as_deref(),
+            );
             let change_pk = change_intermediate.derive_synthetic().public_key();
             let change_ph: Bytes32 = StandardArgs::curry_tree_hash(change_pk).into();
             let change = total_in - fee;
@@ -2393,13 +2467,19 @@ impl SageEngine {
                 let amt: u64 = c.amount.parse().unwrap();
                 let coin = Coin::new(parent, outer_ph, amt);
 
-                let fee_intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+                let fee_intermediate = derive_wallet_sk(
+                    &master_sk,
+                    c.derivation_index,
+                    c.derivation_kind.as_deref(),
+                );
                 let fee_synthetic = fee_intermediate.derive_synthetic();
                 let fee_pk = fee_synthetic.public_key();
                 let derived_ph: Bytes32 = StandardArgs::curry_tree_hash(fee_pk).into();
                 if derived_ph != outer_ph {
                     return Err(EngineError::InvalidParams(format!(
-                        "fee_input_coins[{i}] puzzle_hash doesn't match derivation_index"
+                        "fee_input_coins[{i}] puzzle_hash doesn't match derivation_index {} ({})",
+                        c.derivation_index,
+                        c.derivation_kind.as_deref().unwrap_or("unhardened"),
                     )));
                 }
 
@@ -5420,6 +5500,9 @@ impl SageEngine {
             puzzle_hash: String,
             amount: String,
             derivation_index: u32,
+            /// "hardened" | "unhardened" (default). See `derive_wallet_sk`.
+            #[serde(default)]
+            derivation_kind: Option<String>,
         }
         // Oleada-2 multi-output: each entry maps 1:1 to a CREATE_COIN on the
         // head spend. No memos here — callers that need memos use the legacy
@@ -5450,6 +5533,10 @@ impl SageEngine {
             input_coins: Option<Vec<InputCoin>>,
             #[serde(default)]
             change_index: u32,
+            /// "hardened" | "unhardened" (default). Picks the derive
+            /// function for the change p2 puzzle hash.
+            #[serde(default)]
+            change_kind: Option<String>,
             #[serde(default)]
             testnet: bool,
             #[serde(default)]
@@ -5586,17 +5673,22 @@ impl SageEngine {
             let parent = parse_bytes32(&c.parent_coin_info)?;
             let coin_ph = parse_bytes32(&c.puzzle_hash)?;
             let coin = Coin::new(parent, coin_ph, amount_u);
-            let intermediate = master_to_wallet_unhardened(&master_sk, c.derivation_index);
+            let intermediate = derive_wallet_sk(
+                &master_sk,
+                c.derivation_index,
+                c.derivation_kind.as_deref(),
+            );
             let synthetic_sk = intermediate.derive_synthetic();
             let synthetic_pk = synthetic_sk.public_key();
             let derived_ph: Bytes32 = StandardArgs::curry_tree_hash(synthetic_pk).into();
             if derived_ph != coin_ph {
                 return Err(EngineError::InvalidParams(format!(
-                    "input coin at index {} has puzzle_hash {} but derivation_index {} derives \
-                     to {}",
+                    "input coin at index {} has puzzle_hash {} but derivation_index {} ({}) \
+                     derives to {}",
                     parsed.len(),
                     hex::encode(coin_ph),
                     c.derivation_index,
+                    c.derivation_kind.as_deref().unwrap_or("unhardened"),
                     hex::encode(derived_ph)
                 )));
             }
@@ -5610,7 +5702,11 @@ impl SageEngine {
         }
         let change = total_input - needed;
 
-        let change_intermediate_sk = master_to_wallet_unhardened(&master_sk, req.change_index);
+        let change_intermediate_sk = derive_wallet_sk(
+            &master_sk,
+            req.change_index,
+            req.change_kind.as_deref(),
+        );
         let change_synthetic_pk = change_intermediate_sk.derive_synthetic().public_key();
         let change_ph: Bytes32 = StandardArgs::curry_tree_hash(change_synthetic_pk).into();
 

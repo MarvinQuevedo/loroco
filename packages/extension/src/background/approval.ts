@@ -3,16 +3,17 @@
 // When a dApp triggers a method that needs explicit user consent
 // (connect, signCoinSpends, signMessage, sendTransaction, etc.) the
 // background service worker stashes the request in a pending map and:
-//   1. Tries `chrome.action.openPopup()` so the extension popup pops over
-//      the toolbar — same UX as MetaMask. (Chrome 127+; from SW.)
-//   2. Sets a badge ("!") on the action icon so a closed popup still
-//      surfaces the pending request.
-//   3. The popup's App polls for pending requests on mount + via storage
-//      change events and renders the inline approval screen.
+//   1. Tries `chrome.action.openPopup()` so the extension popup drops
+//      out from under the toolbar icon — the standard wallet-extension
+//      placement (MetaMask, Goby). Chrome 127+; allowed from SW.
+//   2. Sets a badge so a closed popup still surfaces the pending count.
+//   3. The popup detects the pending request and renders an
+//      APPROVAL-ONLY chrome (no wallet header/tabs/home — the dApp
+//      flow never sees the wallet UI). After the user decides, the
+//      popup calls `window.close()` so the dialog dismisses itself.
 //
 // The decision is round-tripped via the existing `from: "approval"`
-// envelope so the popup-side approval UI keeps using the same API the
-// standalone `approve.html` page used.
+// envelope.
 
 import type { ChiaMethod } from "@ozone/goby-provider/types";
 
@@ -37,7 +38,6 @@ export interface ApprovalDecision {
 interface PendingEntry {
   request: PendingRequest;
   resolve: (decision: ApprovalDecision) => void;
-  windowId?: number;
 }
 
 const PENDING = new Map<string, PendingEntry>();
@@ -93,13 +93,21 @@ export function requestApproval(
     void syncPendingToStorage();
     void updateBadge();
 
-    // Best-effort: open the extension popup (Chrome 127+ allows this from a
-    // service worker). If unavailable, the badge + onClicked handler still
-    // lets the user see the pending request when they click the icon.
+    // Open a focused standalone popup window pointing at the approval-only
+    // route. `type: "popup"` strips the browser chrome and Chrome treats it
+    // as a dialog. We anchor it to the top-right of the user's current
+    // browser window — same place every other wallet extension drops its
+    // approval (right under where the toolbar icon would be), and where
+    // Loroco's own toolbar popup lives. Default `chrome.windows.create`
+    // would put it at (0,0) which feels like a runaway tab.
+    // Anchor the popup under the toolbar icon. From a SW this needs
+    // Chrome 127+; the `?.()` guards older browsers. If it fails the
+    // badge tells the user there's something pending and the manual
+    // icon click still works.
     try {
       void (chrome.action.openPopup?.() as Promise<void> | undefined)?.catch(() => {});
     } catch {
-      // ignore — falls back to badge-only
+      // ignore — badge fallback
     }
   });
 }

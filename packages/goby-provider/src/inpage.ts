@@ -217,15 +217,23 @@ const provider: ChiaWallet = {
 
 // Inject. Don't clobber an existing wallet — let the user / dApp pick.
 //
-// We expose THREE names pointing to the same provider:
-//   • window.chia   — Goby-compatible (CHIP-0002). dApps already shipping
-//     Goby integrations (dexie.space, tibetswap, …) work unchanged.
-//   • window.loroco — first-party name for forward-looking integrations
-//     that want to detect us specifically (set `isLoroco: true`).
-//   • window.ozone  — legacy alias kept for the early-access period while
-//     we transitioned the brand. Will be removed in a future release.
-if (!window.chia) {
-  Object.defineProperty(window, "chia", { value: provider, writable: false, configurable: false });
-}
+// window.loroco is ALWAYS defined — it's our first-party name and is what
+// the user has explicitly installed. The other two slots are gated by the
+// Goby-compat setting that the content script writes to <html> before we
+// run (see entrypoints/content.ts). When the user disables Goby compat:
+//   • window.chia stays free → real Goby can take it without conflict
+//   • window.ozone (legacy brand alias) is also dropped
+//
+// Reading from document.documentElement.dataset works because the content
+// script runs in ISOLATED world but the DOM is shared.
+const legacyGoby =
+  document.documentElement?.dataset.lorocoLegacyGoby === "1";
+
 Object.defineProperty(window, "loroco", { value: provider, writable: false, configurable: false });
-Object.defineProperty(window, "ozone", { value: provider, writable: false, configurable: false });
+
+if (legacyGoby) {
+  if (!window.chia) {
+    Object.defineProperty(window, "chia", { value: provider, writable: false, configurable: false });
+  }
+  Object.defineProperty(window, "ozone", { value: provider, writable: false, configurable: false });
+}

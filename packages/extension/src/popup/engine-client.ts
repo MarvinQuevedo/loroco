@@ -211,6 +211,44 @@ export async function getXchPriceUsd(): Promise<number | null> {
   return (res.value as number | null) ?? null;
 }
 
+export interface MempoolDebugEntry {
+  tx_id: string;
+  observed_at: number;
+  additions_count: number;
+  removals_count: number;
+  total_added_mojos: string;
+  total_removed_mojos: string;
+  mine: "incoming" | "outgoing" | "both" | "none" | "unknown";
+  fp: number | null;
+  matched_in_phs: string[];
+  matched_out_cat_assets: string[];
+  matched_out_xch: boolean;
+  shape: "xch" | "asset" | "mixed";
+}
+
+export interface MempoolWatchStats {
+  messages: number;
+  lastEvent: string;
+  lastSeenAt: number;
+  eventTypes: Record<string, number>;
+  msgsPerSec: number;
+  socketOpen: boolean;
+  socketState: string;
+  rawSamples: string[];
+}
+
+export interface MempoolDebugSnapshot {
+  stats: MempoolWatchStats;
+  feed: MempoolDebugEntry[];
+}
+
+export async function getMempoolDebug(): Promise<MempoolDebugSnapshot> {
+  const msg: PopupRpcMessage = { from: "popup", kind: "get-mempool-debug" };
+  const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
+  if (!res.ok) throw new Error(res.error.message);
+  return res.value as MempoolDebugSnapshot;
+}
+
 export interface ConnectionRecord {
   origin: string;
   connectedAt: number;
@@ -297,6 +335,80 @@ export async function probeSidecar(url?: string): Promise<SidecarProbe> {
   const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
   if (!res.ok) throw new Error(res.error.message);
   return res.value as SidecarProbe;
+}
+
+export interface CompatSettings {
+  legacyGoby: boolean;
+}
+
+export async function getCompatSettings(): Promise<CompatSettings> {
+  const msg: PopupRpcMessage = { from: "popup", kind: "get-compat-settings" };
+  const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
+  if (!res.ok) throw new Error(res.error.message);
+  return res.value as CompatSettings;
+}
+
+export async function setCompatSettings(
+  patch: Partial<CompatSettings>,
+): Promise<CompatSettings> {
+  const msg: PopupRpcMessage = { from: "popup", kind: "set-compat-settings", patch };
+  const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
+  if (!res.ok) throw new Error(res.error.message);
+  return res.value as CompatSettings;
+}
+
+/**
+ * Decoded view of a signCoinSpends / sendTransaction bundle: per-coin
+ * kind + outputs, plus a wallet-wide summary so the approval popup can
+ * tell the user what will actually move on chain before they sign.
+ *
+ * Outputs flagged `is_ours: true` are landing back at one of our
+ * derived puzzle hashes (change / self-transfer). `is_ours: false` is
+ * the value leaving the wallet.
+ */
+export interface CoinSpendAnalysisOutput {
+  puzzle_hash: string;
+  amount: string;
+  is_ours: boolean;
+  hint?: string | null;
+}
+
+export interface CoinSpendAnalysisItem {
+  coin_id: string;
+  kind: "xch" | "cat" | "unknown";
+  asset_id?: string | null;
+  input_amount: string;
+  input_is_ours: boolean;
+  fee_mojos: string;
+  outputs: CoinSpendAnalysisOutput[];
+}
+
+export interface CoinSpendAnalysis {
+  spends: CoinSpendAnalysisItem[];
+  summary: {
+    total_xch_out_external: string;
+    total_xch_change: string;
+    total_cat_out_by_asset: Record<string, string>;
+    total_fee_mojos: string;
+    unknown_spend_count: number;
+  };
+}
+
+export async function analyzeCoinSpends(
+  coinSpends: Array<{
+    coin: { parent_coin_info: string; puzzle_hash: string; amount: string | number };
+    puzzle_reveal: string;
+    solution: string;
+  }>,
+): Promise<CoinSpendAnalysis> {
+  const msg: PopupRpcMessage = {
+    from: "popup",
+    kind: "analyze-coin-spends",
+    coinSpends,
+  };
+  const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
+  if (!res.ok) throw new Error(res.error.message);
+  return res.value as CoinSpendAnalysis;
 }
 
 /**

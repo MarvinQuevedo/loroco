@@ -1,13 +1,39 @@
 import { defineConfig } from "wxt";
+import pkg from "./package.json" with { type: "json" };
+
+// Per-browser manifest fragments. Anything inside `firefoxOnly` ends up only
+// in firefox builds; chrome-mv3 stays untouched. WXT calls the `manifest`
+// function with the active build target so we can branch cleanly.
+const firefoxOnly = {
+  browser_specific_settings: {
+    gecko: {
+      id: "loroco@ozone.dev",
+      // 128.0 is the floor we actually run on: needed for chrome.action.openPopup
+      // (Firefox 127+) and modern chrome.storage.session quirks. AMO's
+      // data_collection_permissions field only takes effect on 140+, but Firefox
+      // <140 ignores unknown manifest keys silently.
+      strict_min_version: "128.0",
+      // Mandatory for new AMO submissions from Nov 2025. Loroco doesn't
+      // collect telemetry — declare "none" to silence the lint and reflect
+      // the truth.
+      data_collection_permissions: { required: ["none"] },
+    },
+  },
+} as const;
 
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   srcDir: ".",
   outDir: ".output",
-  manifest: {
+  // Silence WXT's AMO-data-collection warning (we declare `none` above).
+  suppressWarnings: { firefoxDataCollection: true },
+  manifest: ({ browser }) => ({
     name: "Loroco",
-    description: "Chia wallet — Goby-compatible, coinset.org-synced.",
-    version: "0.0.1",
+    description:
+      "Chia wallet for your browser. Send XCH, hold tokens and NFTs, trade with offers, and connect to Chia sites safely.",
+    // Single source of truth — `scripts/bump-version.mjs` bumps the patch
+    // segment in package.json before each build:fast / build.
+    version: pkg.version,
     manifest_version: 3,
     permissions: ["storage", "alarms", "tabs"],
     host_permissions: [
@@ -55,5 +81,6 @@ export default defineConfig({
       extension_pages:
         "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';",
     },
-  },
+    ...(browser === "firefox" ? firefoxOnly : {}),
+  }),
 });

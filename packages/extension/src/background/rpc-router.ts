@@ -50,8 +50,17 @@ import { grantConnection, isConnected, POPUP_ONLY_METHODS } from "./permissions.
 
 /** How many derived XCH addresses we expose to dApps via `accounts`. */
 const ACCOUNTS_COUNT = 5;
-/** Derivation window used to map puzzle_hash → derivation_index when picking inputs. */
-const DERIVATION_WINDOW = 50;
+/**
+ * Derivation window used to map puzzle_hash → derivation_index when picking
+ * inputs. MUST match `DERIVE_COUNT` in `coin-sync.ts` — if sync finds a coin
+ * at index N but this window is < N the coin shows up in the balance but
+ * can't be spent (engine receives an inner_ph it can't match to an index).
+ *
+ * NOTE: this only covers the *unhardened* path. Hardened coins are matched
+ * against `store.hardened_phs` which the unlock flow populates from cached
+ * `derive_addresses_hardened` results — see `pickInputDerivation` below.
+ */
+const DERIVATION_WINDOW = 200;
 
 interface StoredWalletEntry {
   fingerprint: number;
@@ -96,6 +105,38 @@ async function derivePhToIndex(count: number = DERIVATION_WINDOW): Promise<Recor
   const map: Record<string, number> = {};
   for (const a of addresses) map[a.puzzle_hash] = a.index;
   return map;
+}
+
+/**
+ * Owner lookup that merges the unhardened derivation map (live from the
+ * engine) with the cached `hardened_phs` set the unlock flow populates.
+ * Returns `{ index, kind }` for coins the wallet owns, null otherwise.
+ *
+ * Both maps store hashes 0x-prefixed historically; some legacy paths strip
+ * it. We probe both shapes per lookup to be tolerant.
+ *
+ * dApp-facing transfer handler uses this for coin selection so receivers
+ * at hardened addresses (Sage primary curve) are spendable just like
+ * unhardened ones — the engine signs with the right derive function via
+ * the `derivation_kind` field we pass through.
+ */
+function makeOwnerLookup(
+  phToIdx: Record<string, number>,
+  hardenedPhs: Record<string, number>,
+): (ph: string) => { index: number; kind: "hardened" | "unhardened" } | null {
+  const hardened: Record<string, number> = {};
+  for (const [ph, idx] of Object.entries(hardenedPhs ?? {})) {
+    hardened[ph.startsWith("0x") ? ph : `0x${ph}`] = idx;
+  }
+  return (ph: string) => {
+    const with0x = ph.startsWith("0x") ? ph : `0x${ph}`;
+    const without0x = ph.startsWith("0x") ? ph.slice(2) : ph;
+    const u = phToIdx[with0x] ?? phToIdx[without0x];
+    if (u !== undefined) return { index: u, kind: "unhardened" };
+    const h = hardened[with0x] ?? hardened[without0x];
+    if (h !== undefined) return { index: h, kind: "hardened" };
+    return null;
+  };
 }
 
 function with0x(s: string): string {
@@ -181,15 +222,16 @@ const APPROVAL_REQUIRED = new Set<ChiaMethod>([
 // method name as the 3rd argument and branch on it — so a WC2 dApp gets the
 // Sage shape and a Goby dApp gets the Loroco/Goby shape from the same handler.
 //
-// Split into two tables so the user can opt out of Goby compatibility:
-//   • BASE_ALIASES — always honoured. Canonical CHIP-0002 camelCase plus
-//     the snake_case forms Sage WC2 uses on the wire. These are how
-//     modern dApps that target Loroco directly will call us.
-//   • LEGACY_GOBY_ALIASES — only honoured when settings.legacyGoby=true.
-//     Everything namespaced `chia_*` (Goby's pre-CHIP-0002 surface) or
-//     `chip0002_*` (WC2 topic-style). In production-default mode these
-//     are rejected with MethodNotFound so Loroco doesn't silently
-//     answer for a Goby surface its user hasn't opted into.
+// One alias table. Every name the wire might carry maps to a CHIP-0002
+// canonical:
+//   • snake_case (Sage WC2 wire format)
+//   • chia_*     (Goby legacy + Sage WC2)
+//   • chip0002_* (WC2 topic-style CHIP-0002 namespace)
+//
+// All three flavours are ALWAYS honoured — they're Loroco's baseline surface
+// regardless of the `legacyGoby` compat setting. That setting now governs only
+// whether Loroco shadow-injects `window.chia` (impersonating Goby's slot); the
+// methods themselves remain reachable via `window.loroco.request()` either way.
 const BASE_ALIASES: Record<string, ChiaMethod> = {
   // snake_case Sage WC2 names that some clients send unchanged
   filter_unlocked_coins: "filterUnlockedCoins",
@@ -233,7 +275,7 @@ const BASE_ALIASES: Record<string, ChiaMethod> = {
   get_minter_did_ids: "getMinterDidIds",
 };
 
-const LEGACY_GOBY_ALIASES: Record<string, ChiaMethod> = {
+Object.assign(BASE_ALIASES, {
   // chia_* (Goby legacy + Sage WC2)
   chia_chainId: "chainId",
   chia_connect: "connect",
@@ -303,33 +345,21 @@ const LEGACY_GOBY_ALIASES: Record<string, ChiaMethod> = {
   // Sage WC2 names with different case/spelling that map to existing handlers
   chia_send: "transfer",
   chia_getNfts: "getNFTs",
-};
+});
 
 /**
- * Normalise an alias/legacy method name down to its CHIP-0002 canonical.
+ * Normalise an alias method name down to its CHIP-0002 canonical.
  *
- * When `allowLegacyGoby` is false, the `chia_*` and `chip0002_*` namespaces
- * are NOT resolved — the original name is returned so the dispatcher in
- * handleRpc surfaces MethodNotFound. snake_case names are always resolved
- * because they're Sage WC2's wire format, independent of the Goby-compat
- * decision.
+ * All known alias namespaces (snake_case, chia_*, chip0002_*) resolve
+ * unconditionally — they're Loroco's baseline surface regardless of the
+ * `legacyGoby` compat setting (which only governs whether window.chia is
+ * shadow-injected). An unknown name falls through unchanged so handleRpc
+ * surfaces MethodNotFound at dispatch.
  */
-export function canonicalizeMethod(
-  method: string,
-  allowLegacyGoby: boolean,
-): ChiaMethod {
+export function canonicalizeMethod(method: string): ChiaMethod {
   const base = BASE_ALIASES[method];
   if (base) return base;
-  if (allowLegacyGoby) {
-    const legacy = LEGACY_GOBY_ALIASES[method];
-    if (legacy) return legacy;
-  }
   return method as ChiaMethod;
-}
-
-/** True if the method name belongs to a legacy-Goby namespace we gate. */
-export function isLegacyGobyAlias(method: string): boolean {
-  return Object.hasOwn(LEGACY_GOBY_ALIASES, method);
 }
 
 type Handler<M extends ChiaMethod> = (
@@ -708,31 +738,36 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
 
     const phToIdx = await derivePhToIndex();
     const store = await readCoinStore(fp);
+    const ownerOf = makeOwnerLookup(phToIdx, store.hardened_phs ?? {});
 
     if (!assetId) {
       // XCH transfer
       const need = amount + fee;
       const candidates = Object.values(store.coins)
-        .filter((c) => !c.spent && phToIdx[c.puzzle_hash] !== undefined)
-        .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+        .filter((c) => !c.spent)
+        .map((c) => ({ coin: c, owner: ownerOf(c.puzzle_hash) }))
+        .filter((x) => x.owner !== null)
+        .sort((a, b) => (BigInt(b.coin.amount) > BigInt(a.coin.amount) ? 1 : -1));
       const inputs: Array<{
         parent_coin_info: string;
         puzzle_hash: string;
         amount: string;
         derivation_index: number;
+        derivation_kind?: "hardened" | "unhardened";
       }> = [];
       const inputCoinIds: string[] = [];
       let running = 0n;
-      for (const c of candidates) {
+      for (const { coin, owner } of candidates) {
         if (running >= need) break;
         inputs.push({
-          parent_coin_info: c.parent_coin_info,
-          puzzle_hash: c.puzzle_hash,
-          amount: c.amount,
-          derivation_index: phToIdx[c.puzzle_hash]!,
+          parent_coin_info: coin.parent_coin_info,
+          puzzle_hash: coin.puzzle_hash,
+          amount: coin.amount,
+          derivation_index: owner!.index,
+          ...(owner!.kind === "hardened" ? { derivation_kind: "hardened" as const } : {}),
         });
-        inputCoinIds.push(c.coin_id);
-        running += BigInt(c.amount);
+        inputCoinIds.push(coin.coin_id);
+        running += BigInt(coin.amount);
       }
       if (running < need) {
         throw Errors.spendableBalanceExceeded(
@@ -746,6 +781,9 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
         fee_mojos: fee.toString(),
         input_coins: inputs,
         change_index: inputs[0]!.derivation_index,
+        ...(inputs[0]!.derivation_kind === "hardened"
+          ? { change_kind: "hardened" as const }
+          : {}),
         testnet: false,
         broadcast: true,
       });
@@ -764,30 +802,34 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       );
     }
     const sortedCoins = cat.coins
-      .filter((c) => !c.spent && phToIdx[c.inner_puzzle_hash] !== undefined)
-      .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+      .filter((c) => !c.spent)
+      .map((c) => ({ coin: c, owner: ownerOf(c.inner_puzzle_hash) }))
+      .filter((x) => x.owner !== null)
+      .sort((a, b) => (BigInt(b.coin.amount) > BigInt(a.coin.amount) ? 1 : -1));
     const picked: Array<{
       parent_coin_info: string;
       puzzle_hash: string;
       amount: string;
       inner_puzzle_hash: string;
       derivation_index: number;
+      derivation_kind?: "hardened" | "unhardened";
       lineage_proof: { parent_name: string; inner_puzzle_hash: string; amount: string };
     }> = [];
     const pickedCatIds: string[] = [];
     let running = 0n;
-    for (const c of sortedCoins) {
+    for (const { coin, owner } of sortedCoins) {
       if (running >= amount) break;
       picked.push({
-        parent_coin_info: c.parent_coin_info,
-        puzzle_hash: c.puzzle_hash,
-        amount: c.amount,
-        inner_puzzle_hash: c.inner_puzzle_hash,
-        derivation_index: phToIdx[c.inner_puzzle_hash]!,
-        lineage_proof: c.lineage_proof,
+        parent_coin_info: coin.parent_coin_info,
+        puzzle_hash: coin.puzzle_hash,
+        amount: coin.amount,
+        inner_puzzle_hash: coin.inner_puzzle_hash,
+        derivation_index: owner!.index,
+        ...(owner!.kind === "hardened" ? { derivation_kind: "hardened" as const } : {}),
+        lineage_proof: coin.lineage_proof,
       });
-      pickedCatIds.push(c.coin_id);
-      running += BigInt(c.amount);
+      pickedCatIds.push(coin.coin_id);
+      running += BigInt(coin.amount);
     }
     if (running < amount) {
       throw Errors.spendableBalanceExceeded(
@@ -802,6 +844,9 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
       fee_mojos: fee.toString(),
       input_coins: picked,
       change_index: picked[0]!.derivation_index,
+      ...(picked[0]!.derivation_kind === "hardened"
+        ? { change_kind: "hardened" as const }
+        : {}),
       broadcast: true,
     });
     if (res.error) throw new Error(res.error);

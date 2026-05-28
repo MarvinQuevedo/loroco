@@ -8,6 +8,7 @@ import {
   getCoinSnapshot,
   getCoinSyncTelemetry,
   getCompatSettings,
+  getMempoolDebug,
   getSidecarSettings,
   getSyncState,
   getXchPriceUsd,
@@ -25,6 +26,8 @@ import {
   type CoinSyncTelemetry,
   type ConnectionRecord,
   type DexieCatMetadata,
+  type MempoolDebugEntry,
+  type MempoolDebugSnapshot,
   type NftView,
   type PendingApproval,
   type SendXchResult,
@@ -250,57 +253,64 @@ export function App() {
   // popup auto-closes (see `decide`).
   const showApproval = pending.length > 0 && view.kind === "home";
 
+  // Hide the top header on lock/onboarding/loading — those screens render
+  // their own hero (stacked lockup + h1) so a duplicate header brand crowds
+  // the layout and steals vertical space from the welcome hero.
+  const showHeader = view.kind === "home";
+
   return (
     <div className="ozone-popup">
-      <header className="ozone-header">
-        <span className="ozone-logo">
-          <img src="/icon/48.png" alt="" className="ozone-logo-mark" />
-          Loroco
-        </span>
-        {view.kind === "home" && !showApproval && (
-          <HeaderWalletChip
-            wallet={view.wallet}
-            wallets={view.wallets}
-            onSwitchWallet={switchWallet}
-            onAddWallet={startAddWallet}
-          />
-        )}
-        {view.kind === "home" && !showApproval && (
-          <div className="header-actions">
-            <button
-              className="icon-btn"
-              onClick={() => void handleLock()}
-              title="Lock wallet"
-              aria-label="Lock wallet"
-            >
-              🔒
-            </button>
-            <button
-              className={tab === "settings" ? "icon-btn active" : "icon-btn"}
-              onClick={() => setTab(tab === "settings" ? "home" : "settings")}
-              title="Settings"
-              aria-label="Settings"
-            >
-              ⚙
-            </button>
-            <button
-              className={tab === "status" ? "icon-btn active" : "icon-btn"}
-              onClick={() => setTab(tab === "status" ? "home" : "status")}
-              title="Status"
-              aria-label="Status"
-            >
-              📊
-            </button>
-          </div>
-        )}
-        {showApproval && (
-          <span className="ozone-meta">
-            {pending.length > 1
-              ? `${pending.length} pending`
-              : pending[0]?.method ?? ""}
+      {showHeader && (
+        <header className="ozone-header">
+          <span className="brand-lockup brand-lockup--sm">
+            <img src="/icon/128.png" alt="" className="brand-mark" />
+            <span className="brand-word">loroco</span>
           </span>
-        )}
-      </header>
+          {!showApproval && (
+            <HeaderWalletChip
+              wallet={view.wallet}
+              wallets={view.wallets}
+              onSwitchWallet={switchWallet}
+              onAddWallet={startAddWallet}
+            />
+          )}
+          {!showApproval && (
+            <div className="header-actions">
+              <button
+                className="icon-btn"
+                onClick={() => void handleLock()}
+                title="Lock wallet"
+                aria-label="Lock wallet"
+              >
+                🔒
+              </button>
+              <button
+                className={tab === "settings" ? "icon-btn active" : "icon-btn"}
+                onClick={() => setTab(tab === "settings" ? "home" : "settings")}
+                title="Settings"
+                aria-label="Settings"
+              >
+                ⚙
+              </button>
+              <button
+                className={tab === "status" ? "icon-btn active" : "icon-btn"}
+                onClick={() => setTab(tab === "status" ? "home" : "status")}
+                title="Status"
+                aria-label="Status"
+              >
+                📊
+              </button>
+            </div>
+          )}
+          {showApproval && (
+            <span className="ozone-meta">
+              {pending.length > 1
+                ? `${pending.length} pending`
+                : pending[0]?.method ?? ""}
+            </span>
+          )}
+        </header>
+      )}
       <main>
         {showApproval && (
           <ApprovalScreen request={pending[0]!} queueSize={pending.length} onDecide={decide} />
@@ -1164,8 +1174,11 @@ function OnboardingScreen({
   if (mode === "choose") {
     return (
       <section className="screen">
-        <img src="/icon/128.png" alt="" className="screen-logo" />
-        <h1>Welcome to Loroco</h1>
+        <span className="brand-lockup brand-lockup--stacked">
+          <img src="/icon/256.png" alt="" className="brand-mark" />
+          <span className="brand-word">loroco</span>
+        </span>
+        <h1>Welcome</h1>
         <p className="muted">A Chia wallet for your browser. Choose how to get started.</p>
         {error && <p className="error">{error}</p>}
         <button onClick={() => void generate(24)}>Create new wallet (24 words)</button>
@@ -1481,7 +1494,10 @@ function LockScreen({
   return (
     <section className="screen lock-screen">
       <div className="lock-hero">
-        <img src="/icon/128.png" alt="" className="lock-logo" />
+        <span className="brand-lockup brand-lockup--stacked">
+          <img src="/icon/256.png" alt="" className="brand-mark" />
+          <span className="brand-word">loroco</span>
+        </span>
         <h1 className="lock-title">Welcome back</h1>
         <p className="lock-sub">Enter your password to unlock</p>
       </div>
@@ -1948,8 +1964,8 @@ function SettingsTab({
         />
         <SettingsSectionRow
           icon="🧩"
-          title="Goby compatibility"
-          sub="Inject window.chia + chia_* aliases"
+          title="Site compatibility"
+          sub="Let older Chia sites recognize Loroco"
           onClick={() => setModal("compat")}
         />
       </ul>
@@ -2003,7 +2019,7 @@ function SettingsTab({
         </Modal>
       )}
       {modal === "compat" && (
-        <Modal title="Goby compatibility" onClose={closeModal}>
+        <Modal title="Site compatibility" onClose={closeModal}>
           <DAppCompatSection />
         </Modal>
       )}
@@ -2184,10 +2200,244 @@ function StatusTab({ sync }: { sync: SyncState | null }) {
       <h3>Sync details</h3>
       <SyncDetailsPanel />
 
+      <h3>Mempool</h3>
+      <MempoolDebugPanel />
+
       <h3>Local peer</h3>
       <LocalPeerStatus />
     </div>
   );
+}
+
+function MempoolDebugPanel() {
+  const [snap, setSnap] = useState<MempoolDebugSnapshot | null>(null);
+  const [filter, setFilter] = useState<"all" | "mine">("all");
+  const [showRaw, setShowRaw] = useState(false);
+  const [, tick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const s = await getMempoolDebug();
+        if (!cancelled) setSnap(s);
+      } catch {
+        // best-effort
+      }
+    };
+    void refresh();
+    const id = setInterval(refresh, 2000);
+    const rerender = setInterval(() => tick((n) => n + 1), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      clearInterval(rerender);
+    };
+  }, []);
+
+  if (!snap) {
+    return (
+      <div className="result">
+        <div>
+          <span className="muted">status</span>
+          <code>loading…</code>
+        </div>
+      </div>
+    );
+  }
+
+  const { stats, feed } = snap;
+  const filtered =
+    filter === "mine"
+      ? feed.filter((e) => e.mine === "incoming" || e.mine === "outgoing" || e.mine === "both")
+      : feed;
+
+  return (
+    <>
+      <div className="result">
+        <div>
+          <span className="muted">socket</span>
+          <code className={stats.socketOpen ? "" : "error"}>
+            {stats.socketState}
+          </code>
+        </div>
+        <div>
+          <span className="muted">messages</span>
+          <code>
+            {stats.messages.toLocaleString()}{" "}
+            <span className="muted small">· {stats.msgsPerSec.toFixed(1)}/s</span>
+          </code>
+        </div>
+        <div>
+          <span className="muted">last event</span>
+          <code>
+            {stats.lastEvent || "(none)"}{" "}
+            {stats.lastSeenAt > 0 && (
+              <span className="muted small">· {timeAgo(stats.lastSeenAt)}</span>
+            )}
+          </code>
+        </div>
+        <div>
+          <span className="muted">by type</span>
+          <code>
+            {Object.entries(stats.eventTypes)
+              .sort((a, b) => b[1] - a[1])
+              .map(([t, n]) => `${t}:${n}`)
+              .join(" · ") || "—"}
+          </code>
+        </div>
+        {stats.rawSamples.length > 0 && (
+          <div>
+            <span className="muted">raw samples</span>
+            <code>
+              <button
+                className="btn-small"
+                onClick={() => setShowRaw((v) => !v)}
+              >
+                {showRaw ? "hide" : `show (${stats.rawSamples.length})`}
+              </button>
+            </code>
+          </div>
+        )}
+        {showRaw && (
+          <div>
+            <pre
+              style={{
+                fontSize: 10,
+                maxHeight: 160,
+                overflow: "auto",
+                background: "var(--surface-2)",
+                padding: 6,
+                borderRadius: 6,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-all",
+              }}
+            >
+              {stats.rawSamples.join("\n---\n")}
+            </pre>
+          </div>
+        )}
+      </div>
+
+      <div className="form-input-row" style={{ marginTop: 8 }}>
+        <button
+          className={filter === "all" ? "btn-small active" : "btn-small"}
+          onClick={() => setFilter("all")}
+        >
+          All ({feed.length})
+        </button>
+        <button
+          className={filter === "mine" ? "btn-small active" : "btn-small"}
+          onClick={() => setFilter("mine")}
+        >
+          Mine only
+        </button>
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="form-note">
+          No transactions captured yet. Tx will appear here as the WS receives
+          them (mainnet sees a few per minute on average).
+        </p>
+      ) : (
+        <ul className="mempool-feed">
+          {filtered.map((entry) => (
+            <MempoolFeedRow key={entry.tx_id} entry={entry} />
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+function MempoolFeedRow({ entry }: { entry: MempoolDebugEntry }) {
+  const mineClass =
+    entry.mine === "incoming"
+      ? "mine-in"
+      : entry.mine === "outgoing"
+        ? "mine-out"
+        : entry.mine === "both"
+          ? "mine-both"
+          : entry.mine === "none"
+            ? "mine-none"
+            : "mine-unknown";
+  const mineLabel =
+    entry.mine === "incoming"
+      ? "INCOMING"
+      : entry.mine === "outgoing"
+        ? "OUTGOING"
+        : entry.mine === "both"
+          ? "SELF"
+          : entry.mine === "none"
+            ? "not mine"
+            : "no wallet";
+  return (
+    <li className={`mempool-feed-row ${mineClass}`} title={entry.tx_id}>
+      <div className="mempool-feed-head">
+        <span className={`mempool-mine-tag ${mineClass}`}>{mineLabel}</span>
+        <span className="mempool-shape muted small">{entry.shape}</span>
+        <span className="muted small">{timeAgo(entry.observed_at)}</span>
+      </div>
+      <div className="mempool-feed-body">
+        <code className="mempool-txid">
+          {entry.tx_id.slice(0, 10)}…{entry.tx_id.slice(-6)}
+        </code>
+        <span className="muted small">
+          +{entry.additions_count} / −{entry.removals_count} coins
+        </span>
+      </div>
+      <div className="mempool-feed-body">
+        <span className="muted small">added</span>{" "}
+        <code>{formatMojos(entry.total_added_mojos)}</code>
+        <span className="muted small" style={{ marginLeft: 8 }}>
+          removed
+        </span>{" "}
+        <code>{formatMojos(entry.total_removed_mojos)}</code>
+      </div>
+      {(entry.matched_in_phs.length > 0 ||
+        entry.matched_out_cat_assets.length > 0 ||
+        entry.matched_out_xch) && (
+        <div className="mempool-feed-body">
+          {entry.matched_in_phs.length > 0 && (
+            <span className="muted small">
+              in→ {entry.matched_in_phs[0]!.slice(0, 10)}…
+              {entry.matched_in_phs.length > 1
+                ? ` (+${entry.matched_in_phs.length - 1})`
+                : ""}
+            </span>
+          )}
+          {entry.matched_out_xch && (
+            <span className="muted small" style={{ marginLeft: 8 }}>
+              out: XCH
+            </span>
+          )}
+          {entry.matched_out_cat_assets.length > 0 && (
+            <span className="muted small" style={{ marginLeft: 8 }}>
+              out: CAT {entry.matched_out_cat_assets[0]!.slice(0, 8)}…
+              {entry.matched_out_cat_assets.length > 1
+                ? ` (+${entry.matched_out_cat_assets.length - 1})`
+                : ""}
+            </span>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function formatMojos(mojos: string): string {
+  try {
+    const n = BigInt(mojos);
+    if (n === 0n) return "0";
+    // Show XCH if > 1 billion mojos (i.e. > 0.001 XCH), otherwise raw mojos.
+    if (n >= 1_000_000_000n) {
+      const xch = Number(n) / 1_000_000_000_000;
+      return `${xch.toFixed(xch < 0.01 ? 6 : 4)} XCH`;
+    }
+    return `${n.toString()} mojos`;
+  } catch {
+    return mojos;
+  }
 }
 
 function LocalPeerStatus() {
@@ -3004,11 +3254,10 @@ function DAppCompatSection() {
   return (
     <>
       <p className="form-note">
-        When enabled, Loroco also claims <code>window.chia</code> and accepts
-        Goby-style method names (<code>chia_*</code>, <code>chip0002_*</code>).
-        Turn this on to drive dApps that only support Goby. Turn it off in
-        production so real Goby keeps <code>window.chia</code> free — Loroco
-        still works for dApps that target <code>window.loroco</code> directly.
+        Some older Chia sites only look for the Goby wallet by name. Turn
+        this on and those sites will find Loroco the same way. If you
+        already have Goby installed, leave it off so the two don't
+        clash.
       </p>
       <label className="form-check">
         <input
@@ -3017,7 +3266,7 @@ function DAppCompatSection() {
           disabled={busy}
           onChange={(e) => void toggle(e.target.checked)}
         />
-        <span>Enable Goby compatibility</span>
+        <span>Let older sites recognize Loroco as Goby</span>
       </label>
       <p className="muted small">
         Reload any open dApp tabs after changing this — the wallet only

@@ -78,9 +78,22 @@ interface PeakEventData {
   peak?: { height?: number };
 }
 
+/**
+ * Real shape coinset emits — the inner `message: { type, data }` wraps
+ * the documented event, and the outer envelope carries `network`, `seq`
+ * and an `instance_id` we don't use today. Empirically observed by
+ * dumping the first few raw frames; the public docs only show the inner
+ * shape so this took some fishing.
+ */
 interface CoinsetEvent {
-  type?: string;
-  data?: unknown;
+  network?: string;
+  region?: string;
+  instance_id?: string;
+  seq?: number;
+  message?: {
+    type?: string;
+    data?: unknown;
+  };
 }
 
 interface StoredWalletEntry {
@@ -285,21 +298,327 @@ function scheduleReconnect(reason: string): void {
   }, wait);
 }
 
-function handleMessage(raw: string): void {
-  let event: CoinsetEvent;
+// Wallet-independent message counter — proves the WS pipeline alone is
+// working even when there's no active wallet (or no matches in the current
+// poll). Read it from tests via chrome.storage.local["mempoolWatchStats"].
+interface StatsBuffer {
+  messages: number;
+  lastEvent: string;
+  lastSeenAt: number;
+  rawSamples: string[];
+  eventTypes: Record<string, number>;
+  /**
+   * Rolling timestamps (ms) of the last MSG_RATE_WINDOW messages — the popup
+   * derives messages/sec from this. Capped to MSG_RATE_WINDOW entries.
+   */
+  msgTimestamps: number[];
+}
+let statsBuffer: StatsBuffer | null = null;
+async function persistStats(): Promise<void> {
+  if (!statsBuffer) return;
   try {
-    event = JSON.parse(raw) as CoinsetEvent;
+    await chrome.storage.local.set({ mempoolWatchStats: statsBuffer });
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Hydrate the in-memory `statsBuffer` from `chrome.storage.local` on SW
+ * startup. Without this, every SW restart shows "messages: 0" in the popup
+ * until the next event arrives — which on a quiet network can take a minute.
+ */
+async function loadStatsFromStorage(): Promise<void> {
+  try {
+    const { mempoolWatchStats } = await chrome.storage.local.get(
+      "mempoolWatchStats",
+    );
+    if (mempoolWatchStats && typeof mempoolWatchStats === "object") {
+      const s = mempoolWatchStats as Partial<StatsBuffer>;
+      statsBuffer = {
+        messages: s.messages ?? 0,
+        lastEvent: s.lastEvent ?? "",
+        lastSeenAt: s.lastSeenAt ?? 0,
+        rawSamples: Array.isArray(s.rawSamples) ? s.rawSamples : [],
+        eventTypes: s.eventTypes ?? {},
+        msgTimestamps: Array.isArray(s.msgTimestamps) ? s.msgTimestamps : [],
+      };
+    }
+  } catch {
+    // best-effort
+  }
+}
+void loadStatsFromStorage();
+
+const MSG_RATE_WINDOW = 60;
+
+/**
+ * Rolling debug feed of recent `transaction` events with ownership
+ * classification. Surfaces in the popup's Mempool Debug screen so the user
+ * can see what's flying through the WS — including tx that don't touch the
+ * active wallet (those are dropped by processTransaction's persistence path
+ * since they have no place in store.mempool).
+ *
+ * Stored in chrome.storage.local under `mempoolDebugFeed`. Capped to
+ * MEMPOOL_DEBUG_FEED_MAX entries to keep the storage write cheap.
+ */
+const MEMPOOL_DEBUG_FEED_MAX = 50;
+
+export interface MempoolDebugEntry {
+  tx_id: string;
+  /** ms epoch */
+  observed_at: number;
+  additions_count: number;
+  removals_count: number;
+  /** Sum of additions[].amount in mojos (as decimal string — amounts can be big). */
+  total_added_mojos: string;
+  total_removed_mojos: string;
+  /**
+   * Ownership classification of the tx vs the active wallet:
+   *   - `incoming`: at least one addition lands on one of our PHs.
+   *   - `outgoing`: at least one removal matched an XCH/CAT coin we hold.
+   *   - `both`:     mixed (e.g. send-to-self).
+   *   - `none`:     no overlap with the active wallet.
+   *   - `unknown`:  no active wallet, so we couldn't classify.
+   */
+  mine: "incoming" | "outgoing" | "both" | "none" | "unknown";
+  /** Active fingerprint when we saw the tx (may be null). */
+  fp: number | null;
+  /** Owned addition PHs that matched (0x-prefixed), up to 4. */
+  matched_in_phs: string[];
+  /** Owned CAT asset ids that matched on the removal side, up to 4. */
+  matched_out_cat_assets: string[];
+  /** True if at least one removal hit an XCH coin we own. */
+  matched_out_xch: boolean;
+  /** Heuristic asset hint: "xch", "asset" (1-mojo coins → CAT/NFT child), or "mixed". */
+  shape: "xch" | "asset" | "mixed";
+}
+
+let mempoolDebugFeed: MempoolDebugEntry[] = [];
+
+async function loadDebugFeedFromStorage(): Promise<void> {
+  try {
+    const { mempoolDebugFeed: existing } = await chrome.storage.local.get(
+      "mempoolDebugFeed",
+    );
+    if (Array.isArray(existing)) {
+      mempoolDebugFeed = existing as MempoolDebugEntry[];
+    }
+  } catch {
+    // best-effort
+  }
+}
+void loadDebugFeedFromStorage();
+
+async function appendDebugFeed(entry: MempoolDebugEntry): Promise<void> {
+  // Dedupe — if we already have this tx_id, refresh in place. Saves popup
+  // re-render churn for tx that get re-broadcast.
+  const existing = mempoolDebugFeed.findIndex((e) => e.tx_id === entry.tx_id);
+  if (existing >= 0) {
+    mempoolDebugFeed.splice(existing, 1);
+  }
+  mempoolDebugFeed.unshift(entry);
+  if (mempoolDebugFeed.length > MEMPOOL_DEBUG_FEED_MAX) {
+    mempoolDebugFeed.length = MEMPOOL_DEBUG_FEED_MAX;
+  }
+  try {
+    await chrome.storage.local.set({ mempoolDebugFeed });
+  } catch {
+    // best-effort
+  }
+}
+
+export function readMempoolDebugFeed(): MempoolDebugEntry[] {
+  return mempoolDebugFeed;
+}
+
+export function readMempoolWatchStats(): {
+  messages: number;
+  lastEvent: string;
+  lastSeenAt: number;
+  eventTypes: Record<string, number>;
+  msgsPerSec: number;
+  socketOpen: boolean;
+  socketState: string;
+  rawSamples: string[];
+} {
+  const now = Date.now();
+  const ts = statsBuffer?.msgTimestamps ?? [];
+  const oldest = ts[0] ?? now;
+  const spanMs = Math.max(1, now - oldest);
+  const msgsPerSec = ts.length > 1 ? (ts.length * 1000) / spanMs : 0;
+  const rs = socket?.readyState;
+  const socketState =
+    rs === WebSocket.CONNECTING
+      ? "connecting"
+      : rs === WebSocket.OPEN
+        ? "open"
+        : rs === WebSocket.CLOSING
+          ? "closing"
+          : rs === WebSocket.CLOSED
+            ? "closed"
+            : "no-socket";
+  return {
+    messages: statsBuffer?.messages ?? 0,
+    lastEvent: statsBuffer?.lastEvent ?? "",
+    lastSeenAt: statsBuffer?.lastSeenAt ?? 0,
+    eventTypes: { ...(statsBuffer?.eventTypes ?? {}) },
+    msgsPerSec,
+    socketOpen: rs === WebSocket.OPEN,
+    socketState,
+    rawSamples: [...(statsBuffer?.rawSamples ?? [])],
+  };
+}
+
+function handleMessage(raw: string): void {
+  let envelope: CoinsetEvent;
+  try {
+    envelope = JSON.parse(raw) as CoinsetEvent;
   } catch {
     return;
   }
-  if (event.type === "peak") {
-    void processPeak(event.data as PeakEventData);
-  } else if (event.type === "transaction") {
-    void processTransaction(event.data as TransactionEventData).catch((err) => {
+  const inner = envelope.message;
+  const type = inner?.type ?? "unknown";
+  const data = inner?.data;
+  if (!statsBuffer)
+    statsBuffer = {
+      messages: 0,
+      lastEvent: "",
+      lastSeenAt: 0,
+      rawSamples: [],
+      eventTypes: {},
+      msgTimestamps: [],
+    };
+  const now = Date.now();
+  statsBuffer.messages += 1;
+  statsBuffer.lastEvent = type;
+  statsBuffer.lastSeenAt = now;
+  statsBuffer.eventTypes[type] = (statsBuffer.eventTypes[type] ?? 0) + 1;
+  statsBuffer.msgTimestamps.push(now);
+  if (statsBuffer.msgTimestamps.length > MSG_RATE_WINDOW) {
+    statsBuffer.msgTimestamps.splice(
+      0,
+      statsBuffer.msgTimestamps.length - MSG_RATE_WINDOW,
+    );
+  }
+  if (statsBuffer.rawSamples.length < 5) {
+    statsBuffer.rawSamples.push(raw.slice(0, 500));
+  }
+  void persistStats();
+  // Heartbeat the snapshot's timestamp every message so the test/UI can
+  // tell the WS is alive even when no matches arrive. Cheap — no await.
+  void heartbeatLastPolled(type);
+  if (type === "peak") {
+    void processPeak(data as PeakEventData);
+  } else if (type === "transaction") {
+    void processTransaction(data as TransactionEventData).catch((err) => {
       console.warn("[mempool-watch] processTransaction failed:", err);
+    });
+    // Debug feed runs independently of processTransaction so non-matching
+    // tx (the majority of mempool traffic) still land in the popup's debug
+    // view. Classification reuses ownedPhs + the same outpoint lookups.
+    void recordDebugEntry(data as TransactionEventData).catch((err) => {
+      console.warn("[mempool-watch] recordDebugEntry failed:", err);
     });
   }
   // `offer` events ignored for now.
+}
+
+async function recordDebugEntry(data: TransactionEventData): Promise<void> {
+  const txId = with0x(data.spend_bundle_name ?? data.tx_id ?? "");
+  if (!txId || txId === "0x") return;
+
+  const additions = data.additions ?? [];
+  let removals = data.removals ?? [];
+  if (removals.length === 0 && data.spend_bundle?.coin_spends?.length) {
+    removals = data.spend_bundle.coin_spends.map((cs) => cs.coin);
+  }
+  if (additions.length === 0 && removals.length === 0) return;
+
+  const totalAdded = additions.reduce(
+    (acc, a) => acc + BigInt(a.amount ?? 0),
+    0n,
+  );
+  const totalRemoved = removals.reduce(
+    (acc, r) => acc + BigInt(r.amount ?? 0),
+    0n,
+  );
+
+  // Shape heuristic: 1-mojo coins are the CAT/NFT inner-puzzle convention;
+  // anything else is "xch" sized. Mixed if both present.
+  let hasOne = false;
+  let hasBig = false;
+  for (const c of [...additions, ...removals]) {
+    if (Number(c.amount) === 1) hasOne = true;
+    else hasBig = true;
+  }
+  const shape: MempoolDebugEntry["shape"] =
+    hasOne && hasBig ? "mixed" : hasOne ? "asset" : "xch";
+
+  const ctx = await loadActiveContext();
+  let mine: MempoolDebugEntry["mine"] = "unknown";
+  const matchedInPhs: string[] = [];
+  const matchedOutCatAssets: string[] = [];
+  let matchedOutXch = false;
+  let fp: number | null = null;
+
+  if (ctx) {
+    fp = ctx.fp;
+    const ownedPhs = await getOwnedPhs(ctx.fp, ctx.masterPk);
+    const store = await readCoinStore(ctx.fp);
+    for (const add of additions) {
+      const ph = strip0x(add.puzzle_hash);
+      if (ownedPhs.has(ph)) {
+        if (matchedInPhs.length < 4 && !matchedInPhs.includes(`0x${ph}`)) {
+          matchedInPhs.push(`0x${ph}`);
+        }
+      }
+    }
+    for (const rem of removals) {
+      const parent = with0x(rem.parent_coin_info);
+      const ph = with0x(rem.puzzle_hash);
+      const amt = String(rem.amount);
+      if (findXchCoinIdByOutpoint(store, parent, ph, amt)) {
+        matchedOutXch = true;
+        continue;
+      }
+      const cat = findCatCoinIdByOutpoint(store, parent, ph, amt);
+      if (cat && !matchedOutCatAssets.includes(cat.assetId)) {
+        if (matchedOutCatAssets.length < 4) matchedOutCatAssets.push(cat.assetId);
+      }
+    }
+    const isIn = matchedInPhs.length > 0;
+    const isOut = matchedOutXch || matchedOutCatAssets.length > 0;
+    mine = isIn && isOut ? "both" : isIn ? "incoming" : isOut ? "outgoing" : "none";
+  }
+
+  await appendDebugFeed({
+    tx_id: txId,
+    observed_at: Date.now(),
+    additions_count: additions.length,
+    removals_count: removals.length,
+    total_added_mojos: totalAdded.toString(),
+    total_removed_mojos: totalRemoved.toString(),
+    mine,
+    fp,
+    matched_in_phs: matchedInPhs,
+    matched_out_cat_assets: matchedOutCatAssets,
+    matched_out_xch: matchedOutXch,
+    shape,
+  });
+}
+
+async function heartbeatLastPolled(_eventType: string): Promise<void> {
+  try {
+    const ctx = await loadActiveContext();
+    if (!ctx) return;
+    const store = await readCoinStore(ctx.fp);
+    const prev = store.mempool ?? { incoming: [], outgoing: [], last_polled_at: 0 };
+    store.mempool = { ...prev, last_polled_at: Date.now() };
+    await writeCoinStore(ctx.fp, store);
+  } catch {
+    // best-effort heartbeat
+  }
 }
 
 /**
@@ -324,14 +643,23 @@ export function ensureSocket(): void {
     reconnectAttempt = 0;
   });
   socket.addEventListener("message", (ev) => {
-    handleMessage(typeof ev.data === "string" ? ev.data : "");
+    // coinset emits text frames in practice, but Chrome's default
+    // binaryType is "blob". If we ever get a Blob/ArrayBuffer we'd silently
+    // drop the event — handle both so a server-side change doesn't lock us
+    // out.
+    if (typeof ev.data === "string") {
+      handleMessage(ev.data);
+    } else if (ev.data instanceof ArrayBuffer) {
+      handleMessage(new TextDecoder().decode(ev.data));
+    } else if (typeof Blob !== "undefined" && ev.data instanceof Blob) {
+      void ev.data.text().then(handleMessage).catch(() => {});
+    }
   });
   socket.addEventListener("close", (ev) => {
     socket = null;
     scheduleReconnect(`close (${ev.code} ${ev.reason || "no reason"})`);
   });
   socket.addEventListener("error", () => {
-    // Some browsers don't emit close after error — force a reconnect.
     try {
       socket?.close();
     } catch {

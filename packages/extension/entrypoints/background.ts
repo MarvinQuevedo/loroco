@@ -103,13 +103,44 @@ export default defineBackground(() => {
       return true;
     }
 
+    // Defense-in-depth size cap. The content bridge enforces the same
+    // limit (packages/goby-provider/src/content-bridge.ts) but a dApp
+    // that bypasses the inpage script or that targets an alternate WXT
+    // build could still reach here with an oversized payload, which
+    // risks Chrome tearing down the extension context. We measure
+    // `params` size directly so the common attack (one giant string
+    // field) is O(1).
+    const MAX_PARAMS_BYTES = 4 * 1024 * 1024;
+    let paramsSize = 0;
+    if (typeof msg.params === "string") {
+      paramsSize = msg.params.length;
+    } else if (msg.params != null) {
+      try {
+        paramsSize = JSON.stringify(msg.params).length;
+      } catch {
+        paramsSize = Number.POSITIVE_INFINITY;
+      }
+    }
+    if (paramsSize > MAX_PARAMS_BYTES) {
+      sendResponse({
+        error: {
+          code: 4029,
+          message: `Request payload too large: ${paramsSize} bytes exceeds the ${MAX_PARAMS_BYTES}-byte cap.`,
+        },
+      });
+      return true;
+    }
+
     (async () => {
       try {
-        // Normalise legacy/aliased method names (chia_*, chip0002_*, snake_case)
-        // down to the CHIP-0002 canonical surface before any gating runs. We
-        // keep the *original* name around so handlers with WC2-vs-Goby shape
-        // differences (chia_getNfts, chia_send, chia_cancelOffer, …) can
-        // branch on what the dApp actually asked for.
+        // Normalise alias method names (chia_*, chip0002_*, snake_case) down
+        // to the CHIP-0002 canonical surface before any gating runs. All
+        // alias namespaces are baseline — the `legacyGoby` compat setting
+        // only controls whether window.chia is shadow-injected (handled
+        // in the content script), not which method names we honour here.
+        // We keep the *original* name around so handlers with WC2-vs-Goby
+        // shape differences (chia_getNfts, chia_send, chia_cancelOffer, …)
+        // can branch on what the dApp actually asked for.
         const originalMethod = String(msg.method);
         const method = canonicalizeMethod(originalMethod) as ChiaMethod;
         // Trace every dApp message at the entry point so debug captures even
@@ -160,7 +191,5 @@ export default defineBackground(() => {
     });
   });
 
-  // Kick the mempool WebSocket immediately at boot — the 30s alarm is the
-  // safety net, but we don't want to wait up to 30s on a fresh SW.
   ensureMempoolSocket();
 });

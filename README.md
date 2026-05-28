@@ -1,8 +1,21 @@
 # Loroco
 
-Chia browser extension wallet — Goby-compatible (CHIP-0002), powered by a
-WASM-compiled fork of [Sage](https://github.com/xch-dev/sage). Syncs against
-`coinset.org` by default; can also talk to a local
+A Chia wallet that lives in your browser. Send and receive XCH, hold
+tokens and NFTs, and trade with anyone using offers. When you visit a
+Chia site — a marketplace, a swap, a game — Loroco asks you before
+signing anything.
+
+---
+
+### For developers
+
+Loroco runs on a WASM-compiled fork of
+[Sage](https://github.com/xch-dev/sage). dApps connect via WalletConnect2
+or the full CHIP-0002 method surface (`chia_*`, `chip0002_*`), exposed
+on `window.loroco`. A `window.chia` mirror is opt-in for legacy sites
+that detect the Goby wallet by name.
+
+Syncs against `coinset.org` by default; can also talk to a local
 [`loroco-local-sync`](https://github.com/MarvinQuevedo/loroco-local-sync)
 daemon for P2P peer sync over mTLS.
 
@@ -31,7 +44,7 @@ daemon for P2P peer sync over mTLS.
 loroco/
 ├── packages/
 │   ├── extension/         # WXT app (popup + service worker + content script)
-│   ├── goby-provider/     # window.chia injector + CHIP-0002 types
+│   ├── goby-provider/     # window.loroco + optional window.chia mirror; CHIP-0002 / WC2 types
 │   ├── storage-idb/       # IndexedDB-backed Storage impl for the WASM module
 │   └── wallet-wasm/       # wasm-pack output of crates/sage-wasm (regenerated)
 ├── vendor/

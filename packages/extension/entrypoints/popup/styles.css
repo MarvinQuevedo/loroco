@@ -6,14 +6,30 @@
  * via `prefers-color-scheme`.
  */
 
-@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Nunito:wght@800;900&display=swap");
 
 :root {
-  /* Brand */
-  --ozone-primary: #75d811;
-  --ozone-primary-press: #66c200;
+  /* Brand — Loroco palette (see /Users/marvin/Downloads/loroco-brand/BRAND-GUIDE.html).
+   * Terracota = principal, verde = acento (corazón de la flor), teal = warn. */
+  --brand-terra-light: #e8854f;
+  --brand-terra: #c0633c;
+  --brand-terra-deep: #984220;
+  --brand-terra-dark: #8e3608;
+  --brand-green-lime: #9fcb5e;
+  --brand-green: #7db23e;
+  --brand-green-mid: #4f7322;
+  --brand-green-deep: #3d5520;
+  --brand-cream: #faf3de;
+  --brand-beige: #eadcc2;
+
+  /* Semantic accents */
+  --ozone-primary: var(--brand-terra);
+  --ozone-primary-press: var(--brand-terra-deep);
+  --accent-green: var(--brand-green);
+  --accent-green-press: var(--brand-green-mid);
+  --accent-warn: #14b8a6;
+  --accent-warn-deep: #0f8a7d;
   --ozone-red: #ff6767;
-  --ozone-orange: #e38c1b;
   --ozone-gold: #ffc400;
 
   /* Light palette */
@@ -141,6 +157,66 @@ body {
   object-fit: contain;
 }
 
+/* Brand lockup — hi-res icon + CSS wordmark.
+ * Replaces baked PNG lockups so the type stays crisp at any size. */
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: "Nunito", "Poppins", system-ui, sans-serif;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--brand-terra, #c0633c);
+  user-select: none;
+}
+
+.brand-lockup .brand-mark {
+  display: block;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 6px rgba(152, 66, 32, 0.18));
+}
+
+.brand-lockup .brand-word {
+  font-size: 22px;
+  letter-spacing: -0.04em;
+}
+
+.brand-lockup--sm .brand-mark {
+  width: 28px;
+  height: 28px;
+}
+.brand-lockup--sm .brand-word {
+  font-size: 20px;
+}
+
+.brand-lockup--stacked {
+  flex-direction: column;
+  gap: 14px;
+  align-items: center;
+}
+.brand-lockup--stacked .brand-mark {
+  width: 96px;
+  height: 96px;
+  filter: drop-shadow(0 8px 22px rgba(152, 66, 32, 0.28));
+}
+.brand-lockup--stacked .brand-word {
+  font-size: 40px;
+  letter-spacing: -0.05em;
+}
+
+@media (prefers-color-scheme: dark) {
+  .brand-lockup {
+    color: #f5e8d6;
+  }
+  .brand-lockup .brand-mark {
+    filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.45));
+  }
+}
+
 .ozone-meta {
   font-size: 11px;
   font-family: var(--font-mono);
@@ -223,7 +299,7 @@ button {
   appearance: none;
   border: none;
   border-radius: var(--ozone-radius-md);
-  background: var(--ozone-primary);
+  background: var(--brand-green-lime);
   color: #0e1113;
   padding: 12px 18px;
   font-size: 14px;
@@ -234,7 +310,7 @@ button {
 }
 
 button:hover:not(:disabled) {
-  background: var(--ozone-primary-press);
+  background: var(--brand-green);
 }
 
 button:active:not(:disabled) {
@@ -277,7 +353,7 @@ button.danger {
 }
 
 .approve-btn {
-  background: var(--ozone-primary);
+  background: var(--brand-green-lime);
   color: #0e1113;
 }
 
@@ -393,9 +469,9 @@ textarea {
 }
 
 .icon-btn.active {
-  background: var(--ozone-primary);
+  background: var(--brand-green-lime);
   color: #0e1113;
-  border-color: var(--ozone-primary);
+  border-color: var(--brand-green);
 }
 
 .header-actions {
@@ -737,7 +813,7 @@ textarea {
 
 .sync-mini-bar-fill {
   height: 100%;
-  background: var(--ozone-orange);
+  background: var(--accent-warn);
   border-radius: 2px;
   transition: width 0.5s ease-out;
 }
@@ -752,11 +828,11 @@ textarea {
 }
 
 .sync-dot.dot-ok {
-  background: var(--ozone-primary);
+  background: var(--accent-green);
 }
 
 .sync-dot.dot-warn {
-  background: var(--ozone-orange);
+  background: var(--accent-warn);
   animation: sync-pulse 1.4s ease-in-out infinite;
 }
 
@@ -809,7 +885,7 @@ textarea {
 
 .sync-detail-stage {
   font-size: 10px;
-  color: var(--ozone-orange);
+  color: var(--accent-warn);
   font-family: var(--font-family);
   text-align: right;
 }
@@ -842,12 +918,12 @@ textarea {
 }
 
 .sync-stage-dot.ok {
-  background: var(--ozone-primary);
+  background: var(--accent-green);
   opacity: 1;
 }
 
 .sync-stage-dot.warn {
-  background: var(--ozone-orange);
+  background: var(--accent-warn);
   opacity: 1;
   animation: sync-pulse 1.4s ease-in-out infinite;
 }
@@ -892,7 +968,7 @@ textarea {
 
 .sync-stage-bar-fill {
   height: 100%;
-  background: var(--ozone-orange);
+  background: var(--accent-warn);
   border-radius: 2px;
   transition: width 0.3s ease-out;
 }
@@ -946,11 +1022,11 @@ button.sync-refresh:disabled {
 }
 
 .ok {
-  color: var(--ozone-primary);
+  color: var(--accent-green);
 }
 
 .warn {
-  color: var(--ozone-orange);
+  color: var(--accent-warn);
 }
 
 .error {
@@ -1086,6 +1162,16 @@ button.sync-refresh:disabled {
   font-weight: 500;
 }
 
+/* Keep hex / addresses lowercase (Chia convention is lowercase bech32m
+ * and 0x-prefixed hex). The uppercase rule above is meant for header
+ * labels rendered as <span class="muted">, not for monospace identifiers. */
+.result code,
+.result .muted code,
+.result code.muted {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 /* ── send success screen — hero number layout ────────────────────────── */
 .send-success {
   display: flex;
@@ -1119,12 +1205,12 @@ button.sync-refresh:disabled {
 }
 
 .send-success-badge.ok {
-  background: var(--ozone-primary);
+  background: var(--accent-green);
   color: #0e1113;
 }
 
 .send-success-badge.warn {
-  background: var(--ozone-orange);
+  background: var(--accent-warn);
   color: #0e1113;
 }
 
@@ -1213,20 +1299,20 @@ button.sync-refresh:disabled {
 }
 
 .send-success-line-chip.ok {
-  color: var(--ozone-primary);
-  background: rgba(117, 216, 17, 0.12);
+  color: var(--accent-green);
+  background: color-mix(in srgb, var(--accent-green) 14%, transparent);
 }
 
 .send-success-line-chip.warn {
-  color: var(--ozone-orange);
-  background: rgba(227, 140, 27, 0.14);
+  color: var(--accent-warn);
+  background: color-mix(in srgb, var(--accent-warn) 14%, transparent);
 }
 
 .send-success-line-copied {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--ozone-primary);
+  color: var(--accent-green);
   position: absolute;
   margin-left: -52px;
   pointer-events: none;
@@ -1326,11 +1412,11 @@ button.sync-refresh:disabled {
 }
 
 .offer-side.offer-receive {
-  border-color: color-mix(in srgb, var(--ozone-primary) 35%, var(--border));
+  border-color: color-mix(in srgb, var(--accent-green) 35%, var(--border));
 }
 
 .offer-side.offer-pay {
-  border-color: color-mix(in srgb, var(--ozone-orange) 35%, var(--border));
+  border-color: color-mix(in srgb, var(--accent-warn) 35%, var(--border));
 }
 
 .offer-arrow {
@@ -1355,9 +1441,9 @@ button.sync-refresh:disabled {
 
 /* ── approval popup ──────────────────────────────────────────────────── */
 .approval-queue {
-  background: color-mix(in srgb, var(--ozone-orange) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ozone-orange) 30%, var(--border));
-  color: var(--ozone-orange);
+  background: color-mix(in srgb, var(--accent-warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-warn) 30%, var(--border));
+  color: var(--accent-warn);
   padding: 6px 10px;
   border-radius: var(--ozone-radius-sm);
   font-weight: 500;
@@ -1409,12 +1495,12 @@ button.sync-refresh:disabled {
 
 .permission-icon.ok {
   color: #0e1113;
-  background: var(--ozone-primary);
+  background: var(--accent-green);
 }
 
 .permission-icon.warn {
   color: #0e1113;
-  background: var(--ozone-orange);
+  background: var(--accent-warn);
 }
 
 .params-raw {
@@ -1612,7 +1698,7 @@ details > summary:hover {
 }
 
 .asset-icon-xch {
-  background: var(--ozone-primary);
+  background: var(--accent-green);
 }
 
 .asset-icon-cat {
@@ -1757,11 +1843,11 @@ details > summary:hover {
 }
 
 .activity-arrow.ok {
-  background: color-mix(in srgb, var(--ozone-primary) 20%, transparent);
+  background: color-mix(in srgb, var(--accent-green) 20%, transparent);
 }
 
 .activity-arrow.warn {
-  background: color-mix(in srgb, var(--ozone-orange) 20%, transparent);
+  background: color-mix(in srgb, var(--accent-warn) 20%, transparent);
 }
 
 .activity-meta {
@@ -2233,8 +2319,8 @@ button.connection-revoke {
 
 /* ── Unlock / LockScreen ──────────────────────────────────────────────── */
 .lock-screen {
-  padding: var(--space-5);
-  gap: var(--space-4);
+  padding: var(--space-6) var(--space-5) var(--space-5);
+  gap: var(--space-5);
   align-items: stretch;
   justify-content: flex-start;
 }
@@ -2244,9 +2330,13 @@ button.connection-revoke {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 8px;
-  margin-top: 12px;
-  margin-bottom: 4px;
+  gap: 14px;
+  margin-top: 28px;
+  margin-bottom: 20px;
+}
+
+.lock-hero .brand-lockup--stacked {
+  margin-bottom: 6px;
 }
 
 .lock-logo {
@@ -2450,4 +2540,85 @@ button.connection-revoke {
 .settings-section-row.active {
   border-color: color-mix(in srgb, var(--ozone-primary) 40%, var(--border));
   background: color-mix(in srgb, var(--ozone-primary) 8%, var(--surface));
+}
+
+/* Mempool debug feed (StatusTab) */
+.btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: var(--surface);
+  color: var(--text-strong);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.btn-small.active {
+  background: color-mix(in srgb, var(--ozone-primary) 15%, var(--surface));
+  border-color: var(--ozone-primary);
+}
+
+.mempool-feed {
+  list-style: none;
+  margin: 8px 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.mempool-feed-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.mempool-feed-row.mine-in {
+  border-color: color-mix(in srgb, var(--accent-green) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent-green) 6%, var(--surface));
+}
+.mempool-feed-row.mine-out,
+.mempool-feed-row.mine-both {
+  border-color: color-mix(in srgb, var(--accent-warn) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent-warn) 6%, var(--surface));
+}
+.mempool-feed-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.mempool-feed-body {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+}
+.mempool-mine-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-mute);
+}
+.mempool-mine-tag.mine-in {
+  background: color-mix(in srgb, var(--accent-green) 25%, transparent);
+  color: var(--accent-green);
+}
+.mempool-mine-tag.mine-out,
+.mempool-mine-tag.mine-both {
+  background: color-mix(in srgb, var(--accent-warn) 25%, transparent);
+  color: var(--accent-warn);
+}
+.mempool-txid {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+.mempool-shape {
+  text-transform: uppercase;
+  font-size: 10px;
 }
