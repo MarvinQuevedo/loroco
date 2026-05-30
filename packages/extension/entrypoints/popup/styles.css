@@ -1478,6 +1478,39 @@ button.sync-refresh:disabled {
   color: var(--text-strong);
 }
 
+/* Single-child stacked rows (output lists, NFT lists, DID lists). Unlike
+   .permission-list (a 20px icon + 1fr text grid built for the connect
+   screen), these rows have ONE child — putting them in .permission-list
+   crushed them into the 20px column and wrapped long values one char per
+   line. This is a plain block list that lets long values wrap normally. */
+.detail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.detail-list li {
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--ozone-radius-sm);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-strong);
+  min-width: 0;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.detail-list li code {
+  font-family: var(--font-mono);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
 .permission-icon {
   width: 18px;
   height: 18px;

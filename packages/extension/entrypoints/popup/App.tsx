@@ -427,7 +427,8 @@ function ApprovalScreen({
       {feeOverride !== null && (
         <div className="fee-override">
           <label htmlFor="fee-mojos" className="muted small">
-            Fee (mojos) — dApp suggested <code>{initialFee}</code>:
+            Network fee — dApp suggested{" "}
+            <code>{fmtXch(initialFee ?? "0")}</code> ({initialFee} mojos):
           </label>
           <input
             id="fee-mojos"
@@ -550,7 +551,15 @@ function TakeOfferSummary({ offer }: { offer: string }) {
   }, [offer]);
 
   if (error) {
-    return <p className="error small">Could not decode offer: {error}</p>;
+    return (
+      <div className="result">
+        <p className="error small">
+          ⚠ This offer string is invalid or malformed — Loroco can't read what
+          it would trade. Don't approve it.
+        </p>
+        <p className="muted small">Decoder said: {error}</p>
+      </div>
+    );
   }
   if (!decoded) {
     return <p className="muted small">Decoding offer…</p>;
@@ -591,10 +600,10 @@ function OfferAssetList({
   const xch = BigInt(side.xch_mojos);
   const items: string[] = [];
   if (xch > 0n) {
-    items.push(`${mojosToXch(xch.toString())} XCH`);
+    items.push(fmtXch(xch.toString()));
   }
   for (const c of side.cats) {
-    items.push(`${c.amount} ${shortHash(c.asset_id)}`);
+    items.push(`${mojosToCatUnits(c.amount)} ${shortHash(c.asset_id)}`);
   }
   for (const l of side.nft_launcher_ids) {
     items.push(`NFT ${shortHash(l)}`);
@@ -779,7 +788,7 @@ function CoinSpendBreakdown({
 
       {fee > 0n && (
         <p className="muted small">
-          Network fee: {fee.toString()} mojos
+          Network fee: {fmtXch(fee.toString())}
         </p>
       )}
 
@@ -882,24 +891,25 @@ function ApprovalSummary({
       const amount = params?.amount;
       const assetId = params?.assetId;
       const fee = params?.fee;
+      const isXch = assetId == null || assetId === "";
       return (
         <div className="result">
           <div>
             <span className="muted">to</span>
-            <code>{String(to ?? "")}</code>
+            <code title={String(to ?? "")}>{String(to ?? "")}</code>
           </div>
           <div>
             <span className="muted">amount</span>
-            <code>{String(amount ?? "")}</code>
+            <code>{amount != null ? (isXch ? fmtXch(String(amount)) : fmtCat(String(amount))) : ""}</code>
           </div>
           <div>
             <span className="muted">asset id</span>
-            <code>{String(assetId ?? "(XCH)")}</code>
+            <code>{isXch ? "(XCH)" : String(assetId)}</code>
           </div>
           {fee != null && (
             <div>
-              <span className="muted">fee</span>
-              <code>{String(fee)}</code>
+              <span className="muted">network fee</span>
+              <code>{fmtXch(String(fee))}</code>
             </div>
           )}
         </div>
@@ -908,20 +918,9 @@ function ApprovalSummary({
 
     case "takeOffer": {
       const offer = typeof params?.offer === "string" ? (params.offer as string) : "";
-      const fee = params?.fee;
-      return (
-        <>
-          {offer ? <TakeOfferSummary offer={offer} /> : null}
-          {fee != null && BigInt(String(fee)) > 0n && (
-            <div className="result">
-              <div>
-                <span className="muted">fee</span>
-                <code>{String(fee)}</code>
-              </div>
-            </div>
-          )}
-        </>
-      );
+      // Fee row omitted — takeOffer renders the editable fee-override control
+      // below this summary (see ApprovalScreen), so it would duplicate it.
+      return offer ? <TakeOfferSummary offer={offer} /> : null;
     }
 
     case "walletWatchAsset": {
@@ -1012,8 +1011,12 @@ function ApprovalSummary({
     case "createOffer": {
       const offerAssets = (params?.offerAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
       const requestAssets = (params?.requestAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
-      const fee = params?.fee;
+      const fmtOfferAsset = (a: { assetId: string; amount: string }) =>
+        a.assetId === "" ? fmtXch(a.amount) : `${mojosToCatUnits(a.amount)} ${shortHash(a.assetId)}`;
       return (
+        // The fee row is intentionally omitted here — createOffer renders the
+        // editable fee-override control just below this summary, so showing it
+        // twice (once raw, once editable) was redundant and confusing.
         <div className="offer-summary">
           <div className="offer-side offer-pay">
             <span className="muted small">You will offer</span>
@@ -1021,11 +1024,7 @@ function ApprovalSummary({
               {offerAssets.length === 0 ? (
                 <li className="muted small">nothing</li>
               ) : (
-                offerAssets.map((a, i) => (
-                  <li key={i}>
-                    {a.amount} {a.assetId === "" ? "XCH" : shortHash(a.assetId)}
-                  </li>
-                ))
+                offerAssets.map((a, i) => <li key={i}>{fmtOfferAsset(a)}</li>)
               )}
             </ul>
           </div>
@@ -1036,17 +1035,10 @@ function ApprovalSummary({
               {requestAssets.length === 0 ? (
                 <li className="muted small">nothing</li>
               ) : (
-                requestAssets.map((a, i) => (
-                  <li key={i}>
-                    {a.amount} {a.assetId === "" ? "XCH" : shortHash(a.assetId)}
-                  </li>
-                ))
+                requestAssets.map((a, i) => <li key={i}>{fmtOfferAsset(a)}</li>)
               )}
             </ul>
           </div>
-          {fee != null && BigInt(String(fee)) > 0n && (
-            <p className="muted small">Fee: {String(fee)} mojos</p>
-          )}
         </div>
       );
     }
@@ -1089,8 +1081,8 @@ function ApprovalSummary({
           </div>
           {fee != null && BigInt(String(fee)) > 0n && (
             <div>
-              <span className="muted">fee</span>
-              <code>{String(fee)}</code>
+              <span className="muted">network fee</span>
+              <code>{fmtXch(String(fee))}</code>
             </div>
           )}
         </div>
@@ -1105,10 +1097,10 @@ function ApprovalSummary({
           <p className="muted small">
             Send XCH to {outputs.length} recipient{outputs.length === 1 ? "" : "s"} in one transaction.
           </p>
-          <OutputsList outputs={outputs} unit="XCH" />
-          <SumRow outputs={outputs} unit="mojos" />
+          <OutputsList outputs={outputs} kind="xch" />
+          <SumRow outputs={outputs} kind="xch" />
           {fee != null && (
-            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1124,10 +1116,10 @@ function ApprovalSummary({
             Send a token (CAT) to {outputs.length} recipient{outputs.length === 1 ? "" : "s"}.
           </p>
           <div><span className="muted">asset id</span><code>{String(assetId ?? "")}</code></div>
-          <OutputsList outputs={outputs} unit="CAT mojos" />
-          <SumRow outputs={outputs} unit="CAT mojos" />
+          <OutputsList outputs={outputs} kind="cat" />
+          <SumRow outputs={outputs} kind="cat" />
           {fee != null && (
-            <div><span className="muted">fee (XCH mojos)</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1146,20 +1138,20 @@ function ApprovalSummary({
           {xchOutputs.length > 0 && (
             <>
               <span className="muted small">XCH outputs</span>
-              <OutputsList outputs={xchOutputs} unit="XCH mojos" />
+              <OutputsList outputs={xchOutputs} kind="xch" />
             </>
           )}
           {catOutputs.length > 0 && (
             <>
               <div><span className="muted">CAT asset id</span><code>{String(catBlock?.assetId ?? "")}</code></div>
-              <OutputsList outputs={catOutputs} unit="CAT mojos" />
+              <OutputsList outputs={catOutputs} kind="cat" />
             </>
           )}
           {xchOutputs.length === 0 && catOutputs.length === 0 && (
             <p className="muted small">No outputs specified.</p>
           )}
           {fee != null && (
-            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1177,7 +1169,7 @@ function ApprovalSummary({
           </p>
           <div><span className="muted">max inputs</span><code>{String(maxInputs)}</code></div>
           {fee != null && (
-            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1194,7 +1186,7 @@ function ApprovalSummary({
           </p>
           <div><span className="muted">parts</span><code>{String(parts ?? "")}</code></div>
           {fee != null && (
-            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1211,11 +1203,10 @@ function ApprovalSummary({
             unrepeatable token type and gives the whole initial supply to the
             address below.
           </p>
-          <div><span className="muted">supply (CAT mojos)</span><code>{String(amount ?? "")}</code></div>
-          <div><span className="muted">recipient</span><code>{String(recipient ?? "")}</code></div>
-          <p className="muted small">1 CAT = 1000 CAT mojos.</p>
+          <div><span className="muted">supply</span><code>{amount != null ? fmtCat(String(amount)) : ""}</code></div>
+          <div><span className="muted">recipient</span><code title={String(recipient ?? "")}>{String(recipient ?? "")}</code></div>
           {fee != null && (
-            <div><span className="muted">fee (XCH mojos)</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1231,7 +1222,7 @@ function ApprovalSummary({
             later own NFTs or sign as you.
           </p>
           {fee != null && (
-            <div><span className="muted">fee (XCH mojos)</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1251,9 +1242,9 @@ function ApprovalSummary({
           </p>
           <div><span className="muted">NFT</span><code>{String(launcherId ?? coinId ?? "")}</code></div>
           <div><span className="muted">list</span><code>{String(uriKind ?? "")}</code></div>
-          <div><span className="muted">uri</span><code>{String(uri ?? "")}</code></div>
+          <div><span className="muted">uri</span><code title={String(uri ?? "")}>{String(uri ?? "")}</code></div>
           {fee != null && (
-            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1270,11 +1261,11 @@ function ApprovalSummary({
             <strong>Transfer ownership of a DID</strong> to another address. After
             this you will no longer control this DID.
           </p>
-          <div><span className="muted">recipient</span><code>{String(recipient ?? "")}</code></div>
+          <div><span className="muted">recipient</span><code title={String(recipient ?? "")}>{String(recipient ?? "")}</code></div>
           <div><span className="muted">DID coin id</span><code>{String(didCoinId ?? "")}</code></div>
           <div><span className="muted">derivation index</span><code>{String(idx ?? "")}</code></div>
           {fee != null && (
-            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1290,13 +1281,13 @@ function ApprovalSummary({
             simple profile (empty recovery list, 1 verification required). Owner
             and metadata are unchanged.
           </p>
-          <ul className="permission-list">
+          <ul className="detail-list">
             {coinIds.map((c, i) => (
               <li key={i}><code>{shortHash(String(c))}</code></li>
             ))}
           </ul>
           {fee != null && (
-            <div><span className="muted">fee (first tx only)</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee (first tx only)</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1312,7 +1303,7 @@ function ApprovalSummary({
             Mint <strong>{nfts.length}</strong> NFT{nfts.length === 1 ? "" : "s"} under the DID below.
           </p>
           <div><span className="muted">DID</span><code>{String(did ?? "")}</code></div>
-          <ul className="permission-list">
+          <ul className="detail-list">
             {nfts.map((n, i) => (
               <li key={i}>
                 <code>
@@ -1324,7 +1315,7 @@ function ApprovalSummary({
             ))}
           </ul>
           {fee != null && (
-            <div><span className="muted">fee</span><code>{String(fee)}</code></div>
+            <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
         </div>
       );
@@ -1336,22 +1327,32 @@ function ApprovalSummary({
 }
 
 // Shared helpers for the multi-output approval summaries above.
+// `kind` decides how the raw-mojos amounts are humanised: XCH (12 decimals)
+// or CAT (3 decimals). `assetSymbol` overrides the "CAT" label when known.
+function fmtOutputAmount(
+  amount: string | number,
+  kind: "xch" | "cat",
+  assetSymbol?: string,
+): string {
+  return kind === "xch" ? fmtXch(amount) : fmtCat(amount, assetSymbol);
+}
+
 function OutputsList({
   outputs,
-  unit,
+  kind,
+  assetSymbol,
 }: {
   outputs: Array<{ address: string; amount: string | number }>;
-  unit: string;
+  kind: "xch" | "cat";
+  assetSymbol?: string;
 }) {
   if (outputs.length === 0) return <p className="muted small">No outputs.</p>;
   return (
-    <ul className="permission-list">
+    <ul className="detail-list">
       {outputs.map((o, i) => (
         <li key={i}>
-          <span>
-            <code>{String(o.amount)}</code> {unit} →{" "}
-            <code>{shortHash(String(o.address))}</code>
-          </span>
+          <code>{fmtOutputAmount(o.amount, kind, assetSymbol)}</code> →{" "}
+          <code title={String(o.address)}>{shortHash(String(o.address))}</code>
         </li>
       ))}
     </ul>
@@ -1360,10 +1361,12 @@ function OutputsList({
 
 function SumRow({
   outputs,
-  unit,
+  kind,
+  assetSymbol,
 }: {
   outputs: Array<{ address: string; amount: string | number }>;
-  unit: string;
+  kind: "xch" | "cat";
+  assetSymbol?: string;
 }) {
   let total = 0n;
   try {
@@ -1374,7 +1377,7 @@ function SumRow({
   return (
     <div>
       <span className="muted">total</span>
-      <code>{total.toString()} {unit}</code>
+      <code>{fmtOutputAmount(total.toString(), kind, assetSymbol)}</code>
     </div>
   );
 }
@@ -4357,6 +4360,31 @@ function mojosToXch(mojos: string): string {
   } catch {
     return mojos;
   }
+}
+
+/**
+ * Human XCH amount with unit, trailing zeros trimmed: "1.5 XCH", "0.001 XCH".
+ * Used by every approval summary so the user never has to count zeros in a
+ * raw-mojos string. The exact mojo value still lives in the "Raw params" block.
+ */
+function fmtXch(mojos: string | number | bigint): string {
+  try {
+    const m = BigInt(String(mojos));
+    const neg = m < 0n;
+    const a = neg ? -m : m;
+    const scale = 1_000_000_000_000n;
+    const whole = a / scale;
+    const frac = (a % scale).toString().padStart(12, "0").replace(/0+$/, "");
+    const body = frac ? `${whole}.${frac}` : `${whole}`;
+    return `${neg ? "-" : ""}${body} XCH`;
+  } catch {
+    return `${mojos} mojos`;
+  }
+}
+
+/** Human CAT amount with unit (or a custom symbol): "1 CAT", "12.5 SBX". */
+function fmtCat(mojos: string | number | bigint, symbol?: string): string {
+  return `${mojosToCatUnits(String(mojos))} ${symbol || "CAT"}`;
 }
 
 type SendAssetKind = "xch" | "cat";

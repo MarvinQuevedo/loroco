@@ -4,6 +4,8 @@ dist/
 .wxt/
 *.tsbuildinfo
 .DS_Store
+shots/*
+other_sources/*
 
 # Per-repo Chrome profile created by `pnpm chrome`.
 .chrome-profile/
