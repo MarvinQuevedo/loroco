@@ -25,3 +25,4 @@ packages/wallet-wasm/sage_wasm_bg.wasm.d.ts
 packages/wallet-wasm/.gitignore
 !packages/wallet-wasm/package.json
 !packages/wallet-wasm/README.md
+.claude/scheduled_tasks.lock
