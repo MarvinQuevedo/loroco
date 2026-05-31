@@ -5,6 +5,12 @@ tokens and NFTs, and trade with anyone using offers. When you visit a
 Chia site — a marketplace, a swap, a game — Loroco asks you before
 signing anything.
 
+📖 **Documentation & screenshots:** **<https://marvinquevedo.github.io/loroco/>**
+— an overview with wallet screenshots, the architecture & trust model,
+the full RPC method reference, the developer guide, and the security
+audit suite. Source lives in [`docs/`](docs/) (served by GitHub Pages
+from `main` → `/docs`).
+
 ---
 
 ### For developers
