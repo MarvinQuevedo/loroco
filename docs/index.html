@@ -90,12 +90,37 @@
   <div class="wrap">
     <span class="eyebrow">The wallet</span>
     <h2>Clean, familiar, fast</h2>
-    <p class="lead">Home, Send, NFTs and Settings — a per-fingerprint wallet that syncs in the background.</p>
+    <p class="lead">Home, Send, Receive and Activity — a per-fingerprint wallet that syncs XCH, CATs and NFTs in the background.</p>
     <div class="shots" style="margin-top:28px">
-      <figure class="shot" style="margin:0"><img src="assets/shots/home.png" alt="Home tab"><span>Home · balances</span></figure>
-      <figure class="shot" style="margin:0"><img src="assets/shots/send.png" alt="Send tab"><span>Send XCH / CAT</span></figure>
-      <figure class="shot" style="margin:0"><img src="assets/shots/nfts.png" alt="NFTs tab"><span>NFTs</span></figure>
-      <figure class="shot" style="margin:0"><img src="assets/shots/settings.png" alt="Settings"><span>Settings</span></figure>
+      <figure class="shot" style="margin:0"><img src="assets/shots/home.png" alt="Home tab showing XCH, CAT and NFT token balances"><span>Home · balances</span></figure>
+      <figure class="shot" style="margin:0"><img src="assets/shots/send.png" alt="Send tab with asset picker, recipient, amount and fee fields"><span>Send XCH / CAT</span></figure>
+      <figure class="shot" style="margin:0"><img src="assets/shots/receive.png" alt="Receive tab with QR code and bech32m address"><span>Receive · QR + address</span></figure>
+      <figure class="shot" style="margin:0"><img src="assets/shots/activity.png" alt="Activity tab listing received and sent transactions by block"><span>Activity · history</span></figure>
+    </div>
+  </div>
+</section>
+
+<!-- Approval -->
+<section class="section">
+  <div class="wrap">
+    <div class="grid grid-2" style="align-items:center; gap:40px">
+      <div>
+        <span class="eyebrow">Per-call approval</span>
+        <h2>You see it before you sign it</h2>
+        <p class="lead">When a dApp asks Loroco to do something that moves coins, the popup decodes the
+          request and shows you the real effect — what you offer, what you receive, the network fee — with
+          the origin requesting it. Nothing is blind-signed; you re-consent to every transaction.</p>
+        <ul class="checks">
+          <li>The requesting origin is Chrome-verified, not page-supplied.</li>
+          <li>Amounts, fees and asset ids are humanised, never bare counts.</li>
+          <li>Raw params stay one click away for the curious.</li>
+          <li>Approve / Reject — there is no "remember this site" for spending.</li>
+        </ul>
+      </div>
+      <figure class="shot" style="margin:0; max-width:380px; justify-self:center">
+        <img src="assets/shots/approval-offer.png" alt="createOffer approval dialog from dexie.space showing offered coin, requested XCH and network fee">
+        <span>createOffer · approval dialog</span>
+      </figure>
     </div>
   </div>
 </section>
