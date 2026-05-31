@@ -170,7 +170,7 @@
       <thead><tr><th>Method</th><th>Class</th><th>Params</th><th>Result</th></tr></thead>
       <tbody>
         <tr><td><code>createOffer</code></td><td><span class="tag tag-write">write</span></td><td><code>{ offerAssets, requestAssets, fee? }</code></td><td><code>{ id, offer }</code> — persists input coins + <code>origin</code></td></tr>
-        <tr><td><code>takeOffer</code></td><td><span class="tag tag-write">write</span></td><td><code>{ offer, fee? }</code></td><td><code>{ id }</code> — popup shows royalty assertions</td></tr>
+        <tr><td><code>takeOffer</code></td><td><span class="tag tag-write">write</span></td><td><code>{ offer, fee? }</code></td><td><code>{ id }</code> — popup shows engine-verified royalty amount + on-chain puzzle hash</td></tr>
         <tr><td><code>cancelOffer</code></td><td><span class="tag tag-write">write</span></td><td><code>{ id, fee?, secure? }</code></td><td><code>{ id, cancelled } | {}</code> — filtered by <code>origin</code> stamp</td></tr>
         <tr><td><code>issueCat</code></td><td><span class="tag tag-write">write</span></td><td><code>{ amount, fee?, … }</code></td><td><code>{ id, assetId }</code></td></tr>
         <tr><td><code>addNftUri</code></td><td><span class="tag tag-write">write</span></td><td><code>{ launcherId, uri, kind, fee? }</code></td><td><code>{ id, launcherId }</code></td></tr>

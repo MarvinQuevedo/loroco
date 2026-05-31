@@ -48,14 +48,16 @@
 <span class="tok-c">// 2. Connect — the ONLY entry point. Pops an approval popup.</span>
 <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({ method: <span class="tok-s">"connect"</span> });
 
-<span class="tok-c">// 3. Read freely once connected (no further prompts)</span>
+<span class="tok-c">// 3. Reads work under ANY connection (full OR read-only), no prompt</span>
 <span class="tok-k">const</span> [addr] = <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({ method: <span class="tok-s">"accounts"</span> });
 <span class="tok-k">const</span> bal   = <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({
   method: <span class="tok-s">"getAssetBalance"</span>,
   params: { type: <span class="tok-s">"xch"</span>, assetId: <span class="tok-k">null</span> },
 });
 
-<span class="tok-c">// 4. Any mutating call re-prompts the user, every time</span>
+<span class="tok-c">// 4. Mutating calls re-prompt the user EVERY time — unless the user</span>
+<span class="tok-c">//    granted read-only, in which case they're rejected with 4001 and</span>
+<span class="tok-c">//    no popup. Always handle 4001 (see "Security levels" below).</span>
 <span class="tok-k">const</span> { id } = <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({
   method: <span class="tok-s">"transfer"</span>,
   params: { to: <span class="tok-s">"xch1…"</span>, amount: <span class="tok-s">"1000000000000"</span>, fee: <span class="tok-s">"0"</span> },
@@ -65,6 +67,98 @@
       The same call works as <code>chia_connect</code>, <code>chip0002_connect</code> or <code>connect</code> — the router
       canonicalises before gating. See the <a href="methods.html">RPC reference</a> for the full surface and
       <a href="methods.html#errors">error codes</a>.
+    </div>
+  </div>
+</section>
+
+<!-- Security levels -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">For dApp authors</span>
+    <h2>Security levels — what your dApp must handle</h2>
+    <p class="lead">These are <strong>not an API you call</strong>. The <em>user</em> controls them at connect time; your
+      job is to degrade gracefully. The wire surface is unchanged from Goby/CHIP-0002 — the only thing you must add
+      is honest handling of <code>4001</code>.</p>
+
+    <h3>1 · Connection scope — full vs read-only</h3>
+    <p>When the user approves a <code>connect</code> / <code>requestAccounts</code>, they pick one of two levels:</p>
+    <ul class="checks">
+      <li><strong>Full access</strong> (default — identical to Goby): reads run without a prompt; signing/sending
+        re-prompts the user <em>every</em> call.</li>
+      <li><strong>Read-only</strong>: reads still work, but every signing/mutating method
+        (<code>transfer</code>, <code>signCoinSpends</code>, <code>signMessage</code>, <code>takeOffer</code>, …) is
+        <strong>rejected outright with <code>4001</code> — no popup</strong>. It's the user saying "this site may never
+        ask me to sign."</li>
+    </ul>
+    <div class="note info">
+      Your dApp <strong>cannot request or read</strong> the scope — only the user sets it, and there's no
+      <code>getScope</code>. You discover read-only the same way you discover "not connected": a signing call returns
+      <code>4001</code>. If your dApp needs to sign, catch that and tell the user to reconnect granting full access.
+    </div>
+
+    <h3>2 · Connections expire (7-day sliding window)</h3>
+    <p>A grant stays alive as long as it's used; after <strong>7 days of inactivity</strong> it auto-disconnects.
+      The next call then returns <code>4001</code> — exactly like a fresh origin. Treat <code>4001</code> on
+      <em>any</em> method as "reconnect needed."</p>
+
+    <h3>One pattern covers both</h3>
+    <p>Don't assume "connected ⇒ can sign" and don't cache connection state forever. Wrap requests so a
+      <code>4001</code> triggers a single reconnect + retry:</p>
+<pre><code><span class="tok-k">const</span> chia = window.loroco ?? window.chia;
+
+<span class="tok-k">async function</span> <span class="tok-f">request</span>(method, params) {
+  <span class="tok-k">try</span> {
+    <span class="tok-k">return await</span> chia.<span class="tok-f">request</span>({ method, params });
+  } <span class="tok-k">catch</span> (e) {
+    <span class="tok-c">// 4001 = not connected / expired / blocked by read-only scope</span>
+    <span class="tok-k">if</span> (e?.code !== <span class="tok-s">4001</span>) <span class="tok-k">throw</span> e;
+
+    <span class="tok-c">// Re-establish the connection (pops the approval + scope picker).</span>
+    <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({ method: <span class="tok-s">"connect"</span> });
+
+    <span class="tok-k">try</span> {
+      <span class="tok-k">return await</span> chia.<span class="tok-f">request</span>({ method, params });
+    } <span class="tok-k">catch</span> (e2) {
+      <span class="tok-c">// Still 4001 after reconnect ⇒ the user granted READ-ONLY.</span>
+      <span class="tok-k">if</span> (e2?.code === <span class="tok-s">4001</span> && <span class="tok-f">isSigning</span>(method)) {
+        <span class="tok-k">throw new</span> <span class="tok-f">Error</span>(
+          <span class="tok-s">"This site needs full access. Reconnect and choose \"Full access\"."</span>
+        );
+      }
+      <span class="tok-k">throw</span> e2;
+    }
+  }
+}
+
+<span class="tok-k">const</span> SIGNING = <span class="tok-k">new</span> <span class="tok-f">Set</span>([
+  <span class="tok-s">"transfer"</span>, <span class="tok-s">"sendTransaction"</span>, <span class="tok-s">"signCoinSpends"</span>, <span class="tok-s">"signMessage"</span>,
+  <span class="tok-s">"signMessageByAddress"</span>, <span class="tok-s">"createOffer"</span>, <span class="tok-s">"takeOffer"</span>, <span class="tok-s">"cancelOffer"</span>,
+]);
+<span class="tok-k">const</span> <span class="tok-f">isSigning</span> = (m) => SIGNING.<span class="tok-f">has</span>(m);</code></pre>
+
+    <h3>3 · Signing is shown decoded — keep bundles clean</h3>
+    <p>For <code>signCoinSpends</code> / <code>sendTransaction</code> the popup runs the actual CLVM and shows recipients,
+      amounts, fees, value leaving via unrecognised puzzles, and any replayable <code>AGG_SIG_UNSAFE</code>. If the
+      bundle contains anything Loroco can't classify, the user must tick an <strong>explicit acknowledgement</strong>
+      before Approve unlocks. Practical implications:</p>
+    <ul class="checks">
+      <li>Build bundles from <strong>standard puzzles</strong> and keep them minimal — opaque bundles add friction and
+        cost you conversions.</li>
+      <li>Don't pad with extra <code>AGG_SIG_UNSAFE</code> conditions; they're flagged loudly as a phishing tell.</li>
+      <li>Prefer the high-level methods (<code>transfer</code>, <code>takeOffer</code>, …) over raw bundles when you can —
+        their popups summarise cleanly with no acknowledgement gate.</li>
+    </ul>
+
+    <h3>4 · Offer royalties are verified on-chain</h3>
+    <p>On <code>takeOffer</code>, Loroco re-derives the royalty <em>amount</em> and destination puzzle hash from the
+      offered NFT's on-chain royalty puzzle — not from anything your offer asserts — and shows it as "verified
+      on-chain." Build honest offers; a mismatched royalty claim is simply ignored in favour of the real one.</p>
+
+    <div class="note info">
+      <span class="label">TL;DR for integrators</span><br>
+      Default behaviour is unchanged from Goby. To be a good citizen of the new model: <strong>handle <code>4001</code>
+      everywhere</strong> (reconnect + retry), don't assume connect implies signing, keep signable bundles standard and
+      small, and present offers honestly.
     </div>
   </div>
 </section>

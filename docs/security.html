@@ -117,17 +117,17 @@
 <section class="section">
   <div class="wrap">
     <span class="eyebrow">Honesty</span>
-    <h2>Known open weak spots</h2>
-    <p class="lead">Real risks not yet fully covered by defenses — documented openly, to be addressed before a wider audience.</p>
+    <h2>Hardening status</h2>
+    <p class="lead">These were the documented weak spots. Here's what changed — and the residual risk that remains, stated plainly.</p>
     <div class="grid grid-2" style="margin-top:24px">
-      <div class="card"><h3>Blind signing depth</h3>
-        <p><code>signCoinSpends</code> / <code>sendTransaction</code> decode the bundle, but a fully adversarial CLVM puzzle can still hide effects the summary doesn't surface. Trust the engine's decode, not the dApp's framing.</p></div>
-      <div class="card"><h3>No per-method permission scopes</h3>
-        <p>Every connection gets <code>methods: ["*"]</code>. There's no "this dApp may never request signing" mode — signing always re-prompts, but the scope can't be pre-restricted.</p></div>
-      <div class="card"><h3>takeOffer royalty assertion</h3>
-        <p>The popup shows royalty percentages but doesn't independently verify the on-chain royalty puzzle hash receives what's claimed.</p></div>
-      <div class="card"><h3>No connection auto-expiry</h3>
-        <p>Granted connections live until revoked from Settings → Connected sites. An expiry/heartbeat for high-risk methods is under consideration.</p></div>
+      <div class="card"><h3>Blind signing depth <span style="color:var(--ok,#3fb950)">✓ hardened</span></h3>
+        <p><code>signCoinSpends</code> / <code>sendTransaction</code> run the actual CLVM and surface recipients, amounts, fees, value leaving via <em>unrecognised</em> puzzles, and any replayable <code>AGG_SIG_UNSAFE</code>. A bundle Loroco can't fully decode now <strong>forces an explicit acknowledgement</strong> before Approve unlocks. Residual: a bespoke CLVM puzzle can still encode effects we don't classify — which is exactly why the acknowledgement + raw-params view exist. Trust the engine's decode, not the dApp's framing.</p></div>
+      <div class="card"><h3>Per-method permission scopes <span style="color:var(--ok,#3fb950)">✓ added</span></h3>
+        <p>Connect now offers <strong>read-only</strong> vs <strong>full access</strong>. A read-only connection can see balances/assets but every signing/mutating method is rejected <em>outright</em> (4001) before any approval popup — the "this dApp may never request signing" mode.</p></div>
+      <div class="card"><h3>takeOffer royalty verification <span style="color:var(--ok,#3fb950)">✓ added</span></h3>
+        <p>The popup now shows the <strong>concrete royalty amount and destination puzzle hash</strong>, re-derived by the engine from the offered NFT's on-chain royalty puzzle — independent of what the site claims, labelled "verified on-chain".</p></div>
+      <div class="card"><h3>Connection auto-expiry <span style="color:var(--ok,#3fb950)">✓ added</span></h3>
+        <p>Grants now carry a <strong>7-day sliding window</strong>: active use keeps a connection alive, inactivity auto-disconnects it. Expiry is enforced on access and swept periodically; the countdown shows in Settings → Connected sites.</p></div>
     </div>
     <div class="note info" style="margin-top:22px">
       Re-run the suite whenever you change <code>background.ts</code>, <code>content.ts</code>, <code>inpage.ts</code>,
