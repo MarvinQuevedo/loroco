@@ -81,19 +81,32 @@
       is honest handling of <code>4001</code>.</p>
 
     <h3>1 · Connection scope — full vs read-only</h3>
-    <p>When the user approves a <code>connect</code> / <code>requestAccounts</code>, they pick one of two levels:</p>
+    <p>A connection is granted at one of two levels:</p>
     <ul class="checks">
       <li><strong>Full access</strong> (default — identical to Goby): reads run without a prompt; signing/sending
         re-prompts the user <em>every</em> call.</li>
       <li><strong>Read-only</strong>: reads still work, but every signing/mutating method
         (<code>transfer</code>, <code>signCoinSpends</code>, <code>signMessage</code>, <code>takeOffer</code>, …) is
-        <strong>rejected outright with <code>4001</code> — no popup</strong>. It's the user saying "this site may never
-        ask me to sign."</li>
+        <strong>rejected outright with <code>4001</code> — no popup</strong>. It's "this site may never ask me to sign."</li>
+    </ul>
+    <p><strong>Your dApp declares the ceiling; the user can only lower it</strong> (principle of least privilege).
+      Pass a <code>scope</code> in your connect params to request the least you need:</p>
+<pre><code><span class="tok-c">// Default: requests FULL (write). User may downgrade to read-only.</span>
+<span class="tok-k">await</span> chia.<span class="tok-f">request</span>({ method: <span class="tok-s">"connect"</span> });
+
+<span class="tok-c">// A read-only dApp asks for exactly that — the wallet LOCKS it there,</span>
+<span class="tok-c">// the user cannot upgrade it to write.</span>
+<span class="tok-k">await</span> chia.<span class="tok-f">request</span>({ method: <span class="tok-s">"connect"</span>, params: { scope: <span class="tok-s">"read-only"</span> } });</code></pre>
+    <ul class="checks">
+      <li>Request <code>"full"</code> (or omit it) → the prompt defaults to full and the user may downgrade to read-only.</li>
+      <li>Request <code>"read-only"</code> → the prompt shows it locked; the grant is read-only no matter what.</li>
+      <li>The wallet always clamps to <strong>≤ the level you requested</strong> — it can never grant more.</li>
     </ul>
     <div class="note info">
-      Your dApp <strong>cannot request or read</strong> the scope — only the user sets it, and there's no
-      <code>getScope</code>. You discover read-only the same way you discover "not connected": a signing call returns
-      <code>4001</code>. If your dApp needs to sign, catch that and tell the user to reconnect granting full access.
+      You can <strong>request</strong> a scope but can't <strong>read back</strong> what was granted (there's no
+      <code>getScope</code>). You discover read-only the same way you discover "not connected": a signing call returns
+      <code>4001</code>. If your dApp needs to sign, request <code>"full"</code>, and if signing still returns
+      <code>4001</code> after a reconnect, tell the user to reconnect choosing full access.
     </div>
 
     <h3>2 · Connections expire (7-day sliding window)</h3>
@@ -157,8 +170,9 @@
     <div class="note info">
       <span class="label">TL;DR for integrators</span><br>
       Default behaviour is unchanged from Goby. To be a good citizen of the new model: <strong>handle <code>4001</code>
-      everywhere</strong> (reconnect + retry), don't assume connect implies signing, keep signable bundles standard and
-      small, and present offers honestly.
+      everywhere</strong> (reconnect + retry), <strong>request the least scope you need</strong>
+      (<code>connect({ scope: "read-only" })</code> if you never sign), don't assume connect implies signing, keep
+      signable bundles standard and small, and present offers honestly.
     </div>
   </div>
 </section>

@@ -1,7 +1,7 @@
 # Loroco security audit (adversarial dApp suite)
 
 Playwright-driven suite that loads the Loroco extension and runs a **hostile
-dApp** through 12 attack vectors. Each case verifies a concrete defense in
+dApp** through 21 attack vectors. Each case verifies a concrete defense in
 the page → content → background pipeline.
 
 ## How to run
@@ -48,6 +48,10 @@ finding — the script exits with code 1 and prints what got through.
 | 15 | Attacker origin tries to cancel victim's offer | Handler filters offers by `origin` stamp | rpc-router cancelOffer + offer.origin stamped at create |
 | 16 | `walletWatchAsset` with spoofed symbol (claims "XCH" for arbitrary assetId) | Popup shows assetId verbatim so user can spot the lie | popup ApprovalSummary for walletWatchAsset |
 | 17 | `signCoinSpends` blind-sign — bundle of N opaque coin spends | Popup renders `CoinSpendBreakdown` (decoded recipients + amounts, or graceful "could not decode") instead of just "N coin spends" | WASM `analyze_coin_spends` + popup `CoinSpendBreakdown` component |
+| 18 | `legacyGoby=false` compat flip | `window.chia` hidden, but `chia_*`/`chip0002_*` still reachable via `window.loroco` | content script injection gate + universal alias table |
+| 19 | Read-only-scoped origin calls a signing method | `4001` BEFORE any approval popup — read-only can never reach a signing/mutating method | `ensurePermissions` scope gate (#2) |
+| 20 | Connection seeded with an elapsed `expiresAt` | Next call gets `4001` and the dead record is purged from storage | `ensurePermissions` / `isConnected` lazy expiry + `purgeExpiredConnections` (#4) |
+| 21 | `connect({ scope: "read-only" })` then a signing call | Grant is locked read-only; signing rejected `4001` (clamp is a hard ceiling, not popup cosmetics) | `clampScope` + `normalizeRequestedScope` (#2) |
 
 ## Reading the output
 

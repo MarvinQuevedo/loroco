@@ -313,7 +313,12 @@ export function App() {
       )}
       <main>
         {showApproval && (
-          <ApprovalScreen request={pending[0]!} queueSize={pending.length} onDecide={decide} />
+          <ApprovalScreen
+            key={pending[0]!.id}
+            request={pending[0]!}
+            queueSize={pending.length}
+            onDecide={decide}
+          />
         )}
         {!showApproval && view.kind === "loading" && <LoadingScreen />}
         {!showApproval && view.kind === "onboarding" && (
@@ -358,6 +363,24 @@ export function App() {
   );
 }
 
+/**
+ * Mirror of `normalizeRequestedScope` in background/permissions.ts — the
+ * scope CEILING the dApp requested in its connect params. Cosmetic only: it
+ * sets the popup's default + whether the choice is locked. The background
+ * handler clamps authoritatively (clampScope), so drift here can never grant
+ * more than the dApp requested.
+ */
+function requestedScopeFromParams(params: unknown): "full" | "read-only" {
+  const p = params as { scope?: unknown; readOnly?: unknown } | null | undefined;
+  if (p && typeof p === "object") {
+    if (p.readOnly === true) return "read-only";
+    const s =
+      typeof p.scope === "string" ? p.scope.toLowerCase().replace(/[_\s]/g, "-") : "";
+    if (s === "read-only" || s === "readonly" || s === "read") return "read-only";
+  }
+  return "full";
+}
+
 function ApprovalScreen({
   request,
   queueSize,
@@ -391,6 +414,27 @@ function ApprovalScreen({
         )
       : null;
   const [feeOverride, setFeeOverride] = useState<string | null>(initialFee);
+  // #2 — connection scope. On a connect/requestAccounts approval the user
+  // chooses whether the site gets full access (signing allowed, still
+  // per-call approved) or read-only (it can see balances/assets but every
+  // signing/mutating method is rejected outright — the "this dApp may never
+  // request signing" mode). Default to full to preserve existing behaviour.
+  const isConnectRequest =
+    request.method === "connect" || request.method === "requestAccounts";
+  // The dApp declares a scope ceiling in its connect params. If it asked for
+  // read-only, the choice is LOCKED there (the user can't upgrade to write).
+  // If it asked for full (or didn't ask), the user may downgrade to read-only.
+  const requestedScope = requestedScopeFromParams(request.params);
+  const scopeLocked = requestedScope === "read-only";
+  const [scope, setScope] = useState<"full" | "read-only">(requestedScope);
+  // #1 — when the decoded bundle contains effects Loroco can't fully account
+  // for (unrecognised puzzles, value leaving via an unknown layer, or a
+  // replayable AGG_SIG_UNSAFE), the breakdown reports it here. We then force
+  // an explicit acknowledgement checkbox before Approve unlocks, so a
+  // "1 coin spend" summary can never get blind-approved when the contents
+  // are opaque.
+  const [riskAckRequired, setRiskAckRequired] = useState(false);
+  const [riskAcked, setRiskAcked] = useState(false);
 
   const decide = async (approved: boolean) => {
     if (busy) return;
@@ -399,6 +443,9 @@ function ApprovalScreen({
       const overrides: Record<string, unknown> = {};
       if (approved && feeOverride !== null && feeOverride !== initialFee) {
         overrides.fee = feeOverride;
+      }
+      if (approved && isConnectRequest) {
+        overrides.scope = scope;
       }
       await onDecide(
         request.id,
@@ -422,7 +469,65 @@ function ApprovalScreen({
         <strong>{request.origin}</strong> is requesting permission.
       </p>
 
-      <ApprovalSummary request={request} onAnalysisReady={setAnalysisReady} />
+      <ApprovalSummary
+        request={request}
+        onAnalysisReady={setAnalysisReady}
+        onRiskAssessed={setRiskAckRequired}
+      />
+
+      {isConnectRequest && scopeLocked && (
+        <div className="scope-picker">
+          <div className="scope-option selected scope-locked">
+            <span className="scope-lock" aria-hidden>🔒</span>
+            <span className="scope-body">
+              <span className="scope-title">Read-only — requested by this site</span>
+              <span className="muted small">
+                This site asked for read-only access. It can see balances &amp;
+                assets but can never sign or send, and this can't be upgraded
+                here. Connect, then it stays read-only.
+              </span>
+            </span>
+          </div>
+        </div>
+      )}
+
+      {isConnectRequest && !scopeLocked && (
+        <div className="scope-picker" role="radiogroup" aria-label="Connection access level">
+          <label className={`scope-option ${scope === "full" ? "selected" : ""}`}>
+            <input
+              type="radio"
+              name="connection-scope"
+              value="full"
+              checked={scope === "full"}
+              onChange={() => setScope("full")}
+              disabled={busy !== null}
+            />
+            <span className="scope-body">
+              <span className="scope-title">Full access</span>
+              <span className="muted small">
+                Can request signing &amp; sending — you still approve each one.
+              </span>
+            </span>
+          </label>
+          <label className={`scope-option ${scope === "read-only" ? "selected" : ""}`}>
+            <input
+              type="radio"
+              name="connection-scope"
+              value="read-only"
+              checked={scope === "read-only"}
+              onChange={() => setScope("read-only")}
+              disabled={busy !== null}
+            />
+            <span className="scope-body">
+              <span className="scope-title">Read-only</span>
+              <span className="muted small">
+                See balances &amp; assets only. Signing/sending is blocked —
+                it can never even ask. Reconnect later to grant more.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
 
       {feeOverride !== null && (
         <div className="fee-override">
@@ -453,6 +558,22 @@ function ApprovalScreen({
         <pre className="params-raw">{JSON.stringify(request.params, null, 2)}</pre>
       </details>
 
+      {riskAckRequired && (
+        <label className="risk-ack">
+          <input
+            type="checkbox"
+            checked={riskAcked}
+            onChange={(e) => setRiskAcked(e.target.checked)}
+            disabled={busy !== null}
+          />
+          <span>
+            I understand this bundle has effects Loroco couldn't fully decode
+            (an unrecognised puzzle, value leaving through an unknown layer, or
+            a replayable signature) and I trust this site to sign it.
+          </span>
+        </label>
+      )}
+
       <div className="row">
         <button
           className="secondary"
@@ -462,9 +583,15 @@ function ApprovalScreen({
           {busy === "reject" ? "…" : "Reject"}
         </button>
         <button
-          disabled={busy !== null || !analysisReady}
+          disabled={busy !== null || !analysisReady || (riskAckRequired && !riskAcked)}
           onClick={() => void decide(true)}
-          title={!analysisReady ? "Waiting for the bundle to decode…" : ""}
+          title={
+            !analysisReady
+              ? "Waiting for the bundle to decode…"
+              : riskAckRequired && !riskAcked
+                ? "Tick the acknowledgement to enable Approve"
+                : ""
+          }
         >
           {busy === "approve" ? "…" : !analysisReady ? "Decoding…" : "Approve"}
         </button>
@@ -528,7 +655,18 @@ function approvalTitle(method: string): string {
 interface DecodedOfferLite {
   offered: { xch_mojos: string; cats: Array<{ asset_id: string; amount: string }>; nft_launcher_ids: string[] };
   requested: { xch_mojos: string; cats: Array<{ asset_id: string; amount: string }>; nft_launcher_ids: string[] };
-  offered_royalties: Array<{ nft_launcher_id: string; royalty_basis_points: number }>;
+  offered_royalties: Array<{
+    nft_launcher_id: string;
+    royalty_basis_points: number;
+    /** On-chain royalty puzzle hash parsed from the offered NFT itself. */
+    royalty_puzzle_hash?: string;
+  }>;
+  /** Royalty the taker pays, computed by the engine from the NFT's on-chain
+   *  royalty info — not from the dApp's framing. */
+  royalty_payment?: {
+    xch_mojos: string;
+    cats: Array<{ asset_id: string; amount: string }>;
+  };
 }
 
 function TakeOfferSummary({ offer }: { offer: string }) {
@@ -579,13 +717,56 @@ function TakeOfferSummary({ offer }: { offer: string }) {
         <span className="muted small">You pay</span>
         <OfferAssetList side={decoded.requested} />
       </div>
-      {decoded.offered_royalties.length > 0 && (
+      {decoded.offered_royalties.length > 0 && <RoyaltyLine decoded={decoded} />}
+    </div>
+  );
+}
+
+/**
+ * #3 — royalty disclosure for takeOffer. We show the percentage AND the
+ * concrete amount the taker pays, computed by the engine from the offered
+ * NFT's on-chain royalty puzzle hash + basis points (parsed from the NFT
+ * coin spend in the bundle) — NOT from anything the dApp asserts. The
+ * destination puzzle hash is shown and labelled "verified on-chain" so the
+ * user can see funds go to the creator's real royalty address.
+ */
+function RoyaltyLine({ decoded }: { decoded: DecodedOfferLite }) {
+  const pcts = decoded.offered_royalties
+    .map((r) => `${(r.royalty_basis_points / 100).toFixed(2)}%`)
+    .join(", ");
+  const rp = decoded.royalty_payment;
+  const amounts: string[] = [];
+  if (rp) {
+    if (BigInt(rp.xch_mojos) > 0n) amounts.push(fmtXch(rp.xch_mojos));
+    for (const c of rp.cats) {
+      if (BigInt(c.amount) > 0n) {
+        amounts.push(`${mojosToCatUnits(c.amount)} ${shortHash(c.asset_id)}`);
+      }
+    }
+  }
+  const phs = decoded.offered_royalties
+    .map((r) => r.royalty_puzzle_hash)
+    .filter((h): h is string => Boolean(h));
+  return (
+    <div className="royalty-note">
+      <p className="muted small">
+        Creator royalty: <strong>{pcts}</strong>
+        {amounts.length > 0 ? (
+          <>
+            {" = "}
+            <strong>{amounts.join(" + ")}</strong>
+          </>
+        ) : null}
+      </p>
+      {phs.length > 0 && (
         <p className="muted small">
-          Royalties:{" "}
-          {decoded.offered_royalties
-            .map((r) => `${(r.royalty_basis_points / 100).toFixed(2)}%`)
-            .join(", ")}{" "}
-          go to the original NFT creator.
+          → <code title={phs.join(", ")}>{phs.map((h) => shortHash(h)).join(", ")}</code>{" "}
+          <span
+            className="verified-badge"
+            title="Loroco re-derives this address and amount from the offered NFT's on-chain royalty puzzle, independent of what the site claims."
+          >
+            verified on-chain ✓
+          </span>
         </p>
       )}
     </div>
@@ -636,9 +817,25 @@ function OfferAssetList({
  * a clear "could not decode" notice so the user is never silently
  * shown stale data.
  */
+/**
+ * A bundle needs an explicit acknowledgement before Approve unlocks when it
+ * carries effects the readable summary can't fully account for: a spend
+ * through an unrecognised puzzle, value leaving via an unknown layer, or a
+ * replayable AGG_SIG_UNSAFE (a signature a dApp could reuse elsewhere).
+ */
+function bundleRequiresAck(a: CoinSpendAnalysis): boolean {
+  const s = a.summary;
+  return (
+    s.unknown_spend_count > 0 ||
+    (s.agg_sig_unsafe_count ?? 0) > 0 ||
+    BigInt(s.total_unknown_out_mojos ?? "0") > 0n
+  );
+}
+
 function CoinSpendBreakdown({
   coinSpends,
   onAnalysisReady,
+  onRiskAssessed,
 }: {
   coinSpends: Array<{
     coin: { parent_coin_info: string; puzzle_hash: string; amount: string | number };
@@ -646,6 +843,7 @@ function CoinSpendBreakdown({
     solution: string;
   }>;
   onAnalysisReady?: (ready: boolean) => void;
+  onRiskAssessed?: (requiresAck: boolean) => void;
 }) {
   const [analysis, setAnalysis] = useState<CoinSpendAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -662,6 +860,7 @@ function CoinSpendBreakdown({
     setAnalysis(null);
     setError(null);
     onAnalysisReady?.(false);
+    onRiskAssessed?.(false);
     if (coinSpends.length === 0) {
       onAnalysisReady?.(true);
       return;
@@ -671,14 +870,16 @@ function CoinSpendBreakdown({
         const r = await analyzeCoinSpends(coinSpends);
         if (!cancelled) {
           setAnalysis(r);
+          onRiskAssessed?.(bundleRequiresAck(r));
           onAnalysisReady?.(true);
         }
       } catch (err) {
         if (!cancelled) {
           setError((err as Error).message);
-          // Even on decode failure we let the user proceed — the raw
-          // params block below shows what they'd actually approve. The
-          // error UI makes it loud.
+          // A bundle we couldn't decode at all is maximally opaque — force
+          // the acknowledgement so it can't be blind-approved. The raw
+          // params block below still shows exactly what would be signed.
+          onRiskAssessed?.(true);
           onAnalysisReady?.(true);
         }
       }
@@ -686,7 +887,7 @@ function CoinSpendBreakdown({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: cacheKey is the stable derived dep; onAnalysisReady is stable from parent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: cacheKey is the stable derived dep; onAnalysisReady/onRiskAssessed are stable from parent.
   }, [cacheKey]);
 
   if (coinSpends.length === 0) {
@@ -802,6 +1003,24 @@ function CoinSpendBreakdown({
         </p>
       )}
 
+      {BigInt(summary.total_unknown_out_mojos ?? "0") > 0n && (
+        <p className="error small" data-testid="unknown-value-warning">
+          ⚠ {summary.total_unknown_out_mojos} mojos leave through a puzzle
+          Loroco can't classify. This value is NOT included in the totals
+          above — treat the real cost as higher.
+        </p>
+      )}
+
+      {(summary.agg_sig_unsafe_count ?? 0) > 0 && (
+        <p className="error small" data-testid="agg-sig-unsafe-warning">
+          ⚠ This bundle asks for {summary.agg_sig_unsafe_count} unsafe
+          signature{summary.agg_sig_unsafe_count === 1 ? "" : "s"}{" "}
+          (AGG_SIG_UNSAFE) — not bound to this coin, so a malicious site could
+          reuse {summary.agg_sig_unsafe_count === 1 ? "it" : "them"} elsewhere.
+          Only approve if you fully trust this site.
+        </p>
+      )}
+
       {(external.length > 0 || ours.length > 0) && (
         <details className="breakdown-details">
           <summary className="muted small">Show full recipient list</summary>
@@ -827,9 +1046,11 @@ function CoinSpendBreakdown({
 function ApprovalSummary({
   request,
   onAnalysisReady,
+  onRiskAssessed,
 }: {
   request: PendingApproval;
   onAnalysisReady?: (ready: boolean) => void;
+  onRiskAssessed?: (requiresAck: boolean) => void;
 }) {
   const params = request.params as Record<string, unknown> | null;
 
@@ -859,8 +1080,9 @@ function ApprovalSummary({
             <li>
               <span className="permission-icon" aria-hidden>·</span>
               <span>
-                Stay connected until you remove it from{" "}
-                <strong>Settings → Connected sites</strong>
+                Stay connected for up to <strong>7 days of inactivity</strong>,
+                then auto-disconnect. Remove it sooner from{" "}
+                <strong>Settings → Connected sites</strong>.
               </span>
             </li>
           </ul>
@@ -985,7 +1207,11 @@ function ApprovalSummary({
             This site asks the wallet to broadcast a pre-built spend bundle.
             You will sign nothing — but you will publish it.
           </p>
-          <CoinSpendBreakdown coinSpends={cs} onAnalysisReady={onAnalysisReady} />
+          <CoinSpendBreakdown
+            coinSpends={cs}
+            onAnalysisReady={onAnalysisReady}
+            onRiskAssessed={onRiskAssessed}
+          />
         </div>
       );
     }
@@ -1003,7 +1229,11 @@ function ApprovalSummary({
             {cs.length === 1 ? "" : "s"}. Signing makes them broadcastable —
             review what's moving below.
           </p>
-          <CoinSpendBreakdown coinSpends={cs} onAnalysisReady={onAnalysisReady} />
+          <CoinSpendBreakdown
+            coinSpends={cs}
+            onAnalysisReady={onAnalysisReady}
+            onRiskAssessed={onRiskAssessed}
+          />
         </div>
       );
     }
@@ -3636,16 +3866,27 @@ function ConnectionsList() {
         } catch {
           // keep raw origin
         }
+        const readOnly = c.scope === "read-only";
+        const msLeft = (c.expiresAt ?? 0) - Date.now();
+        const daysLeft = Math.max(0, Math.ceil(msLeft / (24 * 60 * 60 * 1000)));
+        const expiryLabel =
+          msLeft <= 0
+            ? "expired"
+            : daysLeft <= 1
+              ? "expires within a day"
+              : `expires in ${daysLeft} days`;
         return (
           <li key={c.origin} className="connection-row">
             <div className="connection-meta">
               <div className="connection-host" title={c.origin}>
                 {host}
+                <span className={`scope-badge ${readOnly ? "read-only" : "full"}`}>
+                  {readOnly ? "read-only" : "full access"}
+                </span>
               </div>
               <div className="muted small">
-                Connected {new Date(c.connectedAt).toLocaleDateString()} ·
-                {" "}
-                {c.methods.includes("*") ? "all methods" : c.methods.join(", ")}
+                Connected {new Date(c.connectedAt).toLocaleDateString()} ·{" "}
+                {expiryLabel}
               </div>
             </div>
             <button

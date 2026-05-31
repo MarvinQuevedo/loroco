@@ -47,7 +47,13 @@ import {
 } from "./coin-store.js";
 import { callEngine } from "./engine.js";
 import { resolveCatMetadata } from "./dexie.js";
-import { grantConnection, isConnected, POPUP_ONLY_METHODS } from "./permissions.js";
+import {
+  clampScope,
+  grantConnection,
+  isConnected,
+  normalizeRequestedScope,
+  POPUP_ONLY_METHODS,
+} from "./permissions.js";
 
 /** How many derived XCH addresses we expose to dApps via `accounts`. */
 const ACCOUNTS_COUNT = 5;
@@ -381,19 +387,33 @@ const handlers: { [M in ChiaMethod]?: Handler<M> } = {
   },
 
   async connect(origin, params) {
-    void params;
     const decision = await requestApproval(origin, "connect", params);
     if (!decision.approved) throw Errors.userRejected();
-    await grantConnection(origin);
+    // Least-privilege scope negotiation:
+    //   • The dApp declares a CEILING via connect params (`scope`). Absent →
+    //     "full" (write), matching Goby's connect-implies-write default.
+    //   • The user may downgrade a "full" request to read-only at the prompt;
+    //     a "read-only" request is locked (the popup hides the upgrade).
+    //   • clampScope is the authoritative gate — even a forged "full" popup
+    //     override can't exceed a read-only request.
+    const requested = normalizeRequestedScope(params);
+    const chosen = decision.overrides?.scope === "read-only" ? "read-only" : "full";
+    await grantConnection(origin, clampScope(requested, chosen));
     return true;
   },
 
-  // Goby-legacy entry-point pair.
-  async requestAccounts(origin) {
+  // Goby-legacy entry-point pair. Same scope negotiation as `connect`: the
+  // dApp's requested ceiling (from params) is clamped against the user's
+  // choice in the popup, so picking read-only is honoured and a read-only
+  // request can't be upgraded. Returning the account addresses is a read, so
+  // it's fine under either scope.
+  async requestAccounts(origin, params) {
     if (!(await isConnected(origin))) {
-      const decision = await requestApproval(origin, "requestAccounts", undefined);
+      const decision = await requestApproval(origin, "requestAccounts", params);
       if (!decision.approved) throw Errors.userRejected();
-      await grantConnection(origin);
+      const requested = normalizeRequestedScope(params);
+      const chosen = decision.overrides?.scope === "read-only" ? "read-only" : "full";
+      await grantConnection(origin, clampScope(requested, chosen));
     }
     const addrs = await deriveAddresses(ACCOUNTS_COUNT);
     return addrs.map((a) => a.address);

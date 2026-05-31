@@ -2976,6 +2976,26 @@ impl SageEngine {
             .map_err(|e| EngineError::Internal(format!("Offer::from_spend_bundle: {e}")))?;
         let arb = offer.arbitrage();
 
+        // #3 — independently compute the royalty the taker actually pays.
+        // `requested_royalty_amounts()` derives this from the OFFERED NFTs'
+        // on-chain royalty puzzle hash + basis points (parsed straight out
+        // of the NFT coin spends in the bundle) applied to the requested
+        // payment amounts — NOT from anything the dApp asserts. The popup
+        // shows this computed figure beside the percentage so the user sees
+        // the concrete mojos leaving to the creator, verified by us.
+        let royalty_amounts = offer.requested_royalty_amounts();
+        let royalty_cats: Vec<_> = royalty_amounts
+            .cats
+            .iter()
+            .filter(|(_, v)| **v > 0)
+            .map(|(k, v)| {
+                serde_json::json!({
+                    "asset_id": format!("0x{}", hex::encode(k)),
+                    "amount": v.to_string(),
+                })
+            })
+            .collect();
+
         // Summarise CAT amounts on each side.
         let offered_cats: Vec<_> = arb
             .offered
@@ -3023,6 +3043,12 @@ impl SageEngine {
                     "royalty_puzzle_hash": format!("0x{}", hex::encode(r.puzzle_hash)),
                 })
             }).collect::<Vec<_>>(),
+            // The concrete royalty the taker pays, computed by us from the
+            // offered NFTs' on-chain royalty info — independent of the dApp.
+            "royalty_payment": {
+                "xch_mojos": royalty_amounts.xch.to_string(),
+                "cats": royalty_cats,
+            },
         })
         .to_string())
     }
@@ -4329,6 +4355,8 @@ impl SageEngine {
             driver::{CatLayer, Layer, Puzzle},
             types::{Condition, run_puzzle},
         };
+        // AggSigKind is already in scope via the module-level `prelude::*`
+        // glob; it isn't re-exported through `chia_wallet_sdk::types`.
 
         #[derive(Deserialize)]
         struct CoinJson {
@@ -4378,6 +4406,17 @@ impl SageEngine {
         let mut total_cat_out_by_asset: std::collections::HashMap<Bytes32, u128> =
             std::collections::HashMap::new();
         let mut unknown_count: u32 = 0;
+        // Value (mojos) created by spends whose puzzle we couldn't classify
+        // (NFT/DID/option/custom) heading to a destination that isn't ours.
+        // The xch/cat aggregation above only counts recognised layers, so
+        // an adversarial bundle could move funds through an exotic puzzle
+        // and the summary would read "0 leaving". This bucket closes that.
+        let mut total_unknown_out: u128 = 0;
+        // AGG_SIG conditions across the whole bundle. `unsafe` is the
+        // replayable kind (message not bound to this coin) — a red flag a
+        // dApp can use to harvest a signature for use elsewhere.
+        let mut agg_sig_count: u32 = 0;
+        let mut agg_sig_unsafe_count: u32 = 0;
 
         for (i, cs) in req.coin_spends.iter().enumerate() {
             let parent = parse_bytes32(&cs.coin.parent_coin_info)?;
@@ -4458,7 +4497,21 @@ impl SageEngine {
 
             let mut outputs_json: Vec<serde_json::Value> = Vec::new();
             let mut spend_fee: u128 = 0;
+            let mut spend_agg_sig: u32 = 0;
+            let mut spend_agg_sig_unsafe: u32 = 0;
             for cond in conditions {
+                // AGG_SIG of any flavour means this spend forces the wallet
+                // to produce a signature. Count them; flag the unsafe kind
+                // (message not bound to the coin → replayable elsewhere).
+                if let Some(sig) = cond.clone().into_agg_sig() {
+                    spend_agg_sig = spend_agg_sig.saturating_add(1);
+                    agg_sig_count = agg_sig_count.saturating_add(1);
+                    if sig.kind == AggSigKind::Unsafe {
+                        spend_agg_sig_unsafe = spend_agg_sig_unsafe.saturating_add(1);
+                        agg_sig_unsafe_count = agg_sig_unsafe_count.saturating_add(1);
+                    }
+                    continue;
+                }
                 if let Some(cc) = cond.clone().into_create_coin() {
                     let dest_ph = cc.puzzle_hash;
                     let is_ours = owner_set.contains(&dest_ph);
@@ -4495,7 +4548,15 @@ impl SageEngine {
                                 }
                             }
                         }
-                        _ => {}
+                        // Unknown puzzle (NFT/DID/option/custom): value
+                        // heading anywhere we don't own is value the
+                        // recognised-layer totals would otherwise miss.
+                        _ => {
+                            if !is_ours {
+                                total_unknown_out =
+                                    total_unknown_out.saturating_add(u128::from(cc.amount));
+                            }
+                        }
                     }
                 } else if let Some(rf) = cond.into_reserve_fee() {
                     spend_fee = spend_fee.saturating_add(u128::from(rf.amount));
@@ -4510,6 +4571,8 @@ impl SageEngine {
                 "input_amount": amount.to_string(),
                 "input_is_ours": input_is_ours,
                 "fee_mojos": spend_fee.to_string(),
+                "agg_sig_count": spend_agg_sig,
+                "agg_sig_unsafe_count": spend_agg_sig_unsafe,
                 "outputs": outputs_json,
             }));
         }
@@ -4528,7 +4591,10 @@ impl SageEngine {
                 "total_xch_change": total_xch_change.to_string(),
                 "total_cat_out_by_asset": total_cat_out_json,
                 "total_fee_mojos": total_fee.to_string(),
+                "total_unknown_out_mojos": total_unknown_out.to_string(),
                 "unknown_spend_count": unknown_count,
+                "agg_sig_count": agg_sig_count,
+                "agg_sig_unsafe_count": agg_sig_unsafe_count,
             },
         })
         .to_string())
