@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Loroco — a Chia wallet that lives in your browser</title>
+<meta name="description" content="Loroco is a Chia browser-extension wallet (MV3). Send and receive XCH, hold CATs and NFTs, trade with offers, and connect to Chia dApps — every signature is per-call approved.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="Loroco"><span class="word">loroco</span></a>
+    <div class="nav-links">
+      <a href="index.html" class="active">Overview</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="methods.html">RPC Methods</a>
+      <a href="developers.html">Developers</a>
+      <a href="security.html">Security</a>
+      <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="pill"><span class="dot"></span> MV3 · WASM-signed · CHIP-0002 + WalletConnect2</span>
+      <h1>A Chia wallet that lives in your&nbsp;browser.</h1>
+      <p class="lead">Send and receive XCH, hold tokens and NFTs, and trade with anyone using offers.
+        When you visit a Chia site — a marketplace, a swap, a game — Loroco asks you before signing anything.</p>
+      <div class="btn-row">
+        <a class="btn btn-primary" href="developers.html">Build with Loroco →</a>
+        <a class="btn btn-ghost" href="architecture.html">How it works</a>
+      </div>
+    </div>
+    <div class="hero-art">
+      <img class="hero-icon" src="assets/icon.png" alt="Loroco icon — the loroco flower">
+    </div>
+  </div>
+</header>
+
+<!-- What it is -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">What it is</span>
+    <h2>One provider, every Chia dApp surface</h2>
+    <p class="lead">Loroco exposes a Goby-compatible provider and the full Sage WalletConnect2 method surface.
+      The signing key never leaves a WASM engine — the JS shell is the only thing dApps talk to.</p>
+
+    <div class="grid grid-3" style="margin-top:32px">
+      <div class="card hover">
+        <div class="ic">🔑</div>
+        <h3>Keys stay in WASM</h3>
+        <p>The master secret key lives in the sage-wasm engine's memory. JS only ever sees public material. Nothing is persisted to <code>chrome.storage</code> in plaintext.</p>
+      </div>
+      <div class="card hover">
+        <div class="ic">✋</div>
+        <h3>Per-call approval</h3>
+        <p>Every mutating or signing call pops an approval dialog. There is no "remember this site" for spending — the user re-consents to each transaction.</p>
+      </div>
+      <div class="card hover">
+        <div class="ic">🔌</div>
+        <h3>Drop-in for dApps</h3>
+        <p><code>window.loroco</code> speaks <code>chia_*</code>, <code>chip0002_*</code> and snake_case. An opt-in <code>window.chia</code> mirror covers legacy Goby detection.</p>
+      </div>
+      <div class="card hover">
+        <div class="ic">🪙</div>
+        <h3>XCH · CATs · NFTs · DIDs</h3>
+        <p>Full balance, token, NFT and offer surfaces — reads served straight from a local coin-store, writes routed through the Sage engine.</p>
+      </div>
+      <div class="card hover">
+        <div class="ic">🤝</div>
+        <h3>Offers, end to end</h3>
+        <p>Make, take and cancel offers against dexie &amp; TibetSwap. Royalty assertions and offer decoding are summarised before you sign.</p>
+      </div>
+      <div class="card hover">
+        <div class="ic">🛰️</div>
+        <h3>Syncs your way</h3>
+        <p>Talks to <code>coinset.org</code> by default, or a local <code>loroco-local-sync</code> sidecar for real P2P peer sync over mTLS.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Screens -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">The wallet</span>
+    <h2>Clean, familiar, fast</h2>
+    <p class="lead">Home, Send, NFTs and Settings — a per-fingerprint wallet that syncs in the background.</p>
+    <div class="shots" style="margin-top:28px">
+      <figure class="shot" style="margin:0"><img src="assets/shots/home.png" alt="Home tab"><span>Home · balances</span></figure>
+      <figure class="shot" style="margin:0"><img src="assets/shots/send.png" alt="Send tab"><span>Send XCH / CAT</span></figure>
+      <figure class="shot" style="margin:0"><img src="assets/shots/nfts.png" alt="NFTs tab"><span>NFTs</span></figure>
+      <figure class="shot" style="margin:0"><img src="assets/shots/settings.png" alt="Settings"><span>Settings</span></figure>
+    </div>
+  </div>
+</section>
+
+<!-- Docs map -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">The docs</span>
+    <h2>Everything, in four pages</h2>
+    <div class="grid grid-2" style="margin-top:28px">
+      <a class="card hover" href="architecture.html" style="color:inherit">
+        <h3>🏛️ Architecture &amp; trust model</h3>
+        <p>The four-layer trust ladder (page → content → service worker → WASM), the seven security invariants, and the concrete anti-patterns the codebase guards against.</p>
+      </a>
+      <a class="card hover" href="methods.html" style="color:inherit">
+        <h3>📚 RPC method reference</h3>
+        <p>Every method on <code>window.loroco</code> — read vs. mutating, its params and result, alias namespaces, and CHIP-0002 error codes.</p>
+      </a>
+      <a class="card hover" href="developers.html" style="color:inherit">
+        <h3>🛠️ Developer guide</h3>
+        <p>Repo shape, first-time setup, the daily command table, and how to integrate Loroco from a dApp page.</p>
+      </a>
+      <a class="card hover" href="security.html" style="color:inherit">
+        <h3>🛡️ Security audit suite</h3>
+        <p>The adversarial-dApp Playwright suite — 17 attack vectors, what each defends, and how to add your own.</p>
+      </a>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>Loroco — a Chia browser-extension wallet. Built on a WASM fork of <a href="https://github.com/xch-dev/sage">Sage</a>.</div>
+    <div><a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Security audit suite — Loroco</title>
+<meta name="description" content="The adversarial-dApp Playwright suite — 17 attack vectors, what each defends, and how to add your own.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="Loroco"><span class="word">loroco</span></a>
+    <div class="nav-links">
+      <a href="index.html">Overview</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="methods.html">RPC Methods</a>
+      <a href="developers.html">Developers</a>
+      <a href="security.html" class="active">Security</a>
+      <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero" style="padding:64px 0 48px">
+  <div class="wrap">
+    <span class="eyebrow">Security</span>
+    <h1>Adversarial dApp audit suite</h1>
+    <p class="lead">A Playwright-driven suite loads the Loroco extension and runs a <strong>hostile dApp</strong> through
+      a matrix of attack vectors from a fake origin. Each case verifies a concrete defense in the
+      page → content → background pipeline. The script exits <code>0</code> only if every attack was blocked.</p>
+  </div>
+</section>
+
+<!-- Run -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">How to run</span>
+    <h2>Three steps</h2>
+<pre><code><span class="tok-c"># 1. Build the extension (Rust changes also need pnpm wasm:build)</span>
+<span class="tok-f">pnpm</span> --filter @ozone/extension build
+
+<span class="tok-c"># 2. Start fresh — isolated from the regular test profile</span>
+<span class="tok-f">rm</span> -rf /tmp/Loroco-PW-Security
+
+<span class="tok-c"># 3. Run</span>
+<span class="tok-f">node</span> scripts/security/pw-security-audit.mjs</code></pre>
+    <p class="muted">The suite imports a wallet with the fixed test mnemonic, then probes the attacker dApp from
+      <code>https://attacker.example/</code> (served via Playwright <code>route()</code>). Output is a pass/fail line per attack:</p>
+<pre><code><span class="tok-c">[sec] === ATTACK 01: unconnected read ===</span>
+[sec]    ✓ DEFENSE HELD — got code=4001 "https://attacker.example is not connected"
+<span class="tok-c">[sec] === ATTACK 09: spoof approval message ===</span>
+[sec]    ✗ DEFENSE FAILED — approval was accepted from page context</code></pre>
+    <p class="muted">A <code>✓ DEFENSE HELD</code> means the attack was blocked. A <code>✗ DEFENSE FAILED</code> is a real
+      finding — the script exits <code>1</code> and prints what got through.</p>
+  </div>
+</section>
+
+<!-- Matrix -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Coverage</span>
+    <h2>Attack matrix</h2>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>#</th><th>Vector</th><th>Defense expected</th></tr></thead>
+      <tbody>
+        <tr><td>01</td><td>Unconnected origin → read method</td><td><code>4001</code> before any work (<code>requireConnected</code>)</td></tr>
+        <tr><td>02</td><td>Unconnected origin → mutating method</td><td><code>4001</code> <em>before</em> the approval popup</td></tr>
+        <tr><td>03</td><td>Spoofed <code>origin</code> in page message</td><td>Background uses Chrome-supplied <code>sender.origin</code></td></tr>
+        <tr><td>04</td><td>iframe postMessage with content target</td><td>Bridge ignores it — <code>ev.source !== window</code></td></tr>
+        <tr><td>05</td><td><code>chrome.runtime</code> from MAIN world</td><td><code>chrome</code> undefined in page context</td></tr>
+        <tr><td>06</td><td>Read sensitive state from <code>window.chia</code></td><td>No mnemonic / master_sk / private fields exposed</td></tr>
+        <tr><td>07</td><td>Race: 5 parallel <code>signMessage</code></td><td>All wait for the popup; none bypass (serialisation)</td></tr>
+        <tr><td>08</td><td>Overwrite <code>window.chia</code> with a fake</td><td><code>defineProperty(...writable:false)</code> blocks it</td></tr>
+        <tr><td>09</td><td>Pretend to be the approval popup</td><td>Background only accepts decisions from extension contexts</td></tr>
+        <tr><td>10</td><td>Replay a stale request id</td><td><code>pending.get(id)</code> returns undefined</td></tr>
+        <tr><td>11</td><td>10 MB payload in <code>signMessage</code></td><td>4 MiB cap in bridge + SW (<code>4029</code>), no SW death</td></tr>
+        <tr><td>12</td><td>Read <code>chrome.storage.local</code> keys from page</td><td><code>chrome.storage</code> unavailable to MAIN world</td></tr>
+        <tr><td>13</td><td>Lookalike subdomain (<code>victim.example.evil.com</code>)</td><td>Treated as evil.com's subdomain — separate permission record</td></tr>
+        <tr><td>14</td><td><code>chia_send</code> with <code>address</code> only (no <code>to</code>)</td><td>Approval popup shows the recipient verbatim</td></tr>
+        <tr><td>15</td><td>Attacker tries to cancel victim's offer</td><td>Handler filters offers by <code>origin</code> stamp</td></tr>
+        <tr><td>16</td><td><code>walletWatchAsset</code> with spoofed symbol</td><td>Popup shows the assetId verbatim so the lie is visible</td></tr>
+        <tr><td>17</td><td><code>signCoinSpends</code> blind-sign (opaque bundle)</td><td>Popup renders a decoded <code>CoinSpendBreakdown</code>, not "N coin spends"</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<!-- Adding -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Extending the suite</span>
+    <h2>Adding a new attack</h2>
+    <p class="lead">Each attack is a function registered in the <code>ATTACKS</code> array. Cases are independent — the suite
+      runs them sequentially against a single persistent context, but none may rely on state from another.</p>
+<pre><code>{
+  id: <span class="tok-s">"13"</span>,
+  name: <span class="tok-s">"describe the attack"</span>,
+  run: <span class="tok-k">async</span> ({ attacker, popup, ctx, sw, victim }) => {
+    <span class="tok-c">// Drive the page / iframes / SW probe.</span>
+    <span class="tok-k">const</span> out = <span class="tok-k">await</span> attacker.<span class="tok-f">evaluate</span>(...);
+    <span class="tok-k">return</span> {
+      held: <span class="tok-c">/* true = defense held, false = attack succeeded */</span>,
+      detail: <span class="tok-s">"human description for the log line"</span>,
+    };
+  },
+}</code></pre>
+  </div>
+</section>
+
+<!-- Open weak spots -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Honesty</span>
+    <h2>Known open weak spots</h2>
+    <p class="lead">Real risks not yet fully covered by defenses — documented openly, to be addressed before a wider audience.</p>
+    <div class="grid grid-2" style="margin-top:24px">
+      <div class="card"><h3>Blind signing depth</h3>
+        <p><code>signCoinSpends</code> / <code>sendTransaction</code> decode the bundle, but a fully adversarial CLVM puzzle can still hide effects the summary doesn't surface. Trust the engine's decode, not the dApp's framing.</p></div>
+      <div class="card"><h3>No per-method permission scopes</h3>
+        <p>Every connection gets <code>methods: ["*"]</code>. There's no "this dApp may never request signing" mode — signing always re-prompts, but the scope can't be pre-restricted.</p></div>
+      <div class="card"><h3>takeOffer royalty assertion</h3>
+        <p>The popup shows royalty percentages but doesn't independently verify the on-chain royalty puzzle hash receives what's claimed.</p></div>
+      <div class="card"><h3>No connection auto-expiry</h3>
+        <p>Granted connections live until revoked from Settings → Connected sites. An expiry/heartbeat for high-risk methods is under consideration.</p></div>
+    </div>
+    <div class="note info" style="margin-top:22px">
+      Re-run the suite whenever you change <code>background.ts</code>, <code>content.ts</code>, <code>inpage.ts</code>,
+      <code>rpc-router.ts</code>, <code>permissions.ts</code>, <code>approval.ts</code>, or any <code>ApprovalSummary</code> case.
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>Loroco — Chia browser-extension wallet.</div>
+    <div><a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

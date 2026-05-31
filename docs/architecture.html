@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Architecture & trust model — Loroco</title>
+<meta name="description" content="Loroco's four-layer trust ladder, security invariants, and the concrete anti-patterns its message-passing layers guard against.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="Loroco"><span class="word">loroco</span></a>
+    <div class="nav-links">
+      <a href="index.html">Overview</a>
+      <a href="architecture.html" class="active">Architecture</a>
+      <a href="methods.html">RPC Methods</a>
+      <a href="developers.html">Developers</a>
+      <a href="security.html">Security</a>
+      <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero" style="padding:64px 0 48px">
+  <div class="wrap">
+    <span class="eyebrow">Architecture</span>
+    <h1>The trust model</h1>
+    <p class="lead">Loroco is an MV3 extension that exposes a <code>window.chia</code>-style provider. Its whole design
+      is a sequence of layers, each one stripping capabilities. A hostile dApp can only reach the signing engine via a
+      correctly-shaped path through every prior layer's gate.</p>
+  </div>
+</section>
+
+<!-- Ladder -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Components</span>
+    <h2>Four layers, in order of trust</h2>
+    <p class="lead">Each step removes power. A dApp page can only reach layer&nbsp;4 through every gate above it —
+      most security bugs come from a layer doing something a higher layer assumed it didn't.</p>
+
+    <div class="ladder" style="margin-top:28px">
+      <div class="rung">
+        <div class="n">1</div>
+        <div><h4>MAIN-world page script</h4>
+          <p>The dApp itself, plus the injected <code>inpage.js</code>. Fully untrusted. Has no access to <code>chrome.runtime</code> or <code>chrome.storage</code>.</p></div>
+      </div>
+      <div class="rung">
+        <div class="n">2</div>
+        <div><h4>ISOLATED-world content script</h4>
+          <p><code>content.ts</code> + <code>content-bridge.ts</code>. The only relay from page to background. Verifies <code>ev.source === window</code>, checks the message target, and caps payload size.</p></div>
+      </div>
+      <div class="rung">
+        <div class="n">3</div>
+        <div><h4>Service worker / background</h4>
+          <p><code>background.ts</code> + <code>src/background/*</code>. Canonicalises the method, gates on the approval class, and uses Chrome-supplied identity (<code>sender.origin</code>).</p></div>
+      </div>
+      <div class="rung">
+        <div class="n">4</div>
+        <div><h4>WASM engine</h4>
+          <p><code>sage-wasm</code>. Holds the master secret key in memory and performs all signing. JS dispatches a single <code>engine.request(method, json)</code>.</p></div>
+      </div>
+    </div>
+
+    <div class="note info" style="margin-top:24px">
+      <span class="label">Key rule</span><br>
+      <code>chrome.runtime.sendMessage</code> is <strong>never</strong> exposed to the MAIN world. Pages can only reach the
+      service worker via <code>window.postMessage → content-bridge → runtime.sendMessage</code>. Don't add
+      <code>externally_connectable</code> to the manifest without a strong reason.
+    </div>
+  </div>
+</section>
+
+<!-- Engine pattern -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">The engine</span>
+    <h2>Sage as one engine — not 110 WASM exports</h2>
+    <p class="lead">The Sage Rust library is used as a <strong>single engine instance</strong>, the same pattern Ozone uses
+      today through <code>sage_flutter_binding</code> (Dart FFI). The JS side only knows two calls:</p>
+<pre><code><span class="tok-k">const</span> engine = <span class="tok-k">new</span> <span class="tok-f">Sage</span>(idbCallbacks);          <span class="tok-c">// boot the engine</span>
+<span class="tok-k">const</span> res = <span class="tok-k">await</span> engine.<span class="tok-f">request</span>(method, jsonParams);  <span class="tok-c">// single dispatch</span></code></pre>
+    <p class="muted">Loroco does <strong>not</strong> ship individual wasm-bindgen exports, and does <strong>not</strong> glue together
+      other JS chia libs (<code>chia-bls.js</code>, <code>clvm-rs.wasm</code>, greenweb…). Everything the wallet needs lives inside the sage engine.</p>
+  </div>
+</section>
+
+<!-- Invariants -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Guarantees</span>
+    <h2>Security invariants</h2>
+    <p class="lead">These must hold. If a change breaks one of them, it's a security regression even if the test suite passes.</p>
+
+    <div class="grid grid-2" style="margin-top:26px">
+      <div class="card">
+        <h3>Origin authenticity</h3>
+        <p>The origin a handler receives is the page's real origin — <code>sender.origin</code>, set by Chrome at the process boundary. <code>msg.origin</code> is a last-resort fallback for same-extension senders only.</p>
+      </div>
+      <div class="card">
+        <h3>Connect is the only entry</h3>
+        <p>Every non-<code>connect</code> method requires a prior grant (<code>requireConnected</code> + <code>ensurePermissions</code>). A new method goes into <code>NO_APPROVAL_METHODS</code> or <code>ALWAYS_APPROVAL_METHODS</code> — never bypasses the gate.</p>
+      </div>
+      <div class="card">
+        <h3>Approval is per-call</h3>
+        <p>The user re-approves every mutating call. Granting at connect time covers reads only; <code>methods: ["*"]</code> is the only mode today.</p>
+      </div>
+      <div class="card">
+        <h3>Popup is authoritative</h3>
+        <p>Whatever the popup renders is what the user consents to. If a handler normalises params (<code>to ?? address</code>), the popup must normalise identically — otherwise a dApp can spoof what the user sees.</p>
+      </div>
+      <div class="card">
+        <h3>Per-origin isolation in shared storage</h3>
+        <p>Any per-fingerprint store shared across dApps (<code>offers.&lt;fp&gt;</code>, <code>watched_assets.&lt;fp&gt;</code>) stamps the creating <code>origin</code> and filters by it in every mutating handler.</p>
+      </div>
+      <div class="card">
+        <h3>WASM holds the SK</h3>
+        <p>The master secret key and mnemonic are never persisted to <code>chrome.storage.*</code> in plaintext. <code>chrome.storage.session</code> holds the encrypted keychain blob; the unlock password is supplied each browser session.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Anti-patterns -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Hard-won lessons</span>
+    <h2>Anti-patterns the code guards against</h2>
+    <p class="lead">Real findings from the audit suite, not hypotheticals. Every new handler, popup screen, or
+      message-passing layer is audited against these.</p>
+
+    <div class="grid grid-2" style="margin-top:26px">
+      <div class="card"><h3>1 · Alias the popup doesn't show</h3>
+        <p><code>transfer</code> accepted <code>to ?? address</code> while the popup showed only <code>to</code>. A dApp sending <code>{address:"evil"}</code> made the popup show a blank recipient while the handler spent to <code>evil</code>. <strong>Fix:</strong> handler &amp; popup normalise the same way.</p></div>
+      <div class="card"><h3>2 · Cross-origin shared storage</h3>
+        <p><code>offers.&lt;fp&gt;</code> listed every offer. Any connected origin could cancel another origin's offer and — with <code>secure:true</code> — drain the maker coin back. <strong>Fix:</strong> stamp <code>origin</code>, filter by <code>sender.origin</code>.</p></div>
+      <div class="card"><h3>3 · Unbounded payload</h3>
+        <p>A 10 MiB string in <code>signMessage</code> invalidated the whole extension context — a silent DoS any unconnected page could trigger. <strong>Fix:</strong> 4 MiB cap in the bridge + SW, surfaced as <code>4029</code>.</p></div>
+      <div class="card"><h3>4 · Trusting <code>msg.origin</code></h3>
+        <p>A forged <code>origin</code> in a page postMessage could authenticate as a victim. <strong>Fix:</strong> <code>const origin = sender.origin ?? msg.origin</code> — never invert that order.</p></div>
+      <div class="card"><h3>5 · Iframe → parent bridge</h3>
+        <p>An iframe doing <code>parent.postMessage({target:"loroco-content"})</code> could forward as if it came from the parent. <strong>Fix:</strong> the bridge checks <code>ev.source === window</code>.</p></div>
+      <div class="card"><h3>7 · Alias bypassing gating</h3>
+        <p>Adding an alias to a canonical that isn't registered in an approval class makes it silently mutating-without-approval. <strong>Fix:</strong> every alias maps to a canonical present in one of the two sets.</p></div>
+      <div class="card"><h3>8 · Writable <code>window.chia</code></h3>
+        <p>A dApp doing <code>window.chia = fake</code> could shadow the provider for later scripts. <strong>Fix:</strong> <code>defineProperty(..., writable:false, configurable:false)</code>.</p></div>
+      <div class="card"><h3>6 · Blind-signing opaque blobs</h3>
+        <p><code>signCoinSpends</code> / <code>sendTransaction</code> must decode &amp; summarise the bundle — recipients, amounts, fees, asset ids. A bare "N coin spends" count is not consent.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>Loroco — Chia browser-extension wallet.</div>
+    <div><a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

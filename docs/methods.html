@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RPC method reference — Loroco</title>
+<meta name="description" content="Every method on window.loroco — read vs. mutating, params and result, alias namespaces, and CHIP-0002 error codes.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="Loroco"><span class="word">loroco</span></a>
+    <div class="nav-links">
+      <a href="index.html">Overview</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="methods.html" class="active">RPC Methods</a>
+      <a href="developers.html">Developers</a>
+      <a href="security.html">Security</a>
+      <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero" style="padding:64px 0 48px">
+  <div class="wrap">
+    <span class="eyebrow">Reference</span>
+    <h1>RPC method surface</h1>
+    <p class="lead">Everything a dApp can call on <code>window.loroco</code> (and the opt-in <code>window.chia</code> mirror).
+      Each method is in exactly one approval class. Reads return immediately; writes pop a per-call approval dialog.</p>
+    <p style="margin-top:18px">
+      <span class="tag tag-read">read</span> — no approval, requires a prior connection &nbsp;
+      <span class="tag tag-write">write</span> — pops an approval popup every call &nbsp;
+      <span class="tag tag-stub">stub</span> — returns empty/graceful until full impl lands
+    </p>
+  </div>
+</section>
+
+<!-- Namespaces -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Calling conventions</span>
+    <h2>One canonical name, many aliases</h2>
+    <p class="lead">The router canonicalises before gating, so the same method answers to every namespace dApps use in the wild:</p>
+    <div class="kv" style="margin-top:18px">
+      <dt>chia_*</dt><dd>Goby-legacy + Sage WC2 prefixed — <code>chia_connect</code>, <code>chia_send</code>, <code>chia_getNFTs</code></dd>
+      <dt>chip0002_*</dt><dd>WalletConnect2 topic-style CHIP-0002 — <code>chip0002_signMessage</code></dd>
+      <dt>snake_case</dt><dd>Sage WC2 raw — <code>get_address</code>, <code>sign_message_by_address</code></dd>
+      <dt>camelCase</dt><dd>The canonical names listed below — <code>signCoinSpends</code>, <code>createOffer</code></dd>
+    </div>
+    <div class="note warn" style="margin-top:20px">
+      <span class="label">Gating rule</span><br>
+      Aliases in <code>METHOD_ALIASES</code> map to a canonical that <strong>must</strong> be present in
+      <code>NO_APPROVAL_METHODS</code> or <code>ALWAYS_APPROVAL_METHODS</code>. Adding a new canonical without
+      registering its approval class makes it silently mutating-without-approval.
+    </div>
+  </div>
+</section>
+
+<!-- Connection & meta -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">CHIP-0002</span>
+    <h2>Connection &amp; account</h2>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>Method</th><th>Class</th><th>Params</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>connect</code></td><td><span class="tag tag-write">write</span></td><td><code>{ eager?: boolean }</code></td><td><code>boolean</code> — the only entry point; grants read access</td></tr>
+        <tr><td><code>chainId</code></td><td><span class="tag tag-read">read</span></td><td>—</td><td><code>ChainId</code> (mainnet / testnet)</td></tr>
+        <tr><td><code>requestAccounts</code></td><td><span class="tag tag-write">write</span></td><td>—</td><td><code>string[]</code> — connect + accounts in one round-trip (prompts if not connected)</td></tr>
+        <tr><td><code>accounts</code></td><td><span class="tag tag-read">read</span></td><td>—</td><td><code>string[]</code> — addresses without prompting; throws <code>4900</code> if unconnected</td></tr>
+        <tr><td><code>getAddress</code></td><td><span class="tag tag-read">read</span></td><td>—</td><td><code>{ address }</code></td></tr>
+        <tr><td><code>walletSwitchChain</code></td><td><span class="tag tag-write">write</span></td><td><code>{ chainId }</code></td><td><code>null</code></td></tr>
+        <tr><td><code>walletWatchAsset</code></td><td><span class="tag tag-write">write</span></td><td><code>{ options: { assetId, symbol, logo? } }</code></td><td><code>boolean</code> — popup shows the assetId verbatim</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<!-- Reads -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Read surface</span>
+    <h2>Coins, balances &amp; chain data</h2>
+    <p class="muted">Served straight from the JS coin-store (<code>chrome.storage.local["coins.&lt;fp&gt;"]</code>) so any dApp hitting the namespaces above gets WC-compatible reads without a new WASM build.</p>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>Method</th><th>Class</th><th>Params</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>getPublicKeys</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset?, hardened? }</code></td><td><code>Hex[]</code></td></tr>
+        <tr><td><code>getAssetCoins</code></td><td><span class="tag tag-read">read</span></td><td><code>{ type, assetId, … }</code></td><td><code>SpendableCoin[]</code></td></tr>
+        <tr><td><code>getAssetBalance</code></td><td><span class="tag tag-read">read</span></td><td><code>{ type, assetId }</code></td><td><code>AssetBalance</code></td></tr>
+        <tr><td><code>filterUnlockedCoins</code></td><td><span class="tag tag-read">read</span></td><td><code>{ coinNames: Hex[] }</code></td><td><code>Hex[]</code></td></tr>
+        <tr><td><code>getCoins</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset?, … }</code></td><td><code>CoinView[]</code></td></tr>
+        <tr><td><code>getCoinsByIds</code></td><td><span class="tag tag-read">read</span></td><td><code>{ coinIds: Hex[] }</code></td><td><code>CoinView[]</code></td></tr>
+        <tr><td><code>isAssetOwned</code></td><td><span class="tag tag-read">read</span></td><td><code>{ type: "cat"|"did"|"nft", assetId }</code></td><td><code>boolean</code></td></tr>
+        <tr><td><code>getDerivations</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset? }</code></td><td><code>Derivation[]</code></td></tr>
+        <tr><td><code>getTransactions</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset?, pendingOnly? }</code></td><td><code>TransactionView[]</code></td></tr>
+        <tr><td><code>getPendingTransactions</code></td><td><span class="tag tag-read">read</span></td><td>—</td><td><code>TransactionView[]</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<!-- Tokens & NFTs reads -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Read surface</span>
+    <h2>Tokens, NFTs &amp; offers</h2>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>Method</th><th>Class</th><th>Params</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>getCats</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset? }</code></td><td><code>CatAssetView[]</code> — enriched with Dexie name/symbol/icon</td></tr>
+        <tr><td><code>getAllCats</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset? }</code></td><td><code>CatAssetView[]</code></td></tr>
+        <tr><td><code>getToken</code></td><td><span class="tag tag-read">read</span></td><td><code>{ assetId }</code></td><td><code>CatAssetView | null</code></td></tr>
+        <tr><td><code>getNFTs</code></td><td><span class="tag tag-read">read</span></td><td><code>{ … }</code></td><td><code>NftInfo[] | { nfts }</code></td></tr>
+        <tr><td><code>getNFTInfo</code></td><td><span class="tag tag-read">read</span></td><td><code>{ coinId?, launcherId? }</code></td><td><code>NftInfo | null</code></td></tr>
+        <tr><td><code>getNftCollections</code></td><td><span class="tag tag-stub">stub</span></td><td><code>{ limit?, offset? }</code></td><td><code>NftCollectionInfo[]</code></td></tr>
+        <tr><td><code>getNftCollection</code></td><td><span class="tag tag-stub">stub</span></td><td><code>{ collectionId }</code></td><td><code>NftCollectionInfo | null</code></td></tr>
+        <tr><td><code>getMinterDidIds</code></td><td><span class="tag tag-stub">stub</span></td><td><code>{ limit?, offset? }</code></td><td><code>Hex[]</code></td></tr>
+        <tr><td><code>getDids</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset? }</code></td><td><code>DidInfo[]</code> — from the local <code>dids.&lt;fp&gt;</code> store</td></tr>
+        <tr><td><code>getOffers</code></td><td><span class="tag tag-read">read</span></td><td><code>{ limit?, offset?, includeCancelled? }</code></td><td><code>OfferView[]</code></td></tr>
+        <tr><td><code>getOffer</code></td><td><span class="tag tag-read">read</span></td><td><code>{ id }</code></td><td><code>OfferView | null</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<!-- Signing & spending -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Mutating surface</span>
+    <h2>Signing &amp; spending</h2>
+    <p class="muted">Every method here pops an approval dialog whose body must show the actual recipient, amount, fee and asset id — never a bare count.</p>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>Method</th><th>Class</th><th>Params</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>signMessage</code></td><td><span class="tag tag-write">write</span></td><td><code>{ message: Hex, publicKey: Hex }</code></td><td><code>Hex</code></td></tr>
+        <tr><td><code>signMessageByAddress</code></td><td><span class="tag tag-write">write</span></td><td><code>{ message, address }</code></td><td><code>{ publicKey, signature }</code></td></tr>
+        <tr><td><code>signCoinSpends</code></td><td><span class="tag tag-write">write</span></td><td><code>{ coinSpends, partialSign? }</code></td><td><code>Hex</code> — BLS aggregated sig; popup decodes the bundle</td></tr>
+        <tr><td><code>transfer</code> <span class="muted">(<code>chia_send</code>)</span></td><td><span class="tag tag-write">write</span></td><td><code>{ to/address, amount, assetId?, fee? }</code></td><td><code>{ id } | {}</code></td></tr>
+        <tr><td><code>sendTransaction</code></td><td><span class="tag tag-write">write</span></td><td><code>{ spendBundle }</code></td><td><code>TransactionResp[]</code></td></tr>
+        <tr><td><code>bulkSendXch</code></td><td><span class="tag tag-write">write</span></td><td><code>{ outputs[], fee? }</code></td><td><code>{ id } | {}</code></td></tr>
+        <tr><td><code>bulkSendCat</code></td><td><span class="tag tag-write">write</span></td><td><code>{ assetId, outputs[], fee? }</code></td><td><code>{ id } | {}</code></td></tr>
+        <tr><td><code>multiSend</code></td><td><span class="tag tag-write">write</span></td><td><code>{ outputs[], fee? }</code></td><td><code>{ id } | {}</code></td></tr>
+        <tr><td><code>combine</code></td><td><span class="tag tag-write">write</span></td><td><code>{ maxInputs?, fee? }</code></td><td><code>{ id } | {}</code></td></tr>
+        <tr><td><code>split</code></td><td><span class="tag tag-write">write</span></td><td><code>{ parts, fee? }</code></td><td><code>{ id } | {}</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<!-- Offers, tokens, NFTs, DIDs writes -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Mutating surface</span>
+    <h2>Offers, tokens, NFTs &amp; DIDs</h2>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>Method</th><th>Class</th><th>Params</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>createOffer</code></td><td><span class="tag tag-write">write</span></td><td><code>{ offerAssets, requestAssets, fee? }</code></td><td><code>{ id, offer }</code> — persists input coins + <code>origin</code></td></tr>
+        <tr><td><code>takeOffer</code></td><td><span class="tag tag-write">write</span></td><td><code>{ offer, fee? }</code></td><td><code>{ id }</code> — popup shows royalty assertions</td></tr>
+        <tr><td><code>cancelOffer</code></td><td><span class="tag tag-write">write</span></td><td><code>{ id, fee?, secure? }</code></td><td><code>{ id, cancelled } | {}</code> — filtered by <code>origin</code> stamp</td></tr>
+        <tr><td><code>issueCat</code></td><td><span class="tag tag-write">write</span></td><td><code>{ amount, fee?, … }</code></td><td><code>{ id, assetId }</code></td></tr>
+        <tr><td><code>addNftUri</code></td><td><span class="tag tag-write">write</span></td><td><code>{ launcherId, uri, kind, fee? }</code></td><td><code>{ id, launcherId }</code></td></tr>
+        <tr><td><code>bulkMintNfts</code></td><td><span class="tag tag-write">write</span></td><td><code>{ didCoinId, didDerivationIndex, mints[], … }</code></td><td><code>{ nftIds[] }</code></td></tr>
+        <tr><td><code>createDid</code></td><td><span class="tag tag-write">write</span></td><td><code>{ fee?, … }</code></td><td><code>{ id, didId, didCoinId, didDerivationIndex }</code></td></tr>
+        <tr><td><code>transferDid</code></td><td><span class="tag tag-write">write</span></td><td><code>{ launcherId, address, fee? }</code></td><td><code>{ id, launcherId }</code></td></tr>
+        <tr><td><code>normalizeDids</code></td><td><span class="tag tag-write">write</span></td><td><code>{ … }</code></td><td><code>{ id }</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note info" style="margin-top:20px">
+      <span class="label">Hardened + unhardened</span><br>
+      Every engine endpoint that signs accepts a <code>derivation_kind</code>. Coins imported from Sage on the hardened
+      path would otherwise fail to sign against a handler hardcoded to unhardened.
+    </div>
+  </div>
+</section>
+
+<!-- Error codes -->
+<section class="section" id="errors">
+  <div class="wrap">
+    <span class="eyebrow">Errors</span>
+    <h2>CHIP-0002 error codes</h2>
+    <p class="muted">Thrown as a <code>ChiaProviderError</code> with <code>{ code, message, data }</code>.</p>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>Code</th><th>Name</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>4000</code></td><td>InvalidParams</td><td>Params failed validation.</td></tr>
+        <tr><td><code>4001</code></td><td>Unauthorized</td><td>Origin not connected — thrown before any work, and before any approval popup.</td></tr>
+        <tr><td><code>4002</code></td><td>UserRejected</td><td>The user declined the approval dialog.</td></tr>
+        <tr><td><code>4003</code></td><td>SpendableBalanceExceeded</td><td>Not enough spendable balance for the requested spend.</td></tr>
+        <tr><td><code>4004</code></td><td>MethodNotFound</td><td>Unknown or not-yet-implemented method.</td></tr>
+        <tr><td><code>4005</code></td><td>NoSecretKey</td><td>Wallet doesn't own a secret key the request needs.</td></tr>
+        <tr><td><code>4029</code></td><td>LimitExceeded</td><td>Payload exceeded the 4 MiB cap (DoS guard) or a rate limit.</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>Loroco — Chia browser-extension wallet.</div>
+    <div><a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

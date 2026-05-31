@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Developer guide — Loroco</title>
+<meta name="description" content="Repo shape, first-time setup, the daily command table, and how to integrate Loroco from a dApp page.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="Loroco"><span class="word">loroco</span></a>
+    <div class="nav-links">
+      <a href="index.html">Overview</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="methods.html">RPC Methods</a>
+      <a href="developers.html" class="active">Developers</a>
+      <a href="security.html">Security</a>
+      <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero" style="padding:64px 0 48px">
+  <div class="wrap">
+    <span class="eyebrow">Developers</span>
+    <h1>Build with Loroco</h1>
+    <p class="lead">Loroco runs on a WASM-compiled fork of <a href="https://github.com/xch-dev/sage">Sage</a>. This page covers
+      the repo layout, how to get a dev build running, and how to talk to the provider from a dApp.</p>
+  </div>
+</section>
+
+<!-- Integrate -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">For dApp authors</span>
+    <h2>Connect from a page</h2>
+    <p class="lead">Loroco injects <code>window.loroco</code> (and an opt-in <code>window.chia</code> mirror). The provider
+      shape mirrors Goby / CHIP-0002, so existing dApp code usually works unchanged.</p>
+<pre><code><span class="tok-c">// 1. Detect the provider</span>
+<span class="tok-k">const</span> chia = window.loroco ?? window.chia;
+<span class="tok-k">if</span> (!chia) <span class="tok-k">throw new</span> <span class="tok-f">Error</span>(<span class="tok-s">"Install Loroco"</span>);
+
+<span class="tok-c">// 2. Connect — the ONLY entry point. Pops an approval popup.</span>
+<span class="tok-k">await</span> chia.<span class="tok-f">request</span>({ method: <span class="tok-s">"connect"</span> });
+
+<span class="tok-c">// 3. Read freely once connected (no further prompts)</span>
+<span class="tok-k">const</span> [addr] = <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({ method: <span class="tok-s">"accounts"</span> });
+<span class="tok-k">const</span> bal   = <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({
+  method: <span class="tok-s">"getAssetBalance"</span>,
+  params: { type: <span class="tok-s">"xch"</span>, assetId: <span class="tok-k">null</span> },
+});
+
+<span class="tok-c">// 4. Any mutating call re-prompts the user, every time</span>
+<span class="tok-k">const</span> { id } = <span class="tok-k">await</span> chia.<span class="tok-f">request</span>({
+  method: <span class="tok-s">"transfer"</span>,
+  params: { to: <span class="tok-s">"xch1…"</span>, amount: <span class="tok-s">"1000000000000"</span>, fee: <span class="tok-s">"0"</span> },
+});</code></pre>
+    <div class="note info">
+      <span class="label">Namespaces</span><br>
+      The same call works as <code>chia_connect</code>, <code>chip0002_connect</code> or <code>connect</code> — the router
+      canonicalises before gating. See the <a href="methods.html">RPC reference</a> for the full surface and
+      <a href="methods.html#errors">error codes</a>.
+    </div>
+  </div>
+</section>
+
+<!-- Repo shape -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Repo shape — read this first</span>
+    <h2>Sage is embedded, not a submodule (today)</h2>
+    <p class="lead">The Sage source lives directly under <code>vendor/sage/</code>. This is a deliberate temporary choice —
+      it makes the dev loop simpler (one <code>git clone</code> = everything) while the fork is iterated heavily.</p>
+    <ul class="checks">
+      <li>Commits touching <code>vendor/sage/</code> and <code>packages/extension/</code> live side-by-side in one history.</li>
+      <li>To update Sage from upstream, <strong>replace the tree</strong> (e.g. <code>rsync</code> from a clone) rather than <code>git submodule update</code>.</li>
+      <li><code>vendor/chia-wallet-sdk/</code> <em>is</em> a normal git submodule — it's modified rarely enough that submodule semantics still work.</li>
+      <li>Once Sage stabilises and <code>@loroco/wallet-wasm</code> is published, <code>vendor/sage/</code> will move out.</li>
+    </ul>
+
+    <h3>Layout</h3>
+<pre><code>loroco/
+├── packages/
+│   ├── extension/         <span class="tok-c"># WXT app (popup + service worker + content script)</span>
+│   ├── goby-provider/     <span class="tok-c"># window.loroco + window.chia mirror; CHIP-0002 / WC2 types</span>
+│   ├── storage-idb/       <span class="tok-c"># IndexedDB-backed Storage impl for the WASM module</span>
+│   └── wallet-wasm/       <span class="tok-c"># wasm-pack output of crates/sage-wasm (regenerated)</span>
+├── vendor/
+│   ├── sage/              <span class="tok-c"># EMBEDDED Sage Rust source</span>
+│   └── chia-wallet-sdk/   <span class="tok-c"># SUBMODULE</span>
+├── scripts/               <span class="tok-c"># Playwright smoke + sync benches + security suite</span>
+└── .cargo/config.toml     <span class="tok-c"># wasm32-unknown-unknown rustflags</span></code></pre>
+  </div>
+</section>
+
+<!-- Setup -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Setup</span>
+    <h2>First-time build</h2>
+<pre><code><span class="tok-f">git</span> clone --recurse-submodules git@github.com:MarvinQuevedo/loroco.git
+<span class="tok-f">cd</span> loroco
+<span class="tok-f">pnpm</span> install
+
+<span class="tok-c"># already cloned? pull the chia-wallet-sdk submodule</span>
+<span class="tok-f">git</span> submodule update --init --recursive</code></pre>
+    <p>You also need:</p>
+    <ul class="checks">
+      <li>Rust toolchain (<code>rustup</code>, target <code>wasm32-unknown-unknown</code>)</li>
+      <li><code>wasm-pack</code> &nbsp;(<code>cargo install wasm-pack</code>)</li>
+      <li>Brew LLVM &nbsp;(<code>brew install llvm</code>) — used by <code>CC_wasm32_unknown_unknown</code></li>
+    </ul>
+  </div>
+</section>
+
+<!-- Commands -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Daily workflow</span>
+    <h2>Commands</h2>
+    <p class="muted">Run all of these from the repo root.</p>
+    <div class="tbl-wrap" style="margin-top:18px">
+    <table>
+      <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>pnpm start</code></td><td>Fast build (skips wasm rebuild) + launch Chrome with the extension. <strong>Use this most of the time.</strong></td></tr>
+        <tr><td><code>pnpm start:full</code></td><td>Full build (rebuilds wasm too, ~1 min) + launch Chrome. Run after editing <code>vendor/sage/</code>.</td></tr>
+        <tr><td><code>pnpm dev</code></td><td>WXT dev mode — live reload + auto-launch. Best for iterating on UI.</td></tr>
+        <tr><td><code>pnpm chrome</code></td><td>Open Chrome with the existing build (no rebuild). Uses a per-repo profile at <code>./.chrome-profile/</code>.</td></tr>
+        <tr><td><code>pnpm build:fast</code></td><td>Build the extension only — does not touch wasm. ~2 s.</td></tr>
+        <tr><td><code>pnpm build</code></td><td>Full build: rebuild wasm + rebuild extension. ~1 min cold.</td></tr>
+        <tr><td><code>pnpm zip</code></td><td>Produce <code>.output/chrome-mv3.zip</code> for distribution.</td></tr>
+        <tr><td><code>pnpm typecheck</code></td><td>Run <code>tsc --noEmit</code> across all workspace packages.</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note warn" style="margin-top:20px">
+      <span class="label">Loading in real Chrome</span><br>
+      <code>chrome://extensions/</code> → enable Developer mode → <strong>Load unpacked</strong> → pick
+      <code>packages/extension/.output/chrome-mv3/</code>. Stable Chrome 148+ ignores <code>--load-extension</code>;
+      the dev scripts use Chrome for Testing with <code>--disable-features=DisableLoadExtensionCommandLineSwitch</code>.
+    </div>
+  </div>
+</section>
+
+<!-- Adding a method -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Extending the wallet</span>
+    <h2>Adding a new RPC method</h2>
+    <ol style="line-height:1.9; color:var(--ink-soft)">
+      <li>Add to <code>ChiaMethodMap</code> in <code>packages/goby-provider/src/types.ts</code> with exact param/result types.</li>
+      <li>Register the canonical name in <code>NO_APPROVAL_METHODS</code> (read) or <code>ALWAYS_APPROVAL_METHODS</code> (mutating) in <code>permissions.ts</code>.</li>
+      <li>Add every <code>chia_*</code> / <code>chip0002_*</code> / snake_case alias to <code>METHOD_ALIASES</code> in <code>rpc-router.ts</code>.</li>
+      <li>Implement the handler — normalise aliased fields <em>immediately</em> at entry (don't sprinkle <code>x ?? y</code> through the body).</li>
+      <li>If mutating: add an <code>ApprovalSummary</code> case in <code>popup/App.tsx</code> showing every field the handler will act on.</li>
+      <li>Add a happy-path assertion to <code>pw-wc-coverage.mjs</code> and an attack case to the security suite if it writes state.</li>
+    </ol>
+    <div class="note danger">
+      <span class="label">Popup parity</span><br>
+      The popup is the last chance to show the user what they're consenting to. If a handler normalises
+      (<code>to ?? address</code>, <code>secure ?? true</code>), the popup must display the <strong>normalised</strong> value —
+      and never truncate an address/asset id enough to hide a swap.
+    </div>
+  </div>
+</section>
+
+<!-- Sync -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Sync</span>
+    <h2>coinset.org, or your own sidecar</h2>
+    <p class="lead">Loroco syncs against <code>coinset.org</code> over HTTP by default. For real P2P peer sync, run the
+      <a href="https://github.com/MarvinQuevedo/loroco-local-sync"><code>loroco-local-sync</code></a> daemon on
+      <code>127.0.0.1</code> — the extension auto-detects it via <code>sidecar-client.ts</code> and talks to it over mTLS.</p>
+    <h3>Related repos</h3>
+    <div class="kv" style="margin-top:8px">
+      <dt>loroco-local-sync</dt><dd>The P2P sidecar daemon (split for an independent release cycle).</dd>
+      <dt>loroco-wallet</dt><dd>Older variant where Sage is a git submodule — the target future state.</dd>
+      <dt>MarvinQuevedo/sage</dt><dd>Upstream of the embedded Sage source (branch <code>web/coinset-sync</code>).</dd>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>Loroco — Chia browser-extension wallet.</div>
+    <div><a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
