@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy — Loroco</title>
+<meta name="description" content="Privacy Policy for Loroco, a Chia browser-extension wallet. We collect no personal data, and your keys never leave your device.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="Loroco"><span class="word">loroco</span></a>
+    <div class="nav-links">
+      <a href="index.html">Overview</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="methods.html">RPC Methods</a>
+      <a href="developers.html">Developers</a>
+      <a href="security.html">Security</a>
+      <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero" style="padding:64px 0 40px">
+  <div class="wrap">
+    <span class="eyebrow">Privacy</span>
+    <h1>Privacy Policy</h1>
+    <p class="lead">Loroco is a self-custody Chia browser-extension wallet. We collect no personal
+      data, we never see your keys, and everything sensitive stays on your device.</p>
+    <p class="muted" style="margin-top:8px">Last updated: May 31, 2026</p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="note info">
+      <span class="label">TL;DR</span>
+      <p style="margin:8px 0 0"><strong>Loroco does not collect, sell, or share your personal
+      information.</strong> We never have access to your private keys, mnemonic (seed) phrase, or
+      wallet password. The signing key lives inside a WebAssembly engine on your device and never
+      leaves it. Every transaction is approved by you, per call.</p>
+    </div>
+
+    <h2 style="margin-top:40px">1. Who we are</h2>
+    <p>Loroco is an open-source Chia (XCH) browser-extension wallet (Manifest V3), built on a WASM
+      fork of <a href="https://github.com/xch-dev/sage">Sage</a>. This policy describes how the Loroco
+      extension handles information. Questions? Open an issue at
+      <a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a>.</p>
+
+    <h2 style="margin-top:36px">2. What we do <em>not</em> collect</h2>
+    <p>Loroco is designed to minimize data exposure. We do <strong>not</strong> collect, transmit, or
+      store any of the following:</p>
+    <ul>
+      <li>Your <strong>private keys, master secret key, or mnemonic (seed) phrase</strong> — these are
+        held inside the sage-wasm signing engine and never leave your device.</li>
+      <li>Your <strong>wallet unlock password</strong> — you supply it each browser session; it is
+        never persisted or transmitted.</li>
+      <li>Personally identifiable information (name, email, phone, IP, physical address).</li>
+      <li>Your browsing history, the content of pages you visit, or behavioral analytics/telemetry.</li>
+    </ul>
+    <p>There are no advertising trackers, and no data is sold or rented to third parties.</p>
+
+    <h2 style="margin-top:36px">3. Data stored locally on your device</h2>
+    <p>To work as a wallet, Loroco stores the following <strong>only on your own device</strong> (via
+      the browser <code>storage</code> API). None of it is sent to us:</p>
+    <div class="grid grid-2" style="margin-top:18px">
+      <div class="card"><h3>Encrypted keychain blob</h3><p>So your wallet survives between sessions. Encrypted at rest; decryptable only with your password.</p></div>
+      <div class="card"><h3>Public addresses &amp; balances</h3><p>To display your XCH, CAT and NFT holdings.</p></div>
+      <div class="card"><h3>Connected dApp sites &amp; permissions</h3><p>To remember which sites you authorized to connect — stamped per origin.</p></div>
+      <div class="card"><h3>Watched assets, offers, settings</h3><p>To restore your preferences and pending offers across sessions.</p></div>
+      <div class="card"><h3>Cached token / CAT metadata</h3><p>To show token names and icons without re-fetching every time.</p></div>
+    </div>
+    <p style="margin-top:18px">You can erase all of it any time by removing the extension or clearing
+      its storage in your browser.</p>
+
+    <h2 style="margin-top:36px">4. Network requests</h2>
+    <p>To interact with the Chia blockchain, Loroco sends requests to public infrastructure. Each
+      request carries only what the action you requested needs (e.g. a public address to read a
+      balance, or a transaction <em>you approved</em> to be broadcast):</p>
+    <ul>
+      <li><strong>Chia full-node / blockchain APIs</strong> (e.g. <code>coinset.org</code>) — read
+        balances, sync coin state, broadcast approved transactions.</li>
+      <li><strong>Offer &amp; metadata services</strong> (e.g. dexie, TibetSwap) — token metadata and
+        making/taking/looking up offers when you choose to.</li>
+    </ul>
+    <p>These third-party services have their own privacy policies; we don't control them.</p>
+
+    <h2 style="margin-top:36px">5. Permissions Loroco requests</h2>
+    <p>Loroco requests only the permissions needed for its single purpose — being a Chia wallet:</p>
+    <ul>
+      <li><code>storage</code> — save your encrypted wallet and settings locally.</li>
+      <li><code>alarms</code> — periodically refresh balances and blockchain state in the background.</li>
+      <li><code>tabs</code> — match a connection/approval request to the right site and open the approval window.</li>
+      <li><strong>Host permissions</strong> — inject the <code>window.loroco</code> / <code>window.chia</code>
+        provider into pages so Chia dApps can request a connection. Every sensitive action still requires
+        your explicit, per-request approval inside the extension.</li>
+    </ul>
+    <div class="note" style="margin-top:14px"><p style="margin:0">Loroco does <strong>not</strong>
+      download or execute remote code. All executable code, including the WebAssembly signing engine,
+      ships inside the extension package. Nothing fetched over the network is evaluated as script.</p></div>
+
+    <h2 style="margin-top:36px">6. How transactions and approvals work</h2>
+    <p>Loroco is non-custodial: you, and only you, control your funds. Every transaction, signature, or
+      offer requested by a connected website must be <strong>explicitly approved by you</strong> in
+      Loroco's approval dialog before anything is signed. We cannot move, freeze, or recover your funds,
+      reset your password, or recover your seed phrase.</p>
+
+    <h2 style="margin-top:36px">7. Children</h2>
+    <p>Loroco is not directed to anyone under 18, and we do not knowingly collect data from children.</p>
+
+    <h2 style="margin-top:36px">8. Changes to this policy</h2>
+    <p>We may update this policy to reflect changes in the extension or applicable law. Changes take
+      effect when posted on this page; the "Last updated" date above marks the latest revision.</p>
+
+    <h2 style="margin-top:36px">9. Contact</h2>
+    <p>Questions, concerns, or data requests: open an issue at
+      <a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a>.</p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>Loroco — a Chia browser-extension wallet. Built on a WASM fork of <a href="https://github.com/xch-dev/sage">Sage</a>.</div>
+    <div><a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
