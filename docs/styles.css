@@ -61,6 +61,11 @@ img { max-width: 100%; }
   border: 1px solid var(--line); border-radius: 8px;
   padding: 6px 12px !important; font-weight: 600 !important;
 }
+.nav-install {
+  background: var(--orange); color: #fff !important; border-radius: 8px;
+  padding: 6px 12px !important; font-weight: 600 !important;
+}
+.nav-install:hover { background: var(--orange-bright); color: #fff !important; }
 
 /* ── Layout ────────────────────────────────────────────────── */
 .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
