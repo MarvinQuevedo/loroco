@@ -14,7 +14,7 @@ import { ensureSocket as ensureMempoolSocket, tickMempoolWatch } from "../src/ba
 import { handlePopupMessage, isPopupMessage } from "../src/background/popup-rpc";
 import { canonicalizeMethod, handleRpc } from "../src/background/rpc-router";
 import { startSyncLoop } from "../src/background/sync-loop";
-import { ensurePermissions, requireConnected } from "../src/background/permissions";
+import { ensurePermissions, purgeExpiredConnections, requireConnected } from "../src/background/permissions";
 
 export default defineBackground(() => {
   console.log("[Loroco] background starting");
@@ -58,6 +58,11 @@ export default defineBackground(() => {
   chrome.alarms.create("coin-sync", { periodInMinutes: 0.5 });
   chrome.alarms.create("mempool-watch", { periodInMinutes: 0.5 });
   chrome.alarms.create("keepalive", { delayInMinutes: 20 / 60 });
+  // #4 — reclaim connections whose 7-day sliding window has elapsed. The
+  // lazy purge in ensurePermissions only fires when the dApp calls again;
+  // an abandoned site would otherwise linger in the Connected-sites list
+  // forever. Half-hourly is plenty for a day-scale TTL.
+  chrome.alarms.create("purge-connections", { periodInMinutes: 30 });
 
   chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === "sync") {
@@ -66,6 +71,12 @@ export default defineBackground(() => {
       void tickCoinSync();
     } else if (alarm.name === "mempool-watch") {
       void tickMempoolWatch().catch(() => {});
+    } else if (alarm.name === "purge-connections") {
+      void purgeExpiredConnections()
+        .then((n) => {
+          if (n > 0) console.log(`[Loroco] purged ${n} expired connection(s)`);
+        })
+        .catch(() => {});
     } else if (alarm.name === "keepalive") {
       // Re-arm FIRST so a future panic in getPlatformInfo can't break the
       // chain. Then await the chrome.* call — the await is what extends

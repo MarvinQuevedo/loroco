@@ -82,7 +82,16 @@ export interface NftInfo {
 export interface ChiaMethodMap {
   // CHIP-0002 — Connection & meta
   chainId: { params: void; result: ChainId };
-  connect: { params: { eager?: boolean } | undefined; result: boolean };
+  // `scope` lets a dApp request the LEAST privilege it needs (principle of
+  // least privilege). Default/absent = "full" (write — re-prompted per call).
+  // A dApp that only reads can request "read-only" and the wallet locks the
+  // grant there — the user can't upgrade it. When the dApp requests "full"
+  // the user may still downgrade to read-only at the approval prompt. The
+  // wallet always clamps to ≤ the requested level, never above.
+  connect: {
+    params: { eager?: boolean; scope?: "full" | "read-only" } | undefined;
+    result: boolean;
+  };
   walletSwitchChain: { params: { chainId: ChainId }; result: null };
   walletWatchAsset: {
     params: {

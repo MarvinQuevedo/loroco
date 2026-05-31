@@ -1230,6 +1230,206 @@ const ATTACKS = [
       };
     },
   },
+
+  // 19 — read-only connection scope blocks signing OUTRIGHT (#2). A site
+  // connected read-only can read balances/assets but must never reach a
+  // signing/mutating method — the gate fires in ensurePermissions BEFORE
+  // any approval popup is scheduled (the "this dApp may never request
+  // signing" mode). We seed a read-only grant directly (the same record
+  // the connect popup writes when the user picks "Read-only") and confirm
+  // a signing call is rejected with 4001 and never pops a prompt.
+  {
+    id: "19",
+    name: "read-only scope rejects signing before any popup (#2)",
+    run: async () => {
+      // The storage KEY is the page's `sender.origin` — no trailing slash.
+      const origin = "https://readonly.example";
+      await ctx.route("https://readonly.example/**", (route) => {
+        route.fulfill({ status: 200, contentType: "text/html", body: ATTACKER_HTML });
+      });
+      await popup.evaluate(async (o) => {
+        const d = await chrome.storage.local.get("permissions");
+        const perms = d.permissions ?? {};
+        const now = Date.now();
+        perms[o] = {
+          origin: o,
+          connectedAt: now,
+          lastUsedAt: now,
+          expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+          scope: "read-only",
+          methods: [],
+        };
+        await chrome.storage.local.set({ permissions: perms });
+      }, origin);
+
+      const page = await ctx.newPage();
+      await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+      await wait(500);
+
+      // A read read-only grant allows: getAssetBalance should succeed.
+      const readRes = await page.evaluate(() =>
+        window.loroco
+          .request({ method: "getAssetBalance", params: {} })
+          .then(() => ({ ok: true }))
+          .catch((e) => ({ ok: false, code: e?.code, message: e?.message })),
+      );
+      // A signing call must be rejected with 4001 and (crucially) no popup.
+      let popupAppeared = false;
+      const watch = (async () => {
+        const p = await ensurePopup();
+        for (let i = 0; i < 8; i += 1) {
+          const btn = p.locator("button", { hasText: /^Approve$/ }).first();
+          if (await btn.isVisible().catch(() => false)) {
+            popupAppeared = true;
+            return;
+          }
+          await wait(150);
+        }
+      })();
+      const signRes = await page.evaluate(() =>
+        window.loroco
+          .request({
+            method: "signMessage",
+            params: { message: "0xdeadbeef", publicKey: `0x${"a".repeat(96)}` },
+          })
+          .then(() => ({ ok: true }))
+          .catch((e) => ({ ok: false, code: e?.code, message: e?.message })),
+      );
+      await watch;
+      await page.close().catch(() => {});
+
+      const held =
+        readRes.ok === true &&
+        signRes.ok === false &&
+        signRes.code === 4001 &&
+        /read-only/i.test(signRes.message ?? "") &&
+        !popupAppeared;
+      return {
+        held,
+        detail: held
+          ? `read-only origin: getAssetBalance allowed, signMessage rejected 4001 with no popup`
+          : `read=${JSON.stringify(readRes)} sign=${JSON.stringify(signRes)} popup=${popupAppeared}`,
+      };
+    },
+  },
+
+  // 20 — expired connection is rejected and purged (#4). A grant past its
+  // sliding deadline must behave as fully revoked: the next call gets 4001
+  // and the dead record is swept from storage so it can't linger in the
+  // Connected-sites list. We seed a record with expiresAt in the past.
+  {
+    id: "20",
+    name: "expired connection rejected + purged (#4)",
+    run: async () => {
+      // The storage KEY is the page's `sender.origin` — no trailing slash.
+      const origin = "https://expired.example";
+      await ctx.route("https://expired.example/**", (route) => {
+        route.fulfill({ status: 200, contentType: "text/html", body: ATTACKER_HTML });
+      });
+      await popup.evaluate(async (o) => {
+        const d = await chrome.storage.local.get("permissions");
+        const perms = d.permissions ?? {};
+        const now = Date.now();
+        const day = 24 * 60 * 60 * 1000;
+        perms[o] = {
+          origin: o,
+          connectedAt: now - 10 * day,
+          lastUsedAt: now - 8 * day,
+          expiresAt: now - 1 * day, // already dead
+          scope: "full",
+          methods: ["*"],
+        };
+        await chrome.storage.local.set({ permissions: perms });
+      }, origin);
+
+      const page = await ctx.newPage();
+      await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+      await wait(500);
+      const r = await page.evaluate(() =>
+        window.loroco
+          .request({ method: "getAssetBalance", params: {} })
+          .then((v) => ({ ok: true, v }))
+          .catch((e) => ({ ok: false, code: e?.code, message: e?.message })),
+      );
+      await page.close().catch(() => {});
+
+      // The lazy purge in ensurePermissions should have removed the record.
+      const stillThere = await popup.evaluate(async (o) => {
+        const d = await chrome.storage.local.get("permissions");
+        return Boolean((d.permissions ?? {})[o]);
+      }, origin);
+
+      const held = r.ok === false && r.code === 4001 && stillThere === false;
+      return {
+        held,
+        detail: held
+          ? `expired origin rejected 4001 and purged from storage`
+          : `r=${JSON.stringify(r)} stillInStorage=${stillThere}`,
+      };
+    },
+  },
+
+  // 21 — dApp-requested read-only scope is a hard ceiling (#2). A site can
+  // request `connect({ scope: "read-only" })` to limit ITSELF; the wallet
+  // must grant exactly that and never let it reach a signing method, even
+  // though the connect itself succeeds. Confirms `clampScope` is the
+  // authoritative gate (least privilege), not just popup cosmetics.
+  {
+    id: "21",
+    name: "dApp-requested read-only scope is locked at the wallet (#2)",
+    run: async () => {
+      const origin = "https://requestsreadonly.example";
+      await ctx.route("https://requestsreadonly.example/**", (route) => {
+        route.fulfill({ status: 200, contentType: "text/html", body: ATTACKER_HTML });
+      });
+      const page = await ctx.newPage();
+      await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+      await wait(500);
+
+      // Connect requesting read-only; approve the prompt.
+      const connectP = page.evaluate(() =>
+        window.loroco
+          .request({ method: "connect", params: { scope: "read-only" } })
+          .then(() => ({ ok: true }))
+          .catch((e) => ({ ok: false, code: e?.code, message: e?.message })),
+      );
+      await wait(800);
+      await autoApprove();
+      const connectRes = await connectP;
+
+      // The stored grant must be read-only (clamp held). The popup closes
+      // itself after approving, so reopen it before reading storage.
+      const pg = await ensurePopup();
+      const storedScope = await pg.evaluate(async (o) => {
+        const d = await chrome.storage.local.get("permissions");
+        return (d.permissions ?? {})[o]?.scope ?? null;
+      }, origin);
+
+      // …and a signing call is rejected with 4001.
+      const signRes = await page.evaluate(() =>
+        window.loroco
+          .request({
+            method: "signMessage",
+            params: { message: "0xdeadbeef", publicKey: `0x${"a".repeat(96)}` },
+          })
+          .then(() => ({ ok: true }))
+          .catch((e) => ({ ok: false, code: e?.code, message: e?.message })),
+      );
+      await page.close().catch(() => {});
+
+      const held =
+        connectRes.ok === true &&
+        storedScope === "read-only" &&
+        signRes.ok === false &&
+        signRes.code === 4001;
+      return {
+        held,
+        detail: held
+          ? `connect{scope:read-only} granted read-only; signMessage rejected 4001`
+          : `connect=${JSON.stringify(connectRes)} stored=${storedScope} sign=${JSON.stringify(signRes)}`,
+      };
+    },
+  },
 ];
 
 // ── Runner ──────────────────────────────────────────────────────────────

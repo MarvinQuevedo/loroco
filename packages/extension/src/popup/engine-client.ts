@@ -249,9 +249,17 @@ export async function getMempoolDebug(): Promise<MempoolDebugSnapshot> {
   return res.value as MempoolDebugSnapshot;
 }
 
+export type ConnectionScope = "full" | "read-only";
+
 export interface ConnectionRecord {
   origin: string;
   connectedAt: number;
+  /** Last authorized call; the sliding-expiry window is measured from here. */
+  lastUsedAt: number;
+  /** Connection is dead once Date.now() > expiresAt (7-day sliding window). */
+  expiresAt: number;
+  /** `full` → signing allowed (per-call approved); `read-only` → reads only. */
+  scope: ConnectionScope;
   methods: string[];
 }
 
@@ -380,6 +388,10 @@ export interface CoinSpendAnalysisItem {
   input_amount: string;
   input_is_ours: boolean;
   fee_mojos: string;
+  /** AGG_SIG conditions this spend forces the wallet to produce. */
+  agg_sig_count: number;
+  /** Of those, the replayable AGG_SIG_UNSAFE kind (message not coin-bound). */
+  agg_sig_unsafe_count: number;
   outputs: CoinSpendAnalysisOutput[];
 }
 
@@ -390,7 +402,13 @@ export interface CoinSpendAnalysis {
     total_xch_change: string;
     total_cat_out_by_asset: Record<string, string>;
     total_fee_mojos: string;
+    /** Mojos created by unrecognised-puzzle spends to non-owner destinations. */
+    total_unknown_out_mojos: string;
     unknown_spend_count: number;
+    /** Total AGG_SIG conditions across the bundle. */
+    agg_sig_count: number;
+    /** Replayable AGG_SIG_UNSAFE conditions — a phishing red flag. */
+    agg_sig_unsafe_count: number;
   };
 }
 

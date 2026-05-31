@@ -1576,6 +1576,101 @@ button.sync-refresh:disabled {
   color: var(--text-strong);
 }
 
+/* #2 — connection scope picker on the connect approval screen. */
+.scope-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.scope-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--ozone-radius-md);
+  cursor: pointer;
+}
+
+.scope-option.selected {
+  border-color: var(--ozone-primary);
+  box-shadow: 0 0 0 1px var(--ozone-primary) inset;
+}
+
+/* dApp-requested read-only — locked, not a choice. */
+.scope-option.scope-locked {
+  cursor: default;
+}
+
+.scope-lock {
+  margin-top: 1px;
+  flex: 0 0 auto;
+}
+
+.scope-option input[type="radio"] {
+  margin-top: 3px;
+  flex: 0 0 auto;
+  accent-color: var(--ozone-primary);
+}
+
+.scope-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scope-title {
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+/* Scope badge in the Connected-sites list. */
+.scope-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.scope-badge.full {
+  background: color-mix(in srgb, var(--ozone-primary) 18%, transparent);
+  color: var(--ozone-primary);
+}
+
+.scope-badge.read-only {
+  background: color-mix(in srgb, var(--text-mute) 22%, transparent);
+  color: var(--text-mute);
+}
+
+/* #1 — explicit acknowledgement gate for bundles Loroco can't fully decode. */
+.risk-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--ozone-red) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ozone-red) 45%, transparent);
+  border-radius: var(--ozone-radius-md);
+  font-size: 12px;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.risk-ack input[type="checkbox"] {
+  margin-top: 2px;
+  flex: 0 0 auto;
+  accent-color: var(--ozone-red);
+}
+
 details > summary {
   cursor: pointer;
   color: var(--text-mute);
