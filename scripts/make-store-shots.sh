@@ -20,10 +20,16 @@ FONT_R="/System/Library/Fonts/Supplemental/Arial.ttf"
 ORANGE="#E65F28"
 INK="#5A4636"
 
-CARD_H=724          # popup card height on the 1280x800 canvas
-R=26                # corner radius
-CARD_MARGIN=92      # gap from the right edge to the card
-TEXT_X=92           # left margin for branding + headline
+# NOTE on sizing: the popup's NATIVE width is 380px (styles.css), captured at
+# 2x -> ~768px raw, aspect 0.637. That ratio is faithful and must NOT change.
+# Earlier the card filled ~90% of the canvas height (724px) which made the
+# true-but-wide popup read as a "fat phone". Match the marquee instead: a
+# smaller card that occupies ~28% of the width reads slim & premium, same
+# aspect. -resize x${CARD_H} preserves the ratio exactly.
+CARD_H=600          # popup card height on the 1280x800 canvas (was 724)
+R=18                # corner radius (less phone-like than 26)
+CARD_MARGIN=120     # gap from the right edge to the card
+TEXT_X=104          # left margin for branding + headline
 TEXT_W=560          # wrap width for headline/subtext
 
 # soft white halo behind transparent text so it reads on the gradient
