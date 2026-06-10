@@ -26,3 +26,6 @@ packages/wallet-wasm/.gitignore
 !packages/wallet-wasm/package.json
 !packages/wallet-wasm/README.md
 .claude/scheduled_tasks.lock
+
+# Claude Code local state (settings.local.json, worktrees)
+.claude/

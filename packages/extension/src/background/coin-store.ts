@@ -110,6 +110,13 @@ export interface MempoolIncoming {
   asset_id?: string | null;
   /** When mempool-watch first saw this addition. Used for TTL expiry. */
   seen_at: number;
+  /**
+   * True when this addition belongs to a tx that did NOT spend any of our
+   * coins — i.e. a genuine receive, not change coming back from our own send.
+   * Notifications fire only for genuine receives; the confirmed-receive alert
+   * keys off this flag when the coin lands in a block.
+   */
+  genuine?: boolean;
 }
 
 /**
@@ -149,6 +156,14 @@ export interface CoinStore {
    * the indexer evicted disappears from the UI on its own.
    */
   mempool?: MempoolSnapshot;
+  /**
+   * Block-height high-water mark for notifications. Coins confirmed/spent at
+   * or below this height are treated as historical backfill and never notified
+   * (otherwise the first sync of a wallet's whole history would fire a flood of
+   * "received" alerts). Seeded to the peak on the first armed sync; advanced to
+   * the peak each tick so only genuinely-new activity notifies. See coin-sync.
+   */
+  notif_baseline_height?: number;
   /**
    * Per-PH cursor for `get_coin_records_by_hint` start_height. After each
    * successful CAT chunk we advance the entry to peak_height so the next

@@ -318,8 +318,9 @@ button:active:not(:disabled) {
 }
 
 button:disabled {
-  background: color-mix(in srgb, var(--text-mute) 30%, transparent);
+  background: var(--surface);
   color: var(--text-mute);
+  border: 1px solid var(--border);
   cursor: not-allowed;
 }
 
@@ -416,6 +417,30 @@ textarea {
   letter-spacing: 0.04em;
 }
 
+/* Amount label row with an inline "Max" affordance. */
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.field-max {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent-green);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.field-max:hover {
+  background: rgba(125, 178, 62, 0.14);
+  border-color: var(--accent-green);
+}
+
 .row {
   display: flex;
   gap: var(--space-2);
@@ -469,9 +494,9 @@ textarea {
 }
 
 .icon-btn.active {
-  background: var(--brand-green-lime);
-  color: #0e1113;
-  border-color: var(--brand-green);
+  background: color-mix(in srgb, var(--accent-green) 16%, transparent);
+  color: var(--accent-green-press);
+  border-color: color-mix(in srgb, var(--accent-green) 45%, var(--border));
 }
 
 .header-actions {
@@ -1189,8 +1214,8 @@ button.sync-refresh:disabled {
 }
 
 .send-success-badge {
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
@@ -1199,8 +1224,8 @@ button.sync-refresh:disabled {
 }
 
 .send-success-badge svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   display: block;
 }
 
@@ -1215,33 +1240,40 @@ button.sync-refresh:disabled {
 }
 
 .send-success-eyebrow {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--text-mute);
+  letter-spacing: 0.1em;
+  color: var(--text-strong);
 }
 
 .send-success-amount {
   display: flex;
   align-items: baseline;
   justify-content: center;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
   margin: var(--space-1) 0 var(--space-3);
+  max-width: 100%;
+  padding: 0 var(--space-2);
 }
 
 .send-success-amount-num {
-  font-size: 40px;
+  /* Shrink the hero figure for long amounts so it never overflows the 380px
+     popup; big-and-bold for the common short case. */
+  font-size: clamp(26px, 11vw, 38px);
   font-weight: 700;
   letter-spacing: -0.03em;
-  line-height: 1;
+  line-height: 1.05;
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
 .send-success-amount-ticker {
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-mute);
   letter-spacing: 0.04em;
 }
@@ -1641,8 +1673,8 @@ button.sync-refresh:disabled {
 }
 
 .scope-badge.full {
-  background: color-mix(in srgb, var(--ozone-primary) 18%, transparent);
-  color: var(--ozone-primary);
+  background: color-mix(in srgb, var(--accent-green) 20%, transparent);
+  color: var(--accent-green-press);
 }
 
 .scope-badge.read-only {
@@ -1743,7 +1775,7 @@ details > summary:hover {
   background: #fff;
   border-radius: var(--ozone-radius-md);
   color: #0e1113;
-  border: 2px solid var(--ozone-primary);
+  border: 1px solid var(--border);
 }
 
 .qr {
@@ -1935,6 +1967,15 @@ details > summary:hover {
   border-radius: var(--ozone-radius-sm);
 }
 
+/* When the NFT has no resolvable image, NftThumb renders a placeholder — keep
+   it a tidy centered square in the detail view rather than full-bleed. */
+.nft-detail-image .nft-placeholder {
+  width: 180px;
+  max-width: 100%;
+  font-size: 40px;
+  color: var(--text-mute);
+}
+
 /* ── activity list ───────────────────────────────────────────────────── */
 .activity-list {
   list-style: none;
@@ -1950,12 +1991,19 @@ details > summary:hover {
 .activity-row {
   display: grid;
   grid-template-columns: 32px 1fr auto;
-  align-items: center;
+  /* Top-align so the primary number always sits on the title's baseline —
+     rows with a "≈ $" sub-line no longer make the amount jump vs rows without
+     one. The arrow re-centers itself below. */
+  align-items: start;
   gap: var(--space-3);
   padding: 10px var(--space-3);
   background: var(--surface);
   border-radius: var(--ozone-radius-md);
   border: 1px solid var(--border);
+}
+
+.activity-row .activity-arrow {
+  align-self: center;
 }
 
 .activity-arrow {
@@ -1972,10 +2020,12 @@ details > summary:hover {
 
 .activity-arrow.ok {
   background: color-mix(in srgb, var(--accent-green) 20%, transparent);
+  color: var(--accent-green-press);
 }
 
 .activity-arrow.warn {
-  background: color-mix(in srgb, var(--accent-warn) 20%, transparent);
+  background: color-mix(in srgb, var(--text-mute) 16%, transparent);
+  color: var(--text);
 }
 
 .activity-meta {
@@ -1999,6 +2049,15 @@ details > summary:hover {
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;
+}
+
+/* Received reads as a gain (green); sent stays neutral — the leading − already
+   signals direction, and terracotta/red would fight the brand buttons. */
+.activity-amount .amt-in {
+  color: var(--accent-green);
+}
+.activity-amount .amt-out {
+  color: var(--text-strong);
 }
 
 /* ── sync details panel (Settings → Sync details) ───────────────────── */
@@ -2123,7 +2182,7 @@ button.connection-revoke {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px 16px 16px;
+  padding: 12px 16px 20px;
   display: flex;
   flex-direction: column;
   /* thin discreet scrollbar — Firefox + Chromium */
@@ -2295,6 +2354,7 @@ button.connection-revoke {
 
 .modal-body {
   padding: var(--space-4);
+  min-height: 96px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;

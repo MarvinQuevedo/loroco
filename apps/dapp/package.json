@@ -1,0 +1,27 @@
+{
+  "name": "@ozone/dapp",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Loroco dApp Console — a web client exercising the full window.chia provider surface.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "qrcode-generator": "^2.0.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.0"
+  },
+  "devDependencies": {
+    "@ozone/goby-provider": "workspace:*",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7"
+  }
+}

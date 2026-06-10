@@ -11,6 +11,7 @@ import { handleApprovalMessage, isApprovalMessage } from "../src/background/appr
 import { tickCoinSync } from "../src/background/coin-sync";
 import { setActiveWallet } from "../src/background/engine";
 import { ensureSocket as ensureMempoolSocket, tickMempoolWatch } from "../src/background/mempool-watch";
+import { initNotifications } from "../src/background/notifications";
 import { handlePopupMessage, isPopupMessage } from "../src/background/popup-rpc";
 import { canonicalizeMethod, handleRpc } from "../src/background/rpc-router";
 import { startSyncLoop } from "../src/background/sync-loop";
@@ -18,6 +19,9 @@ import { ensurePermissions, purgeExpiredConnections, requireConnected } from "..
 
 export default defineBackground(() => {
   console.log("[Loroco] background starting");
+
+  // Register the notification click handler (opens the popup). Idempotent.
+  initNotifications();
 
   // Silent SW killers: an uncaught error inside an async chain (e.g. a
   // wasm-bindgen JsValue rejection that isn't caught) terminates the SW

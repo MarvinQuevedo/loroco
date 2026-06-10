@@ -8,7 +8,7 @@ import {
   getCoinSnapshot,
   getCoinSyncTelemetry,
   getCompatSettings,
-  getMempoolDebug,
+  getNotifSettings,
   getSidecarSettings,
   getSyncState,
   getXchPriceUsd,
@@ -17,17 +17,18 @@ import {
   pickCoinsForSendMulti,
   probeSidecar,
   revokeConnection,
+  sendTestNotification,
   setActiveWallet,
   setCompatSettings,
+  setNotifSettings,
   setSidecarSettings,
   type CoinSnapshot,
   type CoinSpendAnalysis,
   type CompatSettings,
+  type NotifSettings,
   type CoinSyncTelemetry,
   type ConnectionRecord,
   type DexieCatMetadata,
-  type MempoolDebugEntry,
-  type MempoolDebugSnapshot,
   type NftView,
   type PendingApproval,
   type SendXchResult,
@@ -317,6 +318,7 @@ export function App() {
             key={pending[0]!.id}
             request={pending[0]!}
             queueSize={pending.length}
+            fingerprint={view.wallet.fingerprint}
             onDecide={decide}
           />
         )}
@@ -384,10 +386,12 @@ function requestedScopeFromParams(params: unknown): "full" | "read-only" {
 function ApprovalScreen({
   request,
   queueSize,
+  fingerprint,
   onDecide,
 }: {
   request: PendingApproval;
   queueSize: number;
+  fingerprint: number | null;
   onDecide: (
     id: string,
     approved: boolean,
@@ -407,13 +411,20 @@ function ApprovalScreen({
   // Per-method override state. `createOffer` lets the user override the fee
   // a dApp proposed (Goby's combined-swap default of ~100M+ mojos is rarely
   // what the user wants — most XCH transfers need 0 or 5_000_000 mojos).
+  //
+  // The canonical fee is mojos (what the handler receives), but the user edits
+  // it in XCH — editing a 9-digit mojos string is hostile and inconsistent with
+  // every other amount in this dialog. `feeOverride` holds the editable XCH
+  // string; `feeOverrideMojos` is the BigInt-safe canonical we actually send.
   const initialFee =
     request.method === "createOffer" || request.method === "takeOffer"
       ? String(
           (request.params as { fee?: string | number } | null)?.fee ?? "0",
         )
       : null;
-  const [feeOverride, setFeeOverride] = useState<string | null>(initialFee);
+  const initialFeeXch = initialFee != null ? formatAmount(initialFee, 12) : null;
+  const [feeOverride, setFeeOverride] = useState<string | null>(initialFeeXch);
+  const feeOverrideMojos = feeOverride != null ? xchToMojosStr(feeOverride) : null;
   // #2 — connection scope. On a connect/requestAccounts approval the user
   // chooses whether the site gets full access (signing allowed, still
   // per-call approved) or read-only (it can see balances/assets but every
@@ -441,8 +452,8 @@ function ApprovalScreen({
     setBusy(approved ? "approve" : "reject");
     try {
       const overrides: Record<string, unknown> = {};
-      if (approved && feeOverride !== null && feeOverride !== initialFee) {
-        overrides.fee = feeOverride;
+      if (approved && feeOverrideMojos !== null && feeOverrideMojos !== initialFee) {
+        overrides.fee = feeOverrideMojos;
       }
       if (approved && isConnectRequest) {
         overrides.scope = scope;
@@ -471,6 +482,7 @@ function ApprovalScreen({
 
       <ApprovalSummary
         request={request}
+        fingerprint={fingerprint}
         onAnalysisReady={setAnalysisReady}
         onRiskAssessed={setRiskAckRequired}
       />
@@ -531,23 +543,25 @@ function ApprovalScreen({
 
       {feeOverride !== null && (
         <div className="fee-override">
-          <label htmlFor="fee-mojos" className="muted small">
-            Network fee — dApp suggested{" "}
-            <code>{fmtXch(initialFee ?? "0")}</code> ({initialFee} mojos):
+          <label htmlFor="fee-xch" className="muted small">
+            Network fee (XCH) — dApp suggested{" "}
+            <code>{fmtXch(initialFee ?? "0")}</code>:
           </label>
           <input
-            id="fee-mojos"
+            id="fee-xch"
             type="number"
             min="0"
-            step="1"
+            step="0.0001"
+            inputMode="decimal"
             value={feeOverride}
             onChange={(e) => setFeeOverride(e.target.value)}
             disabled={busy !== null}
           />
-          {feeOverride !== initialFee && (
+          {feeOverrideMojos !== initialFee && (
             <p className="muted small">
-              You're overriding the fee. The dApp may reject the offer if it
-              expected a higher fee — try the suggested value first if unsure.
+              You're overriding the fee (now <code>{fmtXch(feeOverrideMojos ?? "0")}</code>). The
+              dApp may reject the offer if it expected a higher fee — try the suggested value first
+              if unsure.
             </p>
           )}
         </div>
@@ -669,7 +683,13 @@ interface DecodedOfferLite {
   };
 }
 
-function TakeOfferSummary({ offer }: { offer: string }) {
+function TakeOfferSummary({
+  offer,
+  catDisplay,
+}: {
+  offer: string;
+  catDisplay: (assetId: string | null | undefined) => CatDisplay;
+}) {
   const [decoded, setDecoded] = useState<DecodedOfferLite | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -710,14 +730,14 @@ function TakeOfferSummary({ offer }: { offer: string }) {
     <div className="offer-summary">
       <div className="offer-side offer-receive">
         <span className="muted small">You receive</span>
-        <OfferAssetList side={decoded.offered} />
+        <OfferAssetList side={decoded.offered} catDisplay={catDisplay} />
       </div>
       <div className="offer-arrow" aria-hidden>↕</div>
       <div className="offer-side offer-pay">
         <span className="muted small">You pay</span>
-        <OfferAssetList side={decoded.requested} />
+        <OfferAssetList side={decoded.requested} catDisplay={catDisplay} />
       </div>
-      {decoded.offered_royalties.length > 0 && <RoyaltyLine decoded={decoded} />}
+      {decoded.offered_royalties.length > 0 && <RoyaltyLine decoded={decoded} catDisplay={catDisplay} />}
     </div>
   );
 }
@@ -730,7 +750,13 @@ function TakeOfferSummary({ offer }: { offer: string }) {
  * destination puzzle hash is shown and labelled "verified on-chain" so the
  * user can see funds go to the creator's real royalty address.
  */
-function RoyaltyLine({ decoded }: { decoded: DecodedOfferLite }) {
+function RoyaltyLine({
+  decoded,
+  catDisplay,
+}: {
+  decoded: DecodedOfferLite;
+  catDisplay: (assetId: string | null | undefined) => CatDisplay;
+}) {
   const pcts = decoded.offered_royalties
     .map((r) => `${(r.royalty_basis_points / 100).toFixed(2)}%`)
     .join(", ");
@@ -740,7 +766,8 @@ function RoyaltyLine({ decoded }: { decoded: DecodedOfferLite }) {
     if (BigInt(rp.xch_mojos) > 0n) amounts.push(fmtXch(rp.xch_mojos));
     for (const c of rp.cats) {
       if (BigInt(c.amount) > 0n) {
-        amounts.push(`${mojosToCatUnits(c.amount)} ${shortHash(c.asset_id)}`);
+        const cd = catDisplay(c.asset_id);
+        amounts.push(`${mojosToCatUnits(c.amount, cd.decimals)} ${cd.symbol ?? shortHash(c.asset_id)}`);
       }
     }
   }
@@ -775,8 +802,10 @@ function RoyaltyLine({ decoded }: { decoded: DecodedOfferLite }) {
 
 function OfferAssetList({
   side,
+  catDisplay,
 }: {
   side: DecodedOfferLite["offered"];
+  catDisplay: (assetId: string | null | undefined) => CatDisplay;
 }) {
   const xch = BigInt(side.xch_mojos);
   const items: string[] = [];
@@ -784,7 +813,8 @@ function OfferAssetList({
     items.push(fmtXch(xch.toString()));
   }
   for (const c of side.cats) {
-    items.push(`${mojosToCatUnits(c.amount)} ${shortHash(c.asset_id)}`);
+    const cd = catDisplay(c.asset_id);
+    items.push(`${mojosToCatUnits(c.amount, cd.decimals)} ${cd.symbol ?? shortHash(c.asset_id)}`);
   }
   for (const l of side.nft_launcher_ids) {
     items.push(`NFT ${shortHash(l)}`);
@@ -834,6 +864,7 @@ function bundleRequiresAck(a: CoinSpendAnalysis): boolean {
 
 function CoinSpendBreakdown({
   coinSpends,
+  catDisplay,
   onAnalysisReady,
   onRiskAssessed,
 }: {
@@ -842,6 +873,7 @@ function CoinSpendBreakdown({
     puzzle_reveal: string;
     solution: string;
   }>;
+  catDisplay?: (assetId: string | null | undefined) => CatDisplay;
   onAnalysisReady?: (ready: boolean) => void;
   onRiskAssessed?: (requiresAck: boolean) => void;
 }) {
@@ -939,9 +971,10 @@ function CoinSpendBreakdown({
     for (const o of s.outputs) {
       const amt = BigInt(o.amount);
       if (amt <= 0n) continue;
+      const cd = s.kind === "cat" && s.asset_id ? catDisplay?.(s.asset_id) : undefined;
       const label =
         s.kind === "cat" && s.asset_id
-          ? `${mojosToCatUnits(o.amount)} CAT ${shortHash(s.asset_id)}`
+          ? `${mojosToCatUnits(o.amount, cd?.decimals ?? 3)} ${cd?.symbol ?? "CAT"} ${shortHash(s.asset_id)}`
           : s.kind === "xch"
             ? `${mojosToXch(o.amount)} XCH`
             : `${o.amount} (unknown layer)`;
@@ -1045,14 +1078,21 @@ function CoinSpendBreakdown({
 
 function ApprovalSummary({
   request,
+  fingerprint,
   onAnalysisReady,
   onRiskAssessed,
 }: {
   request: PendingApproval;
+  fingerprint?: number | null;
   onAnalysisReady?: (ready: boolean) => void;
   onRiskAssessed?: (requiresAck: boolean) => void;
 }) {
   const params = request.params as Record<string, unknown> | null;
+  // Token metadata for the active wallet so CAT amounts render with the same
+  // precision + symbol the user sees on Home/Activity (not a generic 3-decimal
+  // "CAT"). Hook runs unconditionally before the switch.
+  const catMeta = useApprovalCatMeta(fingerprint ?? null);
+  const catDisplay = (assetId: string | null | undefined) => resolveCatDisplay(assetId, catMeta);
 
   switch (request.method) {
     case "connect":
@@ -1114,6 +1154,7 @@ function ApprovalSummary({
       const assetId = params?.assetId;
       const fee = params?.fee;
       const isXch = assetId == null || assetId === "";
+      const cd = catDisplay(isXch ? null : String(assetId));
       return (
         <div className="result">
           <div>
@@ -1122,11 +1163,11 @@ function ApprovalSummary({
           </div>
           <div>
             <span className="muted">amount</span>
-            <code>{amount != null ? (isXch ? fmtXch(String(amount)) : fmtCat(String(amount))) : ""}</code>
+            <code>{amount != null ? (isXch ? fmtXch(String(amount)) : fmtCat(String(amount), cd.symbol, cd.decimals)) : ""}</code>
           </div>
           <div>
             <span className="muted">asset id</span>
-            <code>{isXch ? "(XCH)" : String(assetId)}</code>
+            <code>{isXch ? "XCH (native)" : `${cd.symbol ? cd.symbol + " · " : ""}${String(assetId)}`}</code>
           </div>
           {fee != null && (
             <div>
@@ -1142,7 +1183,7 @@ function ApprovalSummary({
       const offer = typeof params?.offer === "string" ? (params.offer as string) : "";
       // Fee row omitted — takeOffer renders the editable fee-override control
       // below this summary (see ApprovalScreen), so it would duplicate it.
-      return offer ? <TakeOfferSummary offer={offer} /> : null;
+      return offer ? <TakeOfferSummary offer={offer} catDisplay={catDisplay} /> : null;
     }
 
     case "walletWatchAsset": {
@@ -1209,6 +1250,7 @@ function ApprovalSummary({
           </p>
           <CoinSpendBreakdown
             coinSpends={cs}
+            catDisplay={catDisplay}
             onAnalysisReady={onAnalysisReady}
             onRiskAssessed={onRiskAssessed}
           />
@@ -1231,6 +1273,7 @@ function ApprovalSummary({
           </p>
           <CoinSpendBreakdown
             coinSpends={cs}
+            catDisplay={catDisplay}
             onAnalysisReady={onAnalysisReady}
             onRiskAssessed={onRiskAssessed}
           />
@@ -1241,8 +1284,11 @@ function ApprovalSummary({
     case "createOffer": {
       const offerAssets = (params?.offerAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
       const requestAssets = (params?.requestAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
-      const fmtOfferAsset = (a: { assetId: string; amount: string }) =>
-        a.assetId === "" ? fmtXch(a.amount) : `${mojosToCatUnits(a.amount)} ${shortHash(a.assetId)}`;
+      const fmtOfferAsset = (a: { assetId: string; amount: string }) => {
+        if (a.assetId === "") return fmtXch(a.amount);
+        const cd = catDisplay(a.assetId);
+        return `${mojosToCatUnits(a.amount, cd.decimals)} ${cd.symbol ?? shortHash(a.assetId)}`;
+      };
       return (
         // The fee row is intentionally omitted here — createOffer renders the
         // editable fee-override control just below this summary, so showing it
@@ -1340,14 +1386,15 @@ function ApprovalSummary({
       const assetId = params?.assetId;
       const outputs = (params?.outputs as Array<{ address: string; amount: string | number }> | undefined) ?? [];
       const fee = params?.fee;
+      const cd = catDisplay(String(assetId ?? ""));
       return (
         <div className="result">
           <p className="muted small">
             Send a token (CAT) to {outputs.length} recipient{outputs.length === 1 ? "" : "s"}.
           </p>
-          <div><span className="muted">asset id</span><code>{String(assetId ?? "")}</code></div>
-          <OutputsList outputs={outputs} kind="cat" />
-          <SumRow outputs={outputs} kind="cat" />
+          <div><span className="muted">asset id</span><code>{`${cd.symbol ? cd.symbol + " · " : ""}${String(assetId ?? "")}`}</code></div>
+          <OutputsList outputs={outputs} kind="cat" assetSymbol={cd.symbol} decimals={cd.decimals} />
+          <SumRow outputs={outputs} kind="cat" assetSymbol={cd.symbol} decimals={cd.decimals} />
           {fee != null && (
             <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
@@ -1371,12 +1418,15 @@ function ApprovalSummary({
               <OutputsList outputs={xchOutputs} kind="xch" />
             </>
           )}
-          {catOutputs.length > 0 && (
-            <>
-              <div><span className="muted">CAT asset id</span><code>{String(catBlock?.assetId ?? "")}</code></div>
-              <OutputsList outputs={catOutputs} kind="cat" />
-            </>
-          )}
+          {catOutputs.length > 0 && (() => {
+            const cd = catDisplay(String(catBlock?.assetId ?? ""));
+            return (
+              <>
+                <div><span className="muted">CAT asset id</span><code>{`${cd.symbol ? cd.symbol + " · " : ""}${String(catBlock?.assetId ?? "")}`}</code></div>
+                <OutputsList outputs={catOutputs} kind="cat" assetSymbol={cd.symbol} decimals={cd.decimals} />
+              </>
+            );
+          })()}
           {xchOutputs.length === 0 && catOutputs.length === 0 && (
             <p className="muted small">No outputs specified.</p>
           )}
@@ -1563,25 +1613,28 @@ function fmtOutputAmount(
   amount: string | number,
   kind: "xch" | "cat",
   assetSymbol?: string,
+  decimals = 3,
 ): string {
-  return kind === "xch" ? fmtXch(amount) : fmtCat(amount, assetSymbol);
+  return kind === "xch" ? fmtXch(amount) : fmtCat(amount, assetSymbol, decimals);
 }
 
 function OutputsList({
   outputs,
   kind,
   assetSymbol,
+  decimals = 3,
 }: {
   outputs: Array<{ address: string; amount: string | number }>;
   kind: "xch" | "cat";
   assetSymbol?: string;
+  decimals?: number;
 }) {
   if (outputs.length === 0) return <p className="muted small">No outputs.</p>;
   return (
     <ul className="detail-list">
       {outputs.map((o, i) => (
         <li key={i}>
-          <code>{fmtOutputAmount(o.amount, kind, assetSymbol)}</code> →{" "}
+          <code>{fmtOutputAmount(o.amount, kind, assetSymbol, decimals)}</code> →{" "}
           <code title={String(o.address)}>{shortHash(String(o.address))}</code>
         </li>
       ))}
@@ -1593,10 +1646,12 @@ function SumRow({
   outputs,
   kind,
   assetSymbol,
+  decimals = 3,
 }: {
   outputs: Array<{ address: string; amount: string | number }>;
   kind: "xch" | "cat";
   assetSymbol?: string;
+  decimals?: number;
 }) {
   let total = 0n;
   try {
@@ -1607,7 +1662,7 @@ function SumRow({
   return (
     <div>
       <span className="muted">total</span>
-      <code>{fmtOutputAmount(total.toString(), kind, assetSymbol)}</code>
+      <code>{fmtOutputAmount(total.toString(), kind, assetSymbol, decimals)}</code>
     </div>
   );
 }
@@ -2392,7 +2447,7 @@ type SettingsModal =
   | "connections"
   | "sidecar"
   | "compat"
-  | "offer";
+  | "notifications";
 
 function SettingsTab({
   wallet,
@@ -2444,7 +2499,7 @@ function SettingsTab({
               {w.fingerprint === wallet.fingerprint ? "●" : "○"}
             </span>
             <span className="wallet-row-label">
-              {w.label === `Wallet ${w.fingerprint}` ? ` ${w.fingerprint}` : w.label}
+              {w.label === `Wallet ${w.fingerprint}` ? "Wallet" : w.label}
             </span>
             <span className="wallet-row-fp muted">{w.fingerprint}</span>
           </button>
@@ -2486,6 +2541,16 @@ function SettingsTab({
         />
       </ul>
 
+      <h3>Alerts</h3>
+      <ul className="settings-section-list">
+        <SettingsSectionRow
+          icon="🔔"
+          title="Notifications"
+          sub="Alert on incoming, confirmed and external sends"
+          onClick={() => setModal("notifications")}
+        />
+      </ul>
+
       <h3>Network</h3>
       <ul className="settings-section-list">
         <SettingsSectionRow
@@ -2499,16 +2564,6 @@ function SettingsTab({
           title="Site compatibility"
           sub="Let older Chia sites recognize Loroco"
           onClick={() => setModal("compat")}
-        />
-      </ul>
-
-      <h3>Tools</h3>
-      <ul className="settings-section-list">
-        <SettingsSectionRow
-          icon="🔎"
-          title="Inspect offer"
-          sub="Decode an offer1… string"
-          onClick={() => setModal("offer")}
         />
       </ul>
 
@@ -2555,9 +2610,9 @@ function SettingsTab({
           <DAppCompatSection />
         </Modal>
       )}
-      {modal === "offer" && (
-        <Modal title="Inspect offer" onClose={closeModal}>
-          <OfferInspector />
+      {modal === "notifications" && (
+        <Modal title="Notifications" onClose={closeModal}>
+          <NotificationsSection />
         </Modal>
       )}
     </div>
@@ -2732,244 +2787,10 @@ function StatusTab({ sync }: { sync: SyncState | null }) {
       <h3>Sync details</h3>
       <SyncDetailsPanel />
 
-      <h3>Mempool</h3>
-      <MempoolDebugPanel />
-
       <h3>Local peer</h3>
       <LocalPeerStatus />
     </div>
   );
-}
-
-function MempoolDebugPanel() {
-  const [snap, setSnap] = useState<MempoolDebugSnapshot | null>(null);
-  const [filter, setFilter] = useState<"all" | "mine">("all");
-  const [showRaw, setShowRaw] = useState(false);
-  const [, tick] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const s = await getMempoolDebug();
-        if (!cancelled) setSnap(s);
-      } catch {
-        // best-effort
-      }
-    };
-    void refresh();
-    const id = setInterval(refresh, 2000);
-    const rerender = setInterval(() => tick((n) => n + 1), 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-      clearInterval(rerender);
-    };
-  }, []);
-
-  if (!snap) {
-    return (
-      <div className="result">
-        <div>
-          <span className="muted">status</span>
-          <code>loading…</code>
-        </div>
-      </div>
-    );
-  }
-
-  const { stats, feed } = snap;
-  const filtered =
-    filter === "mine"
-      ? feed.filter((e) => e.mine === "incoming" || e.mine === "outgoing" || e.mine === "both")
-      : feed;
-
-  return (
-    <>
-      <div className="result">
-        <div>
-          <span className="muted">socket</span>
-          <code className={stats.socketOpen ? "" : "error"}>
-            {stats.socketState}
-          </code>
-        </div>
-        <div>
-          <span className="muted">messages</span>
-          <code>
-            {stats.messages.toLocaleString()}{" "}
-            <span className="muted small">· {stats.msgsPerSec.toFixed(1)}/s</span>
-          </code>
-        </div>
-        <div>
-          <span className="muted">last event</span>
-          <code>
-            {stats.lastEvent || "(none)"}{" "}
-            {stats.lastSeenAt > 0 && (
-              <span className="muted small">· {timeAgo(stats.lastSeenAt)}</span>
-            )}
-          </code>
-        </div>
-        <div>
-          <span className="muted">by type</span>
-          <code>
-            {Object.entries(stats.eventTypes)
-              .sort((a, b) => b[1] - a[1])
-              .map(([t, n]) => `${t}:${n}`)
-              .join(" · ") || "—"}
-          </code>
-        </div>
-        {stats.rawSamples.length > 0 && (
-          <div>
-            <span className="muted">raw samples</span>
-            <code>
-              <button
-                className="btn-small"
-                onClick={() => setShowRaw((v) => !v)}
-              >
-                {showRaw ? "hide" : `show (${stats.rawSamples.length})`}
-              </button>
-            </code>
-          </div>
-        )}
-        {showRaw && (
-          <div>
-            <pre
-              style={{
-                fontSize: 10,
-                maxHeight: 160,
-                overflow: "auto",
-                background: "var(--surface-2)",
-                padding: 6,
-                borderRadius: 6,
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-all",
-              }}
-            >
-              {stats.rawSamples.join("\n---\n")}
-            </pre>
-          </div>
-        )}
-      </div>
-
-      <div className="form-input-row" style={{ marginTop: 8 }}>
-        <button
-          className={filter === "all" ? "btn-small active" : "btn-small"}
-          onClick={() => setFilter("all")}
-        >
-          All ({feed.length})
-        </button>
-        <button
-          className={filter === "mine" ? "btn-small active" : "btn-small"}
-          onClick={() => setFilter("mine")}
-        >
-          Mine only
-        </button>
-      </div>
-
-      {filtered.length === 0 ? (
-        <p className="form-note">
-          No transactions captured yet. Tx will appear here as the WS receives
-          them (mainnet sees a few per minute on average).
-        </p>
-      ) : (
-        <ul className="mempool-feed">
-          {filtered.map((entry) => (
-            <MempoolFeedRow key={entry.tx_id} entry={entry} />
-          ))}
-        </ul>
-      )}
-    </>
-  );
-}
-
-function MempoolFeedRow({ entry }: { entry: MempoolDebugEntry }) {
-  const mineClass =
-    entry.mine === "incoming"
-      ? "mine-in"
-      : entry.mine === "outgoing"
-        ? "mine-out"
-        : entry.mine === "both"
-          ? "mine-both"
-          : entry.mine === "none"
-            ? "mine-none"
-            : "mine-unknown";
-  const mineLabel =
-    entry.mine === "incoming"
-      ? "INCOMING"
-      : entry.mine === "outgoing"
-        ? "OUTGOING"
-        : entry.mine === "both"
-          ? "SELF"
-          : entry.mine === "none"
-            ? "not mine"
-            : "no wallet";
-  return (
-    <li className={`mempool-feed-row ${mineClass}`} title={entry.tx_id}>
-      <div className="mempool-feed-head">
-        <span className={`mempool-mine-tag ${mineClass}`}>{mineLabel}</span>
-        <span className="mempool-shape muted small">{entry.shape}</span>
-        <span className="muted small">{timeAgo(entry.observed_at)}</span>
-      </div>
-      <div className="mempool-feed-body">
-        <code className="mempool-txid">
-          {entry.tx_id.slice(0, 10)}…{entry.tx_id.slice(-6)}
-        </code>
-        <span className="muted small">
-          +{entry.additions_count} / −{entry.removals_count} coins
-        </span>
-      </div>
-      <div className="mempool-feed-body">
-        <span className="muted small">added</span>{" "}
-        <code>{formatMojos(entry.total_added_mojos)}</code>
-        <span className="muted small" style={{ marginLeft: 8 }}>
-          removed
-        </span>{" "}
-        <code>{formatMojos(entry.total_removed_mojos)}</code>
-      </div>
-      {(entry.matched_in_phs.length > 0 ||
-        entry.matched_out_cat_assets.length > 0 ||
-        entry.matched_out_xch) && (
-        <div className="mempool-feed-body">
-          {entry.matched_in_phs.length > 0 && (
-            <span className="muted small">
-              in→ {entry.matched_in_phs[0]!.slice(0, 10)}…
-              {entry.matched_in_phs.length > 1
-                ? ` (+${entry.matched_in_phs.length - 1})`
-                : ""}
-            </span>
-          )}
-          {entry.matched_out_xch && (
-            <span className="muted small" style={{ marginLeft: 8 }}>
-              out: XCH
-            </span>
-          )}
-          {entry.matched_out_cat_assets.length > 0 && (
-            <span className="muted small" style={{ marginLeft: 8 }}>
-              out: CAT {entry.matched_out_cat_assets[0]!.slice(0, 8)}…
-              {entry.matched_out_cat_assets.length > 1
-                ? ` (+${entry.matched_out_cat_assets.length - 1})`
-                : ""}
-            </span>
-          )}
-        </div>
-      )}
-    </li>
-  );
-}
-
-function formatMojos(mojos: string): string {
-  try {
-    const n = BigInt(mojos);
-    if (n === 0n) return "0";
-    // Show XCH if > 1 billion mojos (i.e. > 0.001 XCH), otherwise raw mojos.
-    if (n >= 1_000_000_000n) {
-      const xch = Number(n) / 1_000_000_000_000;
-      return `${xch.toFixed(xch < 0.01 ? 6 : 4)} XCH`;
-    }
-    return `${n.toString()} mojos`;
-  } catch {
-    return mojos;
-  }
 }
 
 function LocalPeerStatus() {
@@ -3344,7 +3165,7 @@ function stageDisplay(stage: SyncStage): string {
 }
 
 function formatUsd(n: number): string {
-  if (!isFinite(n)) return "0.00";
+  if (!isFinite(n) || n === 0) return "0.00";
   if (n >= 1) return n.toFixed(2);
   if (n >= 0.01) return n.toFixed(4);
   return n.toFixed(6);
@@ -3392,7 +3213,7 @@ function HomeTab({
   // Pull XCH balance from the local coin store snapshot — it includes
   // hint-matched + hardened-derived coins that get_address_balance misses.
   const xchMojosStr = snapshot?.unspent_mojos ?? "0";
-  const xchDisplay = mojosToXch(xchMojosStr);
+  const xchDisplay = groupThousands(mojosToXch(xchMojosStr));
   const xchUnspentCount = snapshot?.unspent_count ?? balance?.unspent_coin_count ?? 0;
   const xchAmount = Number(BigInt(xchMojosStr)) / 1_000_000_000_000;
   const xchUsdValue = xchPrice ? xchAmount * xchPrice : null;
@@ -3431,20 +3252,7 @@ function HomeTab({
             const decimals = meta?.decimals ?? 3;
             return (
               <li key={c.asset_id} className="asset-row" title={c.asset_id}>
-                {meta?.image_url ? (
-                  <img
-                    src={meta.image_url}
-                    alt={name}
-                    className="asset-icon asset-icon-img"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = "none";
-                    }}
-                  />
-                ) : (
-                  <div className="asset-icon asset-icon-cat">
-                    {ticker.slice(0, 3).toUpperCase()}
-                  </div>
-                )}
+                <AssetIcon imageUrl={meta?.image_url} ticker={ticker} alt={name} />
                 <div className="asset-meta">
                   <div className="asset-name">{name}</div>
                   <div className="muted small">
@@ -3452,7 +3260,7 @@ function HomeTab({
                   </div>
                 </div>
                 <div className="asset-balance">
-                  <div>{formatCatAmount(c.total_unspent_mojos, decimals)}</div>
+                  <div>{groupThousands(formatCatAmount(c.total_unspent_mojos, decimals))}</div>
                   <div className="muted small">{ticker}</div>
                 </div>
               </li>
@@ -3469,24 +3277,6 @@ function HomeTab({
       {balanceError && <p className="error">{balanceError}</p>}
     </div>
   );
-}
-
-interface DecodedOffer {
-  offered: {
-    xch_mojos: string;
-    cats: Array<{ asset_id: string; amount: string }>;
-    nft_launcher_ids: string[];
-  };
-  requested: {
-    xch_mojos: string;
-    cats: Array<{ asset_id: string; amount: string }>;
-    nft_launcher_ids: string[];
-  };
-  coin_spends_count: number;
-  offered_royalties: Array<{
-    nft_launcher_id: string;
-    royalty_basis_points: number;
-  }>;
 }
 
 function SyncDetailsPanel() {
@@ -3809,6 +3599,126 @@ function DAppCompatSection() {
   );
 }
 
+// Mirrors getNotifDefaults() in the background — lets the modal render its
+// toggles + test button instantly instead of hanging on "Loading…" while the
+// service worker (busy mid-sync) gets around to answering get-notif-settings.
+const DEFAULT_NOTIF: NotifSettings = {
+  enabled: true,
+  incomingPending: true,
+  incomingConfirmed: true,
+  outgoingExternal: true,
+  outgoingConfirmed: true,
+};
+
+function NotificationsSection() {
+  const [settings, setSettings] = useState<NotifSettings>(DEFAULT_NOTIF);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [testState, setTestState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await getNotifSettings();
+        if (!cancelled && s) setSettings(s);
+      } catch {
+        // SW busy / unreachable — keep the defaults so the panel stays usable.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const patch = async (p: Partial<NotifSettings>) => {
+    setBusy(true);
+    try {
+      setSettings(await setNotifSettings(p));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onTest = async () => {
+    setTestState("sending");
+    setError(null);
+    try {
+      const res = await sendTestNotification();
+      if (res.ok) {
+        setTestState("sent");
+        setTimeout(() => setTestState("idle"), 4000);
+      } else {
+        setTestState("failed");
+        setError(res.error ?? "Your browser blocked the notification.");
+      }
+    } catch (err) {
+      setTestState("failed");
+      setError((err as Error).message);
+    }
+  };
+
+  const SUB: Array<{ key: keyof NotifSettings; label: string }> = [
+    { key: "incomingConfirmed", label: "Payment received" },
+    { key: "outgoingConfirmed", label: "Your transaction confirmed" },
+    { key: "outgoingExternal", label: "Funds spent from another device" },
+  ];
+
+  return (
+    <>
+      <p className="form-note">
+        Get alerted when a payment lands in your wallet, when one of your
+        transactions confirms, or when your seed is spent from another
+        wallet/device. Alerts fire as transactions confirm on-chain.
+      </p>
+      <label className="form-check">
+        <input
+          type="checkbox"
+          checked={settings.enabled}
+          disabled={busy}
+          onChange={(e) => void patch({ enabled: e.target.checked })}
+        />
+        <span>
+          <strong>Enable notifications</strong>
+        </span>
+      </label>
+      <div style={{ opacity: settings.enabled ? 1 : 0.5, marginTop: 6 }}>
+        {SUB.map((s) => (
+          <label className="form-check" key={s.key}>
+            <input
+              type="checkbox"
+              checked={settings[s.key]}
+              disabled={busy || !settings.enabled}
+              onChange={(e) => void patch({ [s.key]: e.target.checked })}
+            />
+            <span>{s.label}</span>
+          </label>
+        ))}
+      </div>
+      <button
+        className="secondary"
+        style={{ marginTop: 10 }}
+        disabled={testState === "sending"}
+        onClick={() => void onTest()}
+      >
+        {testState === "sending"
+          ? "Sending…"
+          : testState === "sent"
+            ? "Sent ✓ — check your notifications"
+            : "Send a test notification"}
+      </button>
+      <p className="muted small">
+        If the test banner doesn't appear, your OS is blocking notifications for
+        this browser — enable them in System Settings → Notifications (macOS) or
+        Windows notification settings.
+      </p>
+      {error && <p className="error">{error}</p>}
+    </>
+  );
+}
+
 function ConnectionsList() {
   const [conns, setConns] = useState<ConnectionRecord[] | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
@@ -3904,95 +3814,31 @@ function ConnectionsList() {
   );
 }
 
-function OfferInspector() {
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<DecodedOffer | null>(null);
-  const [error, setError] = useState<string | null>(null);
+// NFT thumbnail that falls back to the "NFT" placeholder when the image is
+// missing OR fails to load — previously a broken URL collapsed the card to a
+// blank square (the onError just hid the <img>).
+function NftThumb({ src, alt }: { src: string | null; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) return <div className="nft-placeholder">NFT</div>;
+  return <img src={src} alt={alt} onError={() => setFailed(true)} />;
+}
 
-  const inspect = async () => {
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const r = await callEngine<DecodedOffer>("decode_offer", { offer: text.trim() });
-      setResult(r);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <>
-      <textarea
-        rows={3}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="offer1..."
-        spellCheck={false}
+// CAT/asset avatar: the token's logo, falling back to its ticker initials when
+// there's no image OR the image fails to load (previously a broken logo hid the
+// <img> and left an empty grey circle).
+function AssetIcon({ imageUrl, ticker, alt }: { imageUrl?: string; ticker: string; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  if (imageUrl && !failed) {
+    return (
+      <img
+        src={imageUrl}
+        alt={alt}
+        className="asset-icon asset-icon-img"
+        onError={() => setFailed(true)}
       />
-      <button onClick={() => void inspect()} disabled={busy || !text.trim()}>
-        {busy ? "Decoding…" : "Decode offer"}
-      </button>
-      {error && <p className="error">{error}</p>}
-      {result && (
-        <div className="result">
-          {BigInt(result.offered.xch_mojos || "0") > 0n && (
-            <div>
-              <span className="muted">offered XCH</span>
-              <code>{mojosToXch(result.offered.xch_mojos)} XCH</code>
-            </div>
-          )}
-          {result.offered.cats.map((c) => (
-            <div key={c.asset_id}>
-              <span className="muted">offered CAT {shortHash(c.asset_id)}</span>
-              <code>{mojosToCatUnits(c.amount)} CAT</code>
-            </div>
-          ))}
-          {result.offered.nft_launcher_ids.map((l) => (
-            <div key={l}>
-              <span className="muted">offered NFT</span>
-              <code>{shortHash(l)}</code>
-            </div>
-          ))}
-          {BigInt(result.requested.xch_mojos || "0") > 0n && (
-            <div>
-              <span className="muted">requested XCH</span>
-              <code>{mojosToXch(result.requested.xch_mojos)} XCH</code>
-            </div>
-          )}
-          {result.requested.cats.map((c) => (
-            <div key={c.asset_id}>
-              <span className="muted">requested CAT {shortHash(c.asset_id)}</span>
-              <code>{mojosToCatUnits(c.amount)} CAT</code>
-            </div>
-          ))}
-          {result.requested.nft_launcher_ids.map((l) => (
-            <div key={l}>
-              <span className="muted">requested NFT</span>
-              <code>{shortHash(l)}</code>
-            </div>
-          ))}
-          {result.offered_royalties.length > 0 && (
-            <div>
-              <span className="muted">royalties</span>
-              <code>
-                {result.offered_royalties
-                  .map((r) => `${(r.royalty_basis_points / 100).toFixed(2)}%`)
-                  .join(", ")}
-              </code>
-            </div>
-          )}
-          <div>
-            <span className="muted">coin spends</span>
-            <code>{result.coin_spends_count}</code>
-          </div>
-        </div>
-      )}
-    </>
-  );
+    );
+  }
+  return <div className="asset-icon asset-icon-cat">{ticker.slice(0, 3).toUpperCase()}</div>;
 }
 
 function NftsTab({ wallet }: { wallet: StoredWallet }) {
@@ -4108,17 +3954,7 @@ function NftsTab({ wallet }: { wallet: StoredWallet }) {
                 className="nft-card"
                 onClick={() => setSelected(n)}
               >
-                {imgSrc ? (
-                  <img
-                    src={imgSrc}
-                    alt={n.launcher_id}
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = "none";
-                    }}
-                  />
-                ) : (
-                  <div className="nft-placeholder">NFT</div>
-                )}
+                <NftThumb src={imgSrc} alt={n.launcher_id} />
                 <div className="nft-caption" title={n.launcher_id}>
                   #{(n.metadata.edition_number ?? 1).toString()}
                   {n.metadata.edition_total && n.metadata.edition_total > 1 ? (
@@ -4248,11 +4084,9 @@ function NftDetail({
       <button className="ghost" onClick={onBack}>
         ← Back to NFTs
       </button>
-      {imgSrc && (
-        <div className="nft-detail-image">
-          <img src={imgSrc} alt={nft.launcher_id} />
-        </div>
-      )}
+      <div className="nft-detail-image">
+        <NftThumb src={imgSrc} alt={nft.metadata.edition_number ? `NFT #${nft.metadata.edition_number}` : "NFT"} />
+      </div>
       <ul className="status-list">
         <li>
           <span className="muted">launcher</span>
@@ -4469,6 +4303,7 @@ function ActivityTab({
             const ticker = r.asset_kind === "xch" ? "XCH" : meta?.code ?? "CAT";
             const decimals = r.asset_kind === "xch" ? 12 : meta?.decimals ?? 3;
             const amt = formatAmount(r.amount_mojos, decimals);
+            const amtCompact = formatAmountDisplay(r.amount_mojos, decimals);
             const usd =
               r.asset_kind === "xch" && xchPrice
                 ? parseFloat(amt) * xchPrice
@@ -4485,9 +4320,9 @@ function ActivityTab({
                   <div className="muted small">block #{r.height.toLocaleString()}</div>
                 </div>
                 <div className="activity-amount">
-                  <div className={isIn ? "ok" : "warn"}>
+                  <div className={isIn ? "amt-in" : "amt-out"} title={`${isIn ? "+" : "−"}${amt} ${ticker}`}>
                     {isIn ? "+" : "−"}
-                    {amt}
+                    {amtCompact}
                   </div>
                   {usd != null && (
                     <div className="muted small">≈ ${formatUsd(usd)}</div>
@@ -4520,6 +4355,41 @@ function formatAmount(mojos: string, decimals: number): string {
   } catch {
     return mojos;
   }
+}
+
+/** Insert thousands separators into the whole part of a decimal string. */
+function groupThousands(value: string): string {
+  const neg = value.startsWith("-");
+  const body = neg ? value.slice(1) : value;
+  const [whole, frac] = body.split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${neg ? "-" : ""}${frac != null ? `${grouped}.${frac}` : grouped}`;
+}
+
+/**
+ * Compact amount for tight layouts (Activity rows, the Send-success hero).
+ * Full precision blows the column out — "0.000000296124" is 14 glyphs. Keep
+ * the magnitude readable: a whole part trims to 4 decimals; a pure fraction
+ * keeps ~3 significant digits from the first non-zero, so dust still shows as
+ * "0.000000296" rather than rounding to "0.0000".
+ */
+function formatAmountCompact(mojos: string, decimals: number): string {
+  const full = formatAmount(mojos, decimals);
+  if (!full.includes(".")) return full;
+  const [whole, frac = ""] = full.split(".");
+  if (whole !== "0") {
+    const trimmed = frac.slice(0, 4).replace(/0+$/, "");
+    return trimmed ? `${whole}.${trimmed}` : whole;
+  }
+  const firstNonZero = frac.search(/[1-9]/);
+  if (firstNonZero === -1) return "0";
+  const sig = frac.slice(0, firstNonZero + 3).replace(/0+$/, "");
+  return sig ? `0.${sig}` : "0";
+}
+
+/** Display-ready amount: compact decimals + thousands separators. */
+function formatAmountDisplay(mojos: string, decimals: number): string {
+  return groupThousands(formatAmountCompact(mojos, decimals));
 }
 
 function normalizeId(id: string): string {
@@ -4567,14 +4437,20 @@ function shortHash(hex: string): string {
  * CATs use 3 decimal places by convention (1 CAT = 1000 mojos). Render
  * with up to 3 decimals + trim trailing zeros.
  */
-function mojosToCatUnits(mojos: string): string {
+// CAT amounts are carried on-chain in the asset's smallest unit. The Chia CAT
+// default is 3 decimals (1 CAT = 1000), but a token's Dexie metadata can
+// declare a different precision — and the rest of the wallet (Home/Activity/
+// Send) already honours `meta.decimals`. The approval dialog MUST use the same
+// precision, otherwise the same coin reads e.g. "1 TOKEN" on Home but
+// "1000 CAT" in the confirmation popup (the bug: amounts looked like raw mojos).
+function mojosToCatUnits(mojos: string, decimals = 3): string {
   try {
     const m = BigInt(mojos);
-    const scale = 1_000n;
+    const scale = 10n ** BigInt(decimals);
     const whole = m / scale;
     const frac = m % scale;
     if (frac === 0n) return whole.toString();
-    const fracStr = frac.toString().padStart(3, "0").replace(/0+$/, "");
+    const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
     return `${whole}.${fracStr}`;
   } catch {
     return mojos;
@@ -4624,8 +4500,50 @@ function fmtXch(mojos: string | number | bigint): string {
 }
 
 /** Human CAT amount with unit (or a custom symbol): "1 CAT", "12.5 SBX". */
-function fmtCat(mojos: string | number | bigint, symbol?: string): string {
-  return `${mojosToCatUnits(String(mojos))} ${symbol || "CAT"}`;
+function fmtCat(mojos: string | number | bigint, symbol?: string, decimals = 3): string {
+  return `${mojosToCatUnits(String(mojos), decimals)} ${symbol || "CAT"}`;
+}
+
+// Resolve a CAT asset_id to its display precision + symbol from the active
+// wallet's Dexie metadata. Falls back to the Chia default (3 decimals, generic
+// "CAT") for tokens the wallet doesn't track yet — never throws, never blocks
+// the approval. The lookup mirrors the Home/Activity tabs (0x-prefixed and
+// stripped forms both checked) so the same coin reads identically everywhere.
+export interface CatDisplay {
+  decimals: number;
+  symbol?: string;
+}
+function resolveCatDisplay(
+  assetId: string | null | undefined,
+  meta: Record<string, DexieCatMetadata>,
+): CatDisplay {
+  if (!assetId) return { decimals: 3 };
+  const m = meta[assetId] ?? meta[normalizeId(assetId)] ?? meta[`0x${normalizeId(assetId)}`];
+  return { decimals: m?.decimals ?? 3, symbol: m?.code ?? undefined };
+}
+
+// Loads the active wallet's CAT metadata for the approval dialog. Empty until
+// the snapshot resolves; an empty map just means every CAT renders with the
+// safe 3-decimal / "CAT" default (current behaviour), so the dialog is never
+// blocked waiting on metadata.
+function useApprovalCatMeta(fingerprint: number | null): Record<string, DexieCatMetadata> {
+  const [meta, setMeta] = useState<Record<string, DexieCatMetadata>>({});
+  useEffect(() => {
+    if (fingerprint == null) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snap = await getCoinSnapshot(fingerprint);
+        if (!cancelled) setMeta(snap.cat_metadata ?? {});
+      } catch {
+        /* leave empty — formatters fall back to 3 decimals / "CAT" */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fingerprint]);
+  return meta;
 }
 
 type SendAssetKind = "xch" | "cat";
@@ -4687,10 +4605,13 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
         ticker: "XCH",
         name: "Chia",
         decimals: 12,
-        available_mojos: BigInt(
-          Math.round((parseFloat(balance?.total_unspent_xch || "0") || 0) * 1_000_000_000_000),
-        ),
-        coin_count: balance?.unspent_coin_count ?? 0,
+        // Use the local coin-store snapshot — same source the Home tab uses.
+        // The old `get_address_balance` (`balance.total_unspent_xch`) only sees
+        // the primary address and MISSES coins on other derived / hardened PHs,
+        // so a wallet with XCH on a non-primary address showed "Available: 0"
+        // here and couldn't send despite Home showing the balance.
+        available_mojos: BigInt(snapshot?.unspent_mojos ?? "0"),
+        coin_count: snapshot?.unspent_count ?? balance?.unspent_coin_count ?? 0,
       }
     : (() => {
         const cat = catsWithBalance.find((c) => c.asset_id === assetKey);
@@ -4749,11 +4670,13 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
   // amountMojos uses the SELECTED asset's decimals; fee is always XCH (12).
   const amountMojos = scaleAmount(amountNum, selectedAsset.decimals);
   const feeMojos = scaleAmount(feeNum, 12);
+  // CAT fee is paid in XCH — check it against the same coin-store snapshot the
+  // XCH path uses, not the primary-address-only `balance` (which misses coins).
+  const xchAvailMojos = BigInt(snapshot?.unspent_mojos ?? "0");
   const haveEnough =
     selectedAsset.kind === "xch"
       ? selectedAsset.available_mojos >= amountMojos + feeMojos
-      : selectedAsset.available_mojos >= amountMojos &&
-        BigInt(balance?.total_unspent_mojos ?? "0") >= feeMojos;
+      : selectedAsset.available_mojos >= amountMojos && xchAvailMojos >= feeMojos;
   const canSend = addressValid && amountNum > 0 && haveEnough && !sending;
 
   const send = async () => {
@@ -5079,7 +5002,26 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
       </label>
 
       <label className="field">
-        <span>Amount ({selectedAsset.ticker})</span>
+        <span className="field-label-row">
+          Amount ({selectedAsset.ticker})
+          {selectedAsset.available_mojos > 0n && (
+            <button
+              type="button"
+              className="field-max"
+              onClick={() => {
+                // XCH must leave room for the fee; CATs pay the fee in XCH so
+                // the whole CAT balance is spendable.
+                const max =
+                  selectedAsset.kind === "xch"
+                    ? selectedAsset.available_mojos - feeMojos
+                    : selectedAsset.available_mojos;
+                setAmount(formatAmount((max > 0n ? max : 0n).toString(), selectedAsset.decimals));
+              }}
+            >
+              Max
+            </button>
+          )}
+        </span>
         <input
           type="number"
           step="0.0001"
@@ -5122,6 +5064,21 @@ function scaleAmount(n: number, decimals: number): bigint {
   const [whole = "0", frac = ""] = s.split(".");
   const fracPadded = (frac + "0".repeat(decimals)).slice(0, decimals);
   return BigInt(whole) * BigInt(10) ** BigInt(decimals) + BigInt(fracPadded || "0");
+}
+
+// XCH decimal string → mojos string, BigInt-safe (no float round-trip). Used
+// by the approval fee-override so the canonical fee stays exact. Malformed
+// input collapses to "0" rather than throwing — the worst case is a 0 fee,
+// never a wrong large one.
+function xchToMojosStr(xch: string): string {
+  const t = (xch ?? "").trim();
+  if (t === "" || t === ".") return "0";
+  const neg = t.startsWith("-");
+  const [whole = "0", frac = ""] = t.replace(/^-/, "").split(".");
+  if (!/^\d*$/.test(whole) || !/^\d*$/.test(frac)) return "0";
+  const fracPadded = (frac + "000000000000").slice(0, 12);
+  const mojos = BigInt(whole || "0") * 1_000_000_000_000n + BigInt(fracPadded || "0");
+  return (neg ? -mojos : mojos).toString();
 }
 
 interface DerivedAddress {

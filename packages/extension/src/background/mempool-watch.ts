@@ -42,6 +42,14 @@ import { callEngine } from "./engine.js";
 
 const WS_URL = "wss://api.coinset.org/ws";
 
+// NOTE: coinset's public WS only ever emits `peak` — it never pushes
+// per-transaction events. We deliberately do NOT poll the full mempool
+// (get_all_mempool_tx_ids + per-item fetches every few seconds) — that
+// saturates coinset and competes with the coin-sync scans. Instead, all
+// user-facing notifications are CONFIRMATION-based and fire from the
+// peak-triggered coin-sync (see coin-sync.ts): a received coin, our own send
+// confirming, or a coin spent by another device. No extra network load.
+
 interface RawCoin {
   parent_coin_info: string;
   puzzle_hash: string;
@@ -189,22 +197,8 @@ async function processTransaction(data: TransactionEventData): Promise<void> {
   const store = await readCoinStore(fp);
   const prev = store.mempool ?? { incoming: [], outgoing: [], last_polled_at: 0 };
 
-  // Walk additions → incoming.
-  const newIncoming: MempoolIncoming[] = [];
-  for (const add of additions) {
-    const ph = strip0x(add.puzzle_hash);
-    if (!ownedPhs.has(ph)) continue;
-    newIncoming.push({
-      tx_id: txId,
-      parent_coin_info: with0x(add.parent_coin_info),
-      puzzle_hash: with0x(add.puzzle_hash),
-      amount: String(add.amount),
-      asset_id: null,
-      seen_at: Date.now(),
-    });
-  }
-
-  // Walk removals → outgoing.
+  // Walk removals → outgoing FIRST so we can tell a genuine receive from our
+  // own change (a tx that spends our coins AND pays an output back to us).
   const xchSpent: string[] = [];
   const catSpent: Record<string, string[]> = {};
   for (const rem of removals) {
@@ -224,7 +218,30 @@ async function processTransaction(data: TransactionEventData): Promise<void> {
     }
   }
   const haveOutgoing = xchSpent.length > 0 || Object.keys(catSpent).length > 0;
+
+  // Walk additions → incoming. A receive is "genuine" only when the tx didn't
+  // also spend our coins (otherwise the addition is just change).
+  const newIncoming: MempoolIncoming[] = [];
+  for (const add of additions) {
+    const ph = strip0x(add.puzzle_hash);
+    if (!ownedPhs.has(ph)) continue;
+    newIncoming.push({
+      tx_id: txId,
+      parent_coin_info: with0x(add.parent_coin_info),
+      puzzle_hash: with0x(add.puzzle_hash),
+      amount: String(add.amount),
+      asset_id: null,
+      seen_at: Date.now(),
+      genuine: !haveOutgoing,
+    });
+  }
+
   if (newIncoming.length === 0 && !haveOutgoing) return;
+
+  // NOTE: notifications are NOT fired here. This path only runs if coinset ever
+  // starts pushing WS `transaction` events (it doesn't today) and we no longer
+  // poll the mempool. All user-facing alerts are confirmation-based and live in
+  // coin-sync.ts so they cost no extra network traffic.
 
   // Merge: replace existing entries with same identity, append new ones,
   // expire stale (>TTL old).
