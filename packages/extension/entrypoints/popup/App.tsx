@@ -17,6 +17,7 @@ import {
   pickCoinsForSendMulti,
   probeSidecar,
   revokeConnection,
+  sendTestNotification,
   setActiveWallet,
   setCompatSettings,
   setNotifSettings,
@@ -3598,19 +3599,36 @@ function DAppCompatSection() {
   );
 }
 
+// Mirrors getNotifDefaults() in the background — lets the modal render its
+// toggles + test button instantly instead of hanging on "Loading…" while the
+// service worker (busy mid-sync) gets around to answering get-notif-settings.
+const DEFAULT_NOTIF: NotifSettings = {
+  enabled: true,
+  incomingPending: true,
+  incomingConfirmed: true,
+  outgoingExternal: true,
+  outgoingConfirmed: true,
+};
+
 function NotificationsSection() {
-  const [settings, setSettings] = useState<NotifSettings | null>(null);
+  const [settings, setSettings] = useState<NotifSettings>(DEFAULT_NOTIF);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [testState, setTestState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
       try {
-        setSettings(await getNotifSettings());
-      } catch (err) {
-        setError((err as Error).message);
+        const s = await getNotifSettings();
+        if (!cancelled && s) setSettings(s);
+      } catch {
+        // SW busy / unreachable — keep the defaults so the panel stays usable.
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const patch = async (p: Partial<NotifSettings>) => {
@@ -3624,7 +3642,23 @@ function NotificationsSection() {
     }
   };
 
-  if (!settings) return <p className="muted small">Loading…</p>;
+  const onTest = async () => {
+    setTestState("sending");
+    setError(null);
+    try {
+      const res = await sendTestNotification();
+      if (res.ok) {
+        setTestState("sent");
+        setTimeout(() => setTestState("idle"), 4000);
+      } else {
+        setTestState("failed");
+        setError(res.error ?? "Your browser blocked the notification.");
+      }
+    } catch (err) {
+      setTestState("failed");
+      setError((err as Error).message);
+    }
+  };
 
   const SUB: Array<{ key: keyof NotifSettings; label: string }> = [
     { key: "incomingConfirmed", label: "Payment received" },
@@ -3663,9 +3697,22 @@ function NotificationsSection() {
           </label>
         ))}
       </div>
+      <button
+        className="secondary"
+        style={{ marginTop: 10 }}
+        disabled={testState === "sending"}
+        onClick={() => void onTest()}
+      >
+        {testState === "sending"
+          ? "Sending…"
+          : testState === "sent"
+            ? "Sent ✓ — check your notifications"
+            : "Send a test notification"}
+      </button>
       <p className="muted small">
-        Your browser may also ask for permission to show notifications the first
-        time one fires.
+        If the test banner doesn't appear, your OS is blocking notifications for
+        this browser — enable them in System Settings → Notifications (macOS) or
+        Windows notification settings.
       </p>
       {error && <p className="error">{error}</p>}
     </>

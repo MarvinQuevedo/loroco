@@ -389,6 +389,14 @@ export async function setNotifSettings(
   return res.value as NotifSettings;
 }
 
+/** Fire a one-off test notification so the user can confirm OS delivery. */
+export async function sendTestNotification(): Promise<{ ok: boolean; error?: string }> {
+  const msg: PopupRpcMessage = { from: "popup", kind: "test-notification" };
+  const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
+  if (!res.ok) throw new Error(res.error.message);
+  return res.value as { ok: boolean; error?: string };
+}
+
 /**
  * Decoded view of a signCoinSpends / sendTransaction bundle: per-coin
  * kind + outputs, plus a wallet-wide summary so the approval popup can

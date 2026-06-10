@@ -121,6 +121,43 @@ export async function notify(opts: NotifyOpts): Promise<void> {
 }
 
 /**
+ * Fire a one-off TEST notification — bypasses the settings gate and the dedup
+ * set so the user can verify, from Settings, that notifications actually surface
+ * on their OS (if it doesn't show, macOS/Windows hasn't granted the browser
+ * notification permission). Returns the result so the popup can surface an error
+ * instead of failing silently.
+ */
+export async function showTestNotification(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const granted = await new Promise<string>((resolve) => {
+      // Unique id each call so repeated clicks always show a fresh banner.
+      const id = `loroco:test:${Date.now()}`;
+      chrome.notifications.create(
+        id,
+        {
+          type: "basic",
+          iconUrl: chrome.runtime.getURL("icon/128.png"),
+          title: "Loroco notifications are on ✓",
+          message: "This is what a wallet alert looks like. You'll get these when funds move.",
+          priority: 2,
+        },
+        (createdId) => {
+          const err = chrome.runtime.lastError;
+          if (err) resolve(`__err__${err.message}`);
+          else resolve(createdId);
+        },
+      );
+    });
+    if (granted.startsWith("__err__")) {
+      return { ok: false, error: granted.slice(7) };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+/**
  * Register the notification click handler ONCE. Clicking a Loroco notification
  * opens the wallet popup (best-effort — openPopup needs a focused window, so we
  * fall back to a popup tab) and clears the notification.

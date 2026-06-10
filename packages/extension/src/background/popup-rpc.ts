@@ -41,6 +41,7 @@ import {
   writeNotifSettings,
   type NotifSettings,
 } from "./notif-settings.js";
+import { showTestNotification } from "./notifications.js";
 
 export type PopupRpcMessage =
   | { from: "popup"; kind: "engine"; method: string; params: unknown }
@@ -69,6 +70,7 @@ export type PopupRpcMessage =
   | { from: "popup"; kind: "set-compat-settings"; patch: Partial<CompatSettings> }
   | { from: "popup"; kind: "get-notif-settings" }
   | { from: "popup"; kind: "set-notif-settings"; patch: Partial<NotifSettings> }
+  | { from: "popup"; kind: "test-notification" }
   | { from: "popup"; kind: "debug-broadcast"; event: "chainChanged" | "accountChanged"; payload: unknown }
   | {
       from: "popup";
@@ -271,6 +273,10 @@ export async function handlePopupMessage(
       case "set-notif-settings": {
         const next = await writeNotifSettings(msg.patch);
         return { ok: true, value: next };
+      }
+      case "test-notification": {
+        const res = await showTestNotification();
+        return { ok: true, value: res };
       }
       case "analyze-coin-spends": {
         // Decode the bundle into a human-readable summary so the approval
