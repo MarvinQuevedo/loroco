@@ -409,10 +409,17 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
     const pendingCatPre: Record<string, RawCatCandidate> = {
       ...(store.pending_cat_candidates ?? {}),
     };
+    // Newly-arrived, unspent, confirmed XCH coins — candidates for a "received"
+    // notification (filtered against same-tick spends below so our own change
+    // doesn't masquerade as an incoming payment).
+    const receivedThisTick: CoinRecord[] = [];
     for (const rec of scan.coin_records) {
       const isXch = receivePhSet.has(normPh(rec.puzzle_hash));
       if (isXch) {
-        if (!(rec.coin_id in store.coins)) newCoins += 1;
+        if (!(rec.coin_id in store.coins)) {
+          newCoins += 1;
+          if (!rec.spent && rec.confirmed_block_index > 0) receivedThisTick.push(rec);
+        }
         store.coins[rec.coin_id] = rec;
       } else if (useSidecar && !rec.spent) {
         // Hint-matched, unspent — feed to BOTH parse queues. Each parser
@@ -461,28 +468,6 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       console.log(
         `[coin-sync] sidecar discovered ${sidecarCandidates} hint candidates — skipping Phase 1`,
       );
-    }
-
-    // Notify when a genuine pending receive (flagged by mempool-watch) has now
-    // landed in a block. Match the mempool addition to its confirmed coin by
-    // outpoint; dedup is by tx_id inside notify().
-    for (const inc of store.mempool?.incoming ?? []) {
-      if (!inc.genuine) continue;
-      const confirmed = Object.values(store.coins).find(
-        (c) =>
-          c.parent_coin_info === inc.parent_coin_info &&
-          c.puzzle_hash === inc.puzzle_hash &&
-          c.amount === inc.amount &&
-          c.confirmed_block_index > 0,
-      );
-      if (confirmed) {
-        void notify({
-          kind: "incoming-confirmed",
-          dedupId: inc.tx_id,
-          title: "Payment received",
-          message: `${fmtXchMojos(inc.amount)} confirmed in block #${confirmed.confirmed_block_index.toLocaleString()}.`,
-        });
-      }
     }
 
     // Persist after step 4 so the UI sees XCH/Activity even if the CAT/NFT
@@ -572,11 +557,15 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
     const catById = new Map(catCandidates.map((e) => [e.coin.coin_id, e]));
     const allIds = [...xchById.keys(), ...catById.keys()];
 
-    // Coins that flipped to confirmed-spent THIS tick — cross-referenced
-    // against store.mempool.outgoing afterwards to fire "transaction
-    // confirmed" notifications (covers both our own broadcasts and external
-    // sends the watcher saw).
-    const confirmedSpentIds = new Set<string>();
+    // Coins that flipped to confirmed-spent THIS tick, split by whether WE
+    // broadcast them (the optimistic `pending` flag) or another device did.
+    // Drives the "your transaction confirmed" vs "sent from another device"
+    // notifications — and tells us a receive this tick is really change.
+    let sentMojos = 0n; // our own broadcasts that just confirmed
+    let externalMojos = 0n; // spent by another device/app on this seed
+    let sentBlock = 0;
+    let externalBlock = 0;
+    let anySpentThisTick = false;
 
     for (let i = 0; i < allIds.length; i += 250) {
       if (Date.now() > deadline) break;
@@ -596,9 +585,22 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
         const spentSet = new Set<string>();
         for (const s of res.spent) {
           spentSet.add(s.coin_id);
-          confirmedSpentIds.add(s.coin_id);
           const xch = xchById.get(s.coin_id);
           if (xch) {
+            // Two confirm paths:
+            //   • `pending` → WE broadcast it (markXchSpentOptimistic already
+            //     set spent=true); confirming it now = "your tx confirmed".
+            //   • still unspent → another device on this seed spent it.
+            // Anything already spent & not pending was handled on a prior tick.
+            if (xch.pending) {
+              anySpentThisTick = true;
+              sentMojos += BigInt(xch.amount);
+              sentBlock = Math.max(sentBlock, s.spent_block_index);
+            } else if (!xch.spent) {
+              anySpentThisTick = true;
+              externalMojos += BigInt(xch.amount);
+              externalBlock = Math.max(externalBlock, s.spent_block_index);
+            }
             xch.spent = true;
             xch.spent_block_index = s.spent_block_index;
             delete xch.pending;
@@ -606,6 +608,15 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
           }
           const cat = catById.get(s.coin_id);
           if (cat) {
+            if (cat.coin.pending) {
+              anySpentThisTick = true;
+              sentMojos += 1n;
+              sentBlock = Math.max(sentBlock, s.spent_block_index);
+            } else if (!cat.coin.spent) {
+              anySpentThisTick = true;
+              externalMojos += 1n;
+              externalBlock = Math.max(externalBlock, s.spent_block_index);
+            }
             cat.coin.spent = true;
             cat.coin.spent_block_index = s.spent_block_index;
             delete cat.coin.pending;
@@ -675,23 +686,44 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       }
     }
 
-    // A mempool.outgoing tx whose coins just confirmed-spent → notify. Covers
-    // our own broadcasts ("your transaction confirmed") AND external sends the
-    // watcher matched. Dedup by tx_id inside notify() so re-running ticks over
-    // the same (still-TTL'd) mempool entry don't re-fire.
-    for (const out of store.mempool?.outgoing ?? []) {
-      const coinIds = [
-        ...out.spent_xch_coin_ids,
-        ...Object.values(out.spent_cat_coin_ids).flat(),
-      ];
-      if (coinIds.some((id) => confirmedSpentIds.has(id))) {
-        void notify({
-          kind: "outgoing-confirmed",
-          dedupId: out.tx_id,
-          title: "Transaction confirmed",
-          message: "A transaction from your wallet was confirmed on-chain.",
-        });
+    // ── Confirmation-based notifications (no mempool polling) ─────────────
+    // All three ride on this peak-triggered reconciliation, so they cost zero
+    // extra network traffic. Dedup keys include the block height so distinct
+    // events never collide and a re-run of the same tick can't re-fire.
+    //
+    // A coin that WE marked pending and that just confirmed spent → our send
+    // landed. (A non-pending coin that confirmed spent is an external send.)
+    if (sentMojos > 0n) {
+      void notify({
+        kind: "outgoing-confirmed",
+        dedupId: `sent-${sentBlock}`,
+        title: "Transaction confirmed",
+        message: `Your transaction confirmed in block #${sentBlock.toLocaleString()}.`,
+      });
+    }
+    if (externalMojos > 0n) {
+      void notify({
+        kind: "outgoing-external",
+        dedupId: `ext-${externalBlock}`,
+        title: "Sent from another device",
+        message: `Coins from your wallet were spent by another app or device (block #${externalBlock.toLocaleString()}).`,
+      });
+    }
+    // A new incoming coin with NO same-tick spend is a genuine receive (when we
+    // spent something too, the new coins are our own change → stay quiet).
+    if (!anySpentThisTick && receivedThisTick.length > 0) {
+      let recvMojos = 0n;
+      let recvBlock = 0;
+      for (const r of receivedThisTick) {
+        recvMojos += BigInt(r.amount);
+        recvBlock = Math.max(recvBlock, r.confirmed_block_index);
       }
+      void notify({
+        kind: "incoming-confirmed",
+        dedupId: `recv-${recvBlock}-${recvMojos}`,
+        title: "Payment received",
+        message: `${fmtXchMojos(recvMojos)} arrived in block #${recvBlock.toLocaleString()}.`,
+      });
     }
 
     // After reconciliation, rebuild each CAT bucket's totals — optimistic

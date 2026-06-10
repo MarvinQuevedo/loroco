@@ -276,7 +276,7 @@ try {
 
   // ── REST-poll monitor loop ───────────────────────────────────────────────
   const seenTx = new Set();
-  let lastStatus = 0, mempoolSeen = false;
+  let lastStatus = 0, mempoolSeen = false, extOutSeen = false, extFeedSeen = false;
   const deadline = Date.now() + (SEND ? 360_000 : DURATION_MS);
 
   while (!stop && Date.now() < deadline) {
@@ -292,6 +292,23 @@ try {
 
     // Track our own send: in-mempool → then gone (likely included).
     if (trackTxId) {
+      // Prove the EXTENSION's own mempool-watch poll (not just this CLI) caught
+      // it — store.mempool.outgoing + the debug feed should populate.
+      const ext = await sw.evaluate(async ({ fp, txId }) => {
+        const store = (await chrome.storage.local.get(`coins.${fp}`))[`coins.${fp}`];
+        const feed = (await chrome.storage.local.get("mempoolDebugFeed")).mempoolDebugFeed ?? [];
+        const norm = (s) => (s?.startsWith("0x") ? s : `0x${s}`);
+        const out = (store?.mempool?.outgoing ?? []).some((o) => norm(o.tx_id) === norm(txId));
+        const inFeed = feed.some((e) => norm(e.tx_id) === norm(txId));
+        return { out, inFeed };
+      }, { fp: ctxInfo.fp, txId: trackTxId });
+      if (ext.out && !extOutSeen) {
+        extOutSeen = true;
+        log(c.cyan(c.bold(`  ★ EXTENSION mempool-watch caught it (store.mempool.outgoing populated)`)));
+      } else if (ext.inFeed && !extFeedSeen) {
+        extFeedSeen = true;
+        log(c.cyan(`  ★ EXTENSION debug feed recorded the tx`));
+      }
       const present = ids.includes(trackTxId) || ids.includes(`0x${strip(trackTxId)}`);
       if (present && !mempoolSeen) {
         mempoolSeen = true;
