@@ -1,5 +1,12 @@
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { defineConfig } from "wxt";
 import pkg from "./package.json" with { type: "json" };
+
+// Absolute path to the engine WASM emitted by `pnpm wasm:build`.
+const ENGINE_WASM = fileURLToPath(
+  new URL("../wallet-wasm/sage_wasm_bg.wasm", import.meta.url),
+);
 
 // Per-browser manifest fragments. Anything inside `firefoxOnly` ends up only
 // in firefox builds; chrome-mv3 stays untouched. WXT calls the `manifest`
@@ -27,6 +34,25 @@ export default defineConfig({
   outDir: ".output",
   // Silence WXT's AMO-data-collection warning (we declare `none` above).
   suppressWarnings: { firefoxDataCollection: true },
+  // Ship the engine WASM at the extension ROOT. The service worker loads it
+  // via `new URL("sage_wasm_bg.wasm", self.location.href)`; WXT rewrites
+  // wasm-pack's `import.meta.url` → `self.location.href`, which defeats Vite's
+  // automatic asset emission — so without this the .wasm is never copied and
+  // the SW's init() fetch 404s ("Failed to fetch" on every wallet action).
+  // Registering it as a public file makes WXT copy it on build AND zip.
+  hooks: {
+    "build:publicAssets": (_wxt, files) => {
+      if (!existsSync(ENGINE_WASM)) {
+        throw new Error(
+          `[loroco] engine WASM not found at ${ENGINE_WASM} — run \`pnpm wasm:build\` first.`,
+        );
+      }
+      // Guard against double-registration if Vite ever starts emitting it.
+      if (!files.some((f) => f.relativeDest === "sage_wasm_bg.wasm")) {
+        files.push({ absoluteSrc: ENGINE_WASM, relativeDest: "sage_wasm_bg.wasm" });
+      }
+    },
+  },
   manifest: ({ browser }) => ({
     name: "Loroco",
     description:
