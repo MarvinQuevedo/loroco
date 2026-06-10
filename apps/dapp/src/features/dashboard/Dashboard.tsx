@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { PageHead } from "../../components/layout/AppShell";
-import { Button, Card, CopyText, Spinner, Stat } from "../../components/ui";
+import { Button, Card, CopyText, Qr, Spinner, Stat } from "../../components/ui";
 import { useProvider } from "../../provider/useProvider";
 import { describeError } from "../../provider/client";
 import { mojosToXch } from "../../lib/mojos";
-import { fmtNumber } from "../../lib/format";
+import { explorerUrl, fmtNumber } from "../../lib/format";
 import { normalizeNftsResult } from "../../lib/nft";
 
 interface DashData {
@@ -62,6 +62,18 @@ export default function Dashboard() {
 
   const count = (n: number | null) => (n == null ? "—" : fmtNumber(n));
 
+  // A connected wallet with zero balance AND zero coins is almost always still
+  // syncing — not empty. Surface that instead of letting the user read "0"
+  // everywhere and assume the wallet is broken.
+  const looksUnsynced =
+    !!data &&
+    data.spendableCoins === 0 &&
+    (data.xchConfirmed === "0" || data.xchConfirmed === "—") &&
+    (data.nfts ?? 0) === 0 &&
+    (data.cats ?? 0) === 0;
+
+  const addrUrl = account ? explorerUrl("address", account, chainId) : null;
+
   return (
     <>
       <PageHead title="Dashboard" blurb="Live balance, network and at-a-glance counts." />
@@ -74,6 +86,19 @@ export default function Dashboard() {
       </div>
 
       {error && <div className="note danger">{error}</div>}
+
+      {looksUnsynced && (
+        <div className="note info">
+          <span className="sync-banner">
+            <span className="spinner" />
+            <span>
+              Balances read <strong>0</strong> across the board — the wallet is likely still
+              syncing coins. This can take a few minutes after unlock; hit Refresh once it catches
+              up.
+            </span>
+          </span>
+        </div>
+      )}
 
       {loading && !data ? (
         <Card>
@@ -95,7 +120,23 @@ export default function Dashboard() {
 
           <Card title="Receive address">
             {account ? (
-              <CopyText text={account} />
+              <div className="receive-row">
+                <Qr data={account} />
+                <div className="receive-meta">
+                  <CopyText text={account} />
+                  <span style={{ fontSize: 13, color: "var(--muted)" }}>
+                    Scan to receive XCH, CATs or NFTs at this wallet.
+                    {addrUrl && (
+                      <>
+                        {" · "}
+                        <a href={addrUrl} target="_blank" rel="noopener noreferrer">
+                          View on Spacescan ↗
+                        </a>
+                      </>
+                    )}
+                  </span>
+                </div>
+              </div>
             ) : (
               <span style={{ color: "var(--muted)" }}>No address (read-only or not exposed).</span>
             )}

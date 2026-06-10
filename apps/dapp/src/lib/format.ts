@@ -12,6 +12,34 @@ export function shortenHex(hex: string | null | undefined, head = 10, tail = 8):
   return shortenAddress(hex, head, tail);
 }
 
+// Block-explorer deep links (Spacescan). Returns the URL for the given entity,
+// adding the testnet11 network hint when needed. Used to make ids in tables
+// clickable — a real wallet-console expectation.
+export type ExplorerKind = "coin" | "tx" | "address" | "nft" | "offer";
+
+export function explorerUrl(
+  kind: ExplorerKind,
+  value: string,
+  chainId: string | null | undefined,
+): string | null {
+  if (!value) return null;
+  const base = "https://www.spacescan.io";
+  const q = chainId === "testnet11" ? "?network=testnet11" : "";
+  switch (kind) {
+    case "coin":
+    case "tx": // a confirmed tx id is the coin id in our TransactionView
+      return `${base}/coin/${value}${q}`;
+    case "address":
+      return `${base}/address/${value}${q}`;
+    case "nft":
+      return `${base}/nft/${value}${q}`;
+    case "offer":
+      return `${base}/offer/${value}${q}`;
+    default:
+      return null;
+  }
+}
+
 export function fmtNumber(n: number | bigint | string): string {
   try {
     const v = typeof n === "string" ? Number(n) : n;

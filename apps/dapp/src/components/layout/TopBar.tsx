@@ -7,7 +7,7 @@ import { shortenAddress } from "../../lib/format";
 import { CopyText } from "../ui";
 
 export function TopBar() {
-  const { account, chainId, scope } = useProvider();
+  const { account, chainId, scope, connected, forgetLocal } = useProvider();
   const { pending } = usePendingTx();
   const [theme, setTheme] = useState(getTheme());
   useEffect(() => onThemeChange(setTheme), []);
@@ -39,6 +39,17 @@ export function TopBar() {
       )}
       <span className="spacer" />
       {account && <CopyText text={account} display={shortenAddress(account)} />}
+      {connected && (
+        <button
+          type="button"
+          className="btn ghost sm"
+          title="Drop this connection locally. The wallet still remembers the grant — revoke fully from Settings → Connected sites."
+          data-testid="disconnect"
+          onClick={forgetLocal}
+        >
+          Disconnect
+        </button>
+      )}
       <button
         type="button"
         className="icon-btn"

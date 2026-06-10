@@ -5,9 +5,9 @@ import {
   ApprovalWait,
   Button,
   Card,
-  CopyText,
   EmptyState,
   Field,
+  IdLink,
   JsonView,
   Select,
   Spinner,
@@ -34,7 +34,7 @@ export default function Nfts() {
 }
 
 function NftGridCard() {
-  const { call, connected } = useProvider();
+  const { call, connected, chainId } = useProvider();
   const [nfts, setNfts] = useState<NormalizedNft[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +76,7 @@ function NftGridCard() {
       ) : (
         <div className="nft-grid" data-testid="nft-grid">
           {nfts.map((n) => (
-            <NftCard key={n.launcherId} nft={n} />
+            <NftCard key={n.launcherId} nft={n} chainId={chainId} />
           ))}
         </div>
       )}
@@ -84,7 +84,7 @@ function NftGridCard() {
   );
 }
 
-function NftCard({ nft }: { nft: NormalizedNft }) {
+function NftCard({ nft, chainId }: { nft: NormalizedNft; chainId: string | null }) {
   const [imgFailed, setImgFailed] = useState(false);
   return (
     <div className="nft-card">
@@ -96,7 +96,7 @@ function NftCard({ nft }: { nft: NormalizedNft }) {
         </div>
       )}
       <div className="nft-body">
-        <strong>{nft.name ?? shortenHex(nft.launcherId)}</strong>
+        <strong>{nft.name ?? "Untitled NFT"}</strong>
         {nft.editionNumber != null && nft.editionTotal != null && (
           <span style={{ color: "var(--muted)" }}>
             Edition {nft.editionNumber}/{nft.editionTotal}
@@ -107,7 +107,7 @@ function NftCard({ nft }: { nft: NormalizedNft }) {
             Royalty {(nft.royaltyTenThousandths / 100).toFixed(2)}%
           </span>
         )}
-        <CopyText text={nft.launcherId} display={shortenHex(nft.launcherId)} />
+        <IdLink value={nft.launcherId} kind="nft" chainId={chainId} />
       </div>
     </div>
   );

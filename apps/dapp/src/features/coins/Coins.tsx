@@ -4,9 +4,9 @@ import { PageHead } from "../../components/layout/AppShell";
 import {
   Button,
   Card,
-  CopyText,
   EmptyState,
   Field,
+  IdLink,
   JsonView,
   Select,
   Spinner,
@@ -16,7 +16,7 @@ import {
 } from "../../components/ui";
 import { useProvider } from "../../provider/useProvider";
 import { mojosToCat, mojosToXch } from "../../lib/mojos";
-import { fmtNumber, shortenHex } from "../../lib/format";
+import { fmtNumber } from "../../lib/format";
 import { isHex32 } from "../../lib/hex";
 
 export default function Coins() {
@@ -37,7 +37,7 @@ function fmtAmount(c: CoinView): string {
 }
 
 function ExplorerCard() {
-  const { call, connected } = useProvider();
+  const { call, connected, chainId } = useProvider();
   const [type, setType] = useState<"" | "cat" | "nft">("");
   const [includeSpent, setIncludeSpent] = useState(false);
   const [coins, setCoins] = useState<CoinView[] | null>(null);
@@ -175,11 +175,11 @@ function ExplorerCard() {
                 {coins.slice(0, 100).map((c) => (
                   <tr key={c.coinId}>
                     <td>
-                      <CopyText text={c.coinId} display={shortenHex(c.coinId)} />
+                      <IdLink value={c.coinId} kind="coin" chainId={chainId} />
                     </td>
                     <td>
                       {c.assetId ? (
-                        <CopyText text={c.assetId} display={shortenHex(c.assetId)} />
+                        <IdLink value={c.assetId} kind="coin" chainId={chainId} />
                       ) : (
                         "XCH"
                       )}

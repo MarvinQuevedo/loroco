@@ -23,6 +23,9 @@ importers:
 
   apps/dapp:
     dependencies:
+      qrcode-generator:
+        specifier: ^2.0.4
+        version: 2.0.4
       react:
         specifier: ^19.0.0
         version: 19.2.6

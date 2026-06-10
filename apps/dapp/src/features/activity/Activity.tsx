@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import type { TransactionView } from "@ozone/goby-provider/types";
 import { PageHead } from "../../components/layout/AppShell";
-import { Button, Card, CopyText, EmptyState, Spinner } from "../../components/ui";
+import { Button, Card, EmptyState, IdLink, Spinner } from "../../components/ui";
 import { useProvider } from "../../provider/useProvider";
 import { usePendingTx } from "../../provider/PendingTxContext";
 import { mojosToCat, mojosToXch } from "../../lib/mojos";
-import { shortenHex, timeAgo } from "../../lib/format";
+import { timeAgo } from "../../lib/format";
+
+const ROW_CAP = 100;
 
 const AUTO_REFRESH_MS = 15_000;
 
@@ -13,7 +15,7 @@ const AUTO_REFRESH_MS = 15_000;
 // confirmations; this view re-reads whenever the pending set changes so the
 // table flips pending → confirmed without a manual refresh.
 export default function Activity() {
-  const { call, connected } = useProvider();
+  const { call, connected, chainId } = useProvider();
   const { pending } = usePendingTx();
   const [txs, setTxs] = useState<TransactionView[] | null>(null);
   const [pendingOnly, setPendingOnly] = useState(false);
@@ -90,15 +92,15 @@ export default function Activity() {
                 </tr>
               </thead>
               <tbody>
-                {txs.map((t) => (
+                {txs.slice(0, ROW_CAP).map((t) => (
                   <tr key={`${t.id}-${t.direction}`}>
                     <td title={t.direction}>{t.direction === "incoming" ? "↓" : "↑"}</td>
                     <td>
-                      <CopyText text={t.id} display={shortenHex(t.id)} />
+                      <IdLink value={t.id} kind="tx" chainId={chainId} />
                     </td>
                     <td>
                       {t.asset.type === "cat" && t.asset.assetId ? (
-                        <CopyText text={t.asset.assetId} display={shortenHex(t.asset.assetId)} />
+                        <IdLink value={t.asset.assetId} kind="coin" chainId={chainId} />
                       ) : (
                         "XCH"
                       )}
@@ -123,6 +125,11 @@ export default function Activity() {
                 ))}
               </tbody>
             </table>
+            {txs.length > ROW_CAP && (
+              <div className="note info" style={{ marginBottom: 0 }}>
+                Showing the {ROW_CAP} most recent of {txs.length} transactions.
+              </div>
+            )}
           </div>
         )}
       </Card>

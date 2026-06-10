@@ -676,6 +676,12 @@ h3 {
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
 }
+.tbl tbody tr {
+  transition: background 0.1s ease;
+}
+.tbl tbody tr:hover {
+  background: var(--paper-2);
+}
 .tbl tr:last-child td {
   border-bottom: none;
 }
@@ -768,6 +774,91 @@ h3 {
 .row-remove {
   flex: none;
   margin-top: 1px;
+}
+
+/* ── Id + explorer link ─────────────────────────────────────────────────── */
+.id-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ext-link {
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: none;
+  line-height: 1;
+}
+.ext-link:hover {
+  color: var(--orange);
+  text-decoration: none;
+}
+
+/* ── QR (receive address) ───────────────────────────────────────────────── */
+.qr {
+  display: inline-block;
+  color: var(--ink);
+  background: #fff;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  line-height: 0;
+}
+.receive-row {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.receive-row .receive-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* ── Inline "max" affordance + input warnings ───────────────────────────── */
+.input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.input-wrap .input {
+  padding-right: 56px;
+}
+.input-inline-btn {
+  position: absolute;
+  right: 6px;
+  border: 1px solid var(--line);
+  background: var(--paper-2);
+  color: var(--orange);
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.input-inline-btn:hover {
+  background: var(--active-bg);
+}
+.field-warn {
+  color: var(--orange);
+  font-size: 12px;
+}
+
+/* ── Sync banner (read pages while coins still streaming in) ─────────────── */
+.sync-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.sync-banner .spinner {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
 }
 
 /* ── Responsive: collapse sidebar to top on narrow screens ──────────────── */

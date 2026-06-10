@@ -10,3 +10,5 @@ export { ApprovalWait } from "./ApprovalWait";
 export { TxResult } from "./TxResult";
 export { JsonView } from "./JsonView";
 export { Field, TextInput, Select, TextArea } from "./Field";
+export { Qr } from "./Qr";
+export { IdLink } from "./IdLink";

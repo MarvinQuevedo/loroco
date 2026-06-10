@@ -13,7 +13,16 @@ import { AssetSelect } from "../../components/AssetSelect";
 import { useProvider } from "../../provider/useProvider";
 import { useWriteAction } from "../../provider/useWriteAction";
 import { useCats } from "../../provider/useCats";
-import { catToMojos, mojosToCat, mojosToXch, xchToMojos } from "../../lib/mojos";
+import {
+  baseToDecimal,
+  catToMojos,
+  decimalToBase,
+  mojosToCat,
+  mojosToXch,
+  xchToMojos,
+  CAT_DECIMALS,
+  XCH_DECIMALS,
+} from "../../lib/mojos";
 import { textToHex } from "../../lib/hex";
 
 // transfer normalises `to ?? address` server-side; we always send canonical
@@ -48,6 +57,20 @@ export default function Send() {
       gone = true;
     };
   }, [call, assetId, isCat, action.result]);
+
+  const decimals = isCat ? CAT_DECIMALS : XCH_DECIMALS;
+  const fillMax = () => {
+    if (spendable != null) setAmount(baseToDecimal(spendable, decimals));
+  };
+  // Live "amount exceeds spendable" guard — caught before we bother the wallet.
+  let exceedsBalance = false;
+  if (spendable != null && amount.trim()) {
+    try {
+      exceedsBalance = decimalToBase(amount, decimals) > BigInt(spendable);
+    } catch {
+      /* mid-typing */
+    }
+  }
 
   const onSubmit = async () => {
     setFormError(null);
@@ -101,14 +124,32 @@ export default function Send() {
           >
             <AssetSelect cats={cats} value={assetId} onChange={setAssetId} disabled={action.busy} />
           </Field>
-          <Field label={`Amount (${unit})`} hint={isCat ? "3 decimals" : "12 decimals"}>
-            <TextInput
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.0"
-              inputMode="decimal"
-              disabled={action.busy}
-            />
+          <Field
+            label={`Amount (${unit})`}
+            hint={
+              exceedsBalance ? (
+                <span className="field-warn">Exceeds spendable balance.</span>
+              ) : isCat ? (
+                "3 decimals"
+              ) : (
+                "12 decimals"
+              )
+            }
+          >
+            <span className="input-wrap">
+              <TextInput
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="0.0"
+                inputMode="decimal"
+                disabled={action.busy}
+              />
+              {spendable != null && spendable !== "0" && (
+                <button type="button" className="input-inline-btn" onClick={fillMax} disabled={action.busy}>
+                  Max
+                </button>
+              )}
+            </span>
           </Field>
           <div className="span-2">
             <Field label="Recipient address">
