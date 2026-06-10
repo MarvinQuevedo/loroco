@@ -3911,18 +3911,17 @@ function NotificationsSection() {
   if (!settings) return <p className="muted small">Loading…</p>;
 
   const SUB: Array<{ key: keyof NotifSettings; label: string }> = [
-    { key: "incomingPending", label: "Incoming payment pending" },
-    { key: "incomingConfirmed", label: "Payment received (confirmed)" },
+    { key: "incomingConfirmed", label: "Payment received" },
     { key: "outgoingConfirmed", label: "Your transaction confirmed" },
-    { key: "outgoingExternal", label: "Funds sent from another device" },
+    { key: "outgoingExternal", label: "Funds spent from another device" },
   ];
 
   return (
     <>
       <p className="form-note">
-        Loroco watches the mempool live and can alert you the moment a payment
-        arrives, a transaction confirms, or your seed is spent from another
-        wallet/device.
+        Get alerted when a payment lands in your wallet, when one of your
+        transactions confirms, or when your seed is spent from another
+        wallet/device. Alerts fire as transactions confirm on-chain.
       </p>
       <label className="form-check">
         <input
