@@ -4882,10 +4882,13 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
         ticker: "XCH",
         name: "Chia",
         decimals: 12,
-        available_mojos: BigInt(
-          Math.round((parseFloat(balance?.total_unspent_xch || "0") || 0) * 1_000_000_000_000),
-        ),
-        coin_count: balance?.unspent_coin_count ?? 0,
+        // Use the local coin-store snapshot — same source the Home tab uses.
+        // The old `get_address_balance` (`balance.total_unspent_xch`) only sees
+        // the primary address and MISSES coins on other derived / hardened PHs,
+        // so a wallet with XCH on a non-primary address showed "Available: 0"
+        // here and couldn't send despite Home showing the balance.
+        available_mojos: BigInt(snapshot?.unspent_mojos ?? "0"),
+        coin_count: snapshot?.unspent_count ?? balance?.unspent_coin_count ?? 0,
       }
     : (() => {
         const cat = catsWithBalance.find((c) => c.asset_id === assetKey);
@@ -4944,11 +4947,13 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
   // amountMojos uses the SELECTED asset's decimals; fee is always XCH (12).
   const amountMojos = scaleAmount(amountNum, selectedAsset.decimals);
   const feeMojos = scaleAmount(feeNum, 12);
+  // CAT fee is paid in XCH — check it against the same coin-store snapshot the
+  // XCH path uses, not the primary-address-only `balance` (which misses coins).
+  const xchAvailMojos = BigInt(snapshot?.unspent_mojos ?? "0");
   const haveEnough =
     selectedAsset.kind === "xch"
       ? selectedAsset.available_mojos >= amountMojos + feeMojos
-      : selectedAsset.available_mojos >= amountMojos &&
-        BigInt(balance?.total_unspent_mojos ?? "0") >= feeMojos;
+      : selectedAsset.available_mojos >= amountMojos && xchAvailMojos >= feeMojos;
   const canSend = addressValid && amountNum > 0 && haveEnough && !sending;
 
   const send = async () => {
