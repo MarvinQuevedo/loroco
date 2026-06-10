@@ -365,6 +365,30 @@ export async function setCompatSettings(
   return res.value as CompatSettings;
 }
 
+export interface NotifSettings {
+  enabled: boolean;
+  incomingPending: boolean;
+  incomingConfirmed: boolean;
+  outgoingExternal: boolean;
+  outgoingConfirmed: boolean;
+}
+
+export async function getNotifSettings(): Promise<NotifSettings> {
+  const msg: PopupRpcMessage = { from: "popup", kind: "get-notif-settings" };
+  const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
+  if (!res.ok) throw new Error(res.error.message);
+  return res.value as NotifSettings;
+}
+
+export async function setNotifSettings(
+  patch: Partial<NotifSettings>,
+): Promise<NotifSettings> {
+  const msg: PopupRpcMessage = { from: "popup", kind: "set-notif-settings", patch };
+  const res = (await chrome.runtime.sendMessage(msg)) as PopupRpcResponse;
+  if (!res.ok) throw new Error(res.error.message);
+  return res.value as NotifSettings;
+}
+
 /**
  * Decoded view of a signCoinSpends / sendTransaction bundle: per-coin
  * kind + outputs, plus a wallet-wide summary so the approval popup can

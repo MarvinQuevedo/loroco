@@ -110,6 +110,13 @@ export interface MempoolIncoming {
   asset_id?: string | null;
   /** When mempool-watch first saw this addition. Used for TTL expiry. */
   seen_at: number;
+  /**
+   * True when this addition belongs to a tx that did NOT spend any of our
+   * coins — i.e. a genuine receive, not change coming back from our own send.
+   * Notifications fire only for genuine receives; the confirmed-receive alert
+   * keys off this flag when the coin lands in a block.
+   */
+  genuine?: boolean;
 }
 
 /**

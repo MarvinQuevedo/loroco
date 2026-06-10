@@ -30,6 +30,7 @@
 
 import { tickCoinSync } from "./coin-sync.js";
 import {
+  type CoinStore,
   type MempoolIncoming,
   type MempoolOutgoing,
   MEMPOOL_TTL_MS,
@@ -39,6 +40,7 @@ import {
   writeCoinStore,
 } from "./coin-store.js";
 import { callEngine } from "./engine.js";
+import { fmtXchMojos, notify } from "./notifications.js";
 
 const WS_URL = "wss://api.coinset.org/ws";
 
@@ -106,6 +108,12 @@ function with0x(s: string): string {
 }
 function strip0x(s: string): string {
   return s.startsWith("0x") ? s.slice(2) : s;
+}
+
+/** True if a CAT coin we hold is flagged pending (our own optimistic spend). */
+function catCoinIsPending(store: CoinStore, assetId: string, coinId: string): boolean {
+  const cat = store.cats?.[assetId] ?? store.cats?.[assetId.replace(/^0x/, "")];
+  return !!cat?.coins.find((c) => c.coin_id === coinId)?.pending;
 }
 
 async function loadActiveContext(): Promise<{ fp: number; masterPk: string } | null> {
@@ -189,24 +197,12 @@ async function processTransaction(data: TransactionEventData): Promise<void> {
   const store = await readCoinStore(fp);
   const prev = store.mempool ?? { incoming: [], outgoing: [], last_polled_at: 0 };
 
-  // Walk additions → incoming.
-  const newIncoming: MempoolIncoming[] = [];
-  for (const add of additions) {
-    const ph = strip0x(add.puzzle_hash);
-    if (!ownedPhs.has(ph)) continue;
-    newIncoming.push({
-      tx_id: txId,
-      parent_coin_info: with0x(add.parent_coin_info),
-      puzzle_hash: with0x(add.puzzle_hash),
-      amount: String(add.amount),
-      asset_id: null,
-      seen_at: Date.now(),
-    });
-  }
-
-  // Walk removals → outgoing.
+  // Walk removals → outgoing FIRST so we can tell a genuine receive from our
+  // own change (a tx that spends our coins AND pays an output back to us).
   const xchSpent: string[] = [];
   const catSpent: Record<string, string[]> = {};
+  let spentInputMojos = 0n;
+  let anySpentPending = false; // a coin WE marked pending → our own broadcast
   for (const rem of removals) {
     const parent = with0x(rem.parent_coin_info);
     const ph = with0x(rem.puzzle_hash);
@@ -214,6 +210,8 @@ async function processTransaction(data: TransactionEventData): Promise<void> {
     const xchId = findXchCoinIdByOutpoint(store, parent, ph, amt);
     if (xchId) {
       xchSpent.push(xchId);
+      spentInputMojos += BigInt(amt);
+      if (store.coins[xchId]?.pending) anySpentPending = true;
       continue;
     }
     const cat = findCatCoinIdByOutpoint(store, parent, ph, amt);
@@ -221,10 +219,58 @@ async function processTransaction(data: TransactionEventData): Promise<void> {
       const list = catSpent[cat.assetId] ?? [];
       list.push(cat.coinId);
       catSpent[cat.assetId] = list;
+      if (catCoinIsPending(store, cat.assetId, cat.coinId)) anySpentPending = true;
     }
   }
   const haveOutgoing = xchSpent.length > 0 || Object.keys(catSpent).length > 0;
+
+  // Walk additions → incoming. A receive is "genuine" only when the tx didn't
+  // also spend our coins (otherwise the addition is just change).
+  const newIncoming: MempoolIncoming[] = [];
+  let genuineIncomingMojos = 0n;
+  for (const add of additions) {
+    const ph = strip0x(add.puzzle_hash);
+    if (!ownedPhs.has(ph)) continue;
+    const genuine = !haveOutgoing;
+    newIncoming.push({
+      tx_id: txId,
+      parent_coin_info: with0x(add.parent_coin_info),
+      puzzle_hash: with0x(add.puzzle_hash),
+      amount: String(add.amount),
+      asset_id: null,
+      seen_at: Date.now(),
+      genuine,
+    });
+    if (genuine) genuineIncomingMojos += BigInt(add.amount);
+  }
+
   if (newIncoming.length === 0 && !haveOutgoing) return;
+
+  // ── Notifications — fire only on first sight of this tx_id ───────────────
+  const knownIncomingTx = prev.incoming.some((i) => i.tx_id === txId);
+  const knownOutgoingTx = prev.outgoing.some((o) => o.tx_id === txId);
+  if (genuineIncomingMojos > 0n && !knownIncomingTx) {
+    void notify({
+      kind: "incoming-pending",
+      dedupId: txId,
+      title: "Incoming payment",
+      message: `${fmtXchMojos(genuineIncomingMojos)} is on its way (pending in the mempool).`,
+    });
+  }
+  // An outgoing spend we did NOT initiate from this client (no pending input)
+  // means another device on this seed sent funds. Surface it loudly — it's
+  // both useful and a security-relevant signal.
+  if (haveOutgoing && !anySpentPending && !knownOutgoingTx) {
+    const catNote = Object.keys(catSpent).length > 0 ? " (plus token coins)" : "";
+    const amountNote =
+      spentInputMojos > 0n ? `~${fmtXchMojos(spentInputMojos)}${catNote}` : "token coins";
+    void notify({
+      kind: "outgoing-external",
+      dedupId: txId,
+      title: "Sent from another device",
+      message: `${amountNote} just left your wallet from another app or device.`,
+    });
+  }
 
   // Merge: replace existing entries with same identity, append new ones,
   // expire stale (>TTL old).

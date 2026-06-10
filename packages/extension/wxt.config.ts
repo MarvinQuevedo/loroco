@@ -61,7 +61,7 @@ export default defineConfig({
     // segment in package.json before each build:fast / build.
     version: pkg.version,
     manifest_version: 3,
-    permissions: ["storage", "alarms", "tabs"],
+    permissions: ["storage", "alarms", "tabs", "notifications"],
     host_permissions: [
       "https://api.coinset.org/*",
       "https://kraken.fireacademy.io/*",

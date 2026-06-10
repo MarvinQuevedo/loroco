@@ -9,6 +9,7 @@ import {
   getCoinSyncTelemetry,
   getCompatSettings,
   getMempoolDebug,
+  getNotifSettings,
   getSidecarSettings,
   getSyncState,
   getXchPriceUsd,
@@ -19,10 +20,12 @@ import {
   revokeConnection,
   setActiveWallet,
   setCompatSettings,
+  setNotifSettings,
   setSidecarSettings,
   type CoinSnapshot,
   type CoinSpendAnalysis,
   type CompatSettings,
+  type NotifSettings,
   type CoinSyncTelemetry,
   type ConnectionRecord,
   type DexieCatMetadata,
@@ -2446,6 +2449,7 @@ type SettingsModal =
   | "connections"
   | "sidecar"
   | "compat"
+  | "notifications"
   | "offer";
 
 function SettingsTab({
@@ -2540,6 +2544,16 @@ function SettingsTab({
         />
       </ul>
 
+      <h3>Alerts</h3>
+      <ul className="settings-section-list">
+        <SettingsSectionRow
+          icon="🔔"
+          title="Notifications"
+          sub="Alert on incoming, confirmed and external sends"
+          onClick={() => setModal("notifications")}
+        />
+      </ul>
+
       <h3>Network</h3>
       <ul className="settings-section-list">
         <SettingsSectionRow
@@ -2607,6 +2621,11 @@ function SettingsTab({
       {modal === "compat" && (
         <Modal title="Site compatibility" onClose={closeModal}>
           <DAppCompatSection />
+        </Modal>
+      )}
+      {modal === "notifications" && (
+        <Modal title="Notifications" onClose={closeModal}>
+          <NotificationsSection />
         </Modal>
       )}
       {modal === "offer" && (
@@ -3857,6 +3876,81 @@ function DAppCompatSection() {
       <p className="muted small">
         Reload any open dApp tabs after changing this — the wallet only
         injects its provider once per page load.
+      </p>
+      {error && <p className="error">{error}</p>}
+    </>
+  );
+}
+
+function NotificationsSection() {
+  const [settings, setSettings] = useState<NotifSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setSettings(await getNotifSettings());
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    })();
+  }, []);
+
+  const patch = async (p: Partial<NotifSettings>) => {
+    setBusy(true);
+    try {
+      setSettings(await setNotifSettings(p));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!settings) return <p className="muted small">Loading…</p>;
+
+  const SUB: Array<{ key: keyof NotifSettings; label: string }> = [
+    { key: "incomingPending", label: "Incoming payment pending" },
+    { key: "incomingConfirmed", label: "Payment received (confirmed)" },
+    { key: "outgoingConfirmed", label: "Your transaction confirmed" },
+    { key: "outgoingExternal", label: "Funds sent from another device" },
+  ];
+
+  return (
+    <>
+      <p className="form-note">
+        Loroco watches the mempool live and can alert you the moment a payment
+        arrives, a transaction confirms, or your seed is spent from another
+        wallet/device.
+      </p>
+      <label className="form-check">
+        <input
+          type="checkbox"
+          checked={settings.enabled}
+          disabled={busy}
+          onChange={(e) => void patch({ enabled: e.target.checked })}
+        />
+        <span>
+          <strong>Enable notifications</strong>
+        </span>
+      </label>
+      <div style={{ opacity: settings.enabled ? 1 : 0.5, marginTop: 6 }}>
+        {SUB.map((s) => (
+          <label className="form-check" key={s.key}>
+            <input
+              type="checkbox"
+              checked={settings[s.key]}
+              disabled={busy || !settings.enabled}
+              onChange={(e) => void patch({ [s.key]: e.target.checked })}
+            />
+            <span>{s.label}</span>
+          </label>
+        ))}
+      </div>
+      <p className="muted small">
+        Your browser may also ask for permission to show notifications the first
+        time one fires.
       </p>
       {error && <p className="error">{error}</p>}
     </>
