@@ -157,6 +157,14 @@ export interface CoinStore {
    */
   mempool?: MempoolSnapshot;
   /**
+   * Block-height high-water mark for notifications. Coins confirmed/spent at
+   * or below this height are treated as historical backfill and never notified
+   * (otherwise the first sync of a wallet's whole history would fire a flood of
+   * "received" alerts). Seeded to the peak on the first armed sync; advanced to
+   * the peak each tick so only genuinely-new activity notifies. See coin-sync.
+   */
+  notif_baseline_height?: number;
+  /**
    * Per-PH cursor for `get_coin_records_by_hint` start_height. After each
    * successful CAT chunk we advance the entry to peak_height so the next
    * tick only fetches NEW hint matches since then. Same idea as ph_heights

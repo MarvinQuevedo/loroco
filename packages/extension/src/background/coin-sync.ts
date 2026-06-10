@@ -29,7 +29,7 @@ import {
   writeCoinStore,
 } from "./coin-store.js";
 import { resolveCatMetadata } from "./dexie.js";
-import { fmtXchMojos, notify } from "./notifications.js";
+import { fmtCatMojos, fmtXchMojos, notify } from "./notifications.js";
 import { readSidecarSettings } from "./sidecar-settings.js";
 import {
   scanPuzzleHashes as sidecarScanPuzzleHashes,
@@ -314,6 +314,17 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
 
     // 2. start_height = lowest per-PH mark - reorg window
     const store = await readCoinStore(wallet.fingerprint);
+    // Snapshot the CAT coins + NFTs we already knew about, so after the hint
+    // scans we can tell which ones ARRIVED this tick. A CAT/NFT coin only lands
+    // in our store because the hint scan matched our p2 puzzle hash — so any new
+    // one IS ours (its outer puzzle hash is the CAT/NFT puzzle, not our p2, which
+    // is exactly why the receive PH set can't see it). That's the incoming
+    // CAT/NFT signal.
+    const knownCatCoinIds = new Set<string>();
+    for (const cat of Object.values(store.cats ?? {})) {
+      for (const coin of cat.coins) knownCatCoinIds.add(coin.coin_id);
+    }
+    const knownNftLaunchers = new Set(Object.keys(store.nfts ?? {}));
     // Combined PH set: unhardened (always) + hardened (when cached).
     const unhardenedPhs = addresses.map((a) => a.puzzle_hash);
     const allPhs = [...unhardenedPhs, ...hardenedPhList];
@@ -409,16 +420,22 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
     const pendingCatPre: Record<string, RawCatCandidate> = {
       ...(store.pending_cat_candidates ?? {}),
     };
-    // Newly-arrived, unspent, confirmed XCH coins — candidates for a "received"
-    // notification (filtered against same-tick spends below so our own change
-    // doesn't masquerade as an incoming payment).
+    // Notification baseline: coins confirmed/spent at or below this height are
+    // historical backfill and never notified. On the FIRST armed sync there is
+    // no stored baseline, so we use the current peak — nothing is newer, so the
+    // whole history syncs silently. Advanced to the peak at the end of the tick.
+    const notifBaseline = store.notif_baseline_height ?? scan.peak_height;
+
+    // Newly-arrived, unspent, confirmed XCH coins ABOVE the baseline — candidates
+    // for a "received" notification (filtered against same-tick spends below so
+    // our own change doesn't masquerade as an incoming payment).
     const receivedThisTick: CoinRecord[] = [];
     for (const rec of scan.coin_records) {
       const isXch = receivePhSet.has(normPh(rec.puzzle_hash));
       if (isXch) {
         if (!(rec.coin_id in store.coins)) {
           newCoins += 1;
-          if (!rec.spent && rec.confirmed_block_index > 0) receivedThisTick.push(rec);
+          if (!rec.spent && rec.confirmed_block_index > notifBaseline) receivedThisTick.push(rec);
         }
         store.coins[rec.coin_id] = rec;
       } else if (useSidecar && !rec.spent) {
@@ -594,9 +611,11 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
             // Anything already spent & not pending was handled on a prior tick.
             if (xch.pending) {
               anySpentThisTick = true;
-              sentMojos += BigInt(xch.amount);
-              sentBlock = Math.max(sentBlock, s.spent_block_index);
-            } else if (!xch.spent) {
+              if (s.spent_block_index > notifBaseline) {
+                sentMojos += BigInt(xch.amount);
+                sentBlock = Math.max(sentBlock, s.spent_block_index);
+              }
+            } else if (!xch.spent && s.spent_block_index > notifBaseline) {
               anySpentThisTick = true;
               externalMojos += BigInt(xch.amount);
               externalBlock = Math.max(externalBlock, s.spent_block_index);
@@ -610,9 +629,11 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
           if (cat) {
             if (cat.coin.pending) {
               anySpentThisTick = true;
-              sentMojos += 1n;
-              sentBlock = Math.max(sentBlock, s.spent_block_index);
-            } else if (!cat.coin.spent) {
+              if (s.spent_block_index > notifBaseline) {
+                sentMojos += 1n;
+                sentBlock = Math.max(sentBlock, s.spent_block_index);
+              }
+            } else if (!cat.coin.spent && s.spent_block_index > notifBaseline) {
               anySpentThisTick = true;
               externalMojos += 1n;
               externalBlock = Math.max(externalBlock, s.spent_block_index);
@@ -725,6 +746,10 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
         message: `${fmtXchMojos(recvMojos)} arrived in block #${recvBlock.toLocaleString()}.`,
       });
     }
+    // Advance the notification high-water mark so the next tick only alerts on
+    // activity newer than this peak. (On the first sync this arms it for the
+    // first time, having notified nothing above the seed baseline.)
+    store.notif_baseline_height = scan.peak_height;
 
     // After reconciliation, rebuild each CAT bucket's totals — optimistic
     // marks (and reverts) can flip `spent` on coins we already wrote out.
@@ -740,6 +765,11 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       cat.total_unspent_mojos = total.toString();
       cat.unspent_coin_count = unspent;
     }
+
+    // Persist the spent reconciliation + the advanced notification baseline now,
+    // so the baseline survives even if the CAT/NFT stages below time out (without
+    // it the next tick would re-seed the baseline to the peak and never notify).
+    await writeCoinStore(wallet.fingerprint, store);
 
     // ── ORDER NOTE ──
     // We run NFT scan BEFORE CAT scan. NFT hint responses are tiny (a few
@@ -1191,6 +1221,61 @@ export async function tickCoinSync(opts: { force?: boolean } = {}): Promise<void
       }
     }
     } // end of catsStale-OR-pending branch
+
+    // ── Incoming CAT / NFT notifications ─────────────────────────────────
+    // A CAT coin or NFT only enters our store because the hint scan matched our
+    // p2 puzzle hash, so any one that's NEW this tick (and above the baseline) is
+    // a receive. Stay quiet when we also spent something this tick (it's our own
+    // change/transfer, not an incoming payment).
+    if (!anySpentThisTick) {
+      // New CAT coins, summed per asset.
+      const newCatByAsset: Record<string, { mojos: bigint; block: number }> = {};
+      for (const [assetId, cat] of Object.entries(store.cats ?? {})) {
+        for (const coin of cat.coins) {
+          if (
+            !coin.spent &&
+            !knownCatCoinIds.has(coin.coin_id) &&
+            coin.confirmed_block_index > notifBaseline
+          ) {
+            const cur = newCatByAsset[assetId] ?? { mojos: 0n, block: 0 };
+            cur.mojos += BigInt(coin.amount);
+            cur.block = Math.max(cur.block, coin.confirmed_block_index);
+            newCatByAsset[assetId] = cur;
+          }
+        }
+      }
+      const newCatAssetIds = Object.keys(newCatByAsset);
+      if (newCatAssetIds.length > 0) {
+        const meta = await resolveCatMetadata(newCatAssetIds).catch(() => ({}) as Record<string, { code?: string; decimals?: number }>);
+        for (const assetId of newCatAssetIds) {
+          const { mojos, block } = newCatByAsset[assetId]!;
+          const m = meta[assetId] ?? meta[assetId.replace(/^0x/, "")];
+          void notify({
+            kind: "incoming-confirmed",
+            dedupId: `recv-cat-${assetId}-${block}`,
+            title: "Token received",
+            message: `${fmtCatMojos(mojos, m?.decimals ?? 3, m?.code)} arrived in your wallet.`,
+          });
+        }
+      }
+      // New NFTs.
+      let newNftCount = 0;
+      let newNftBlock = 0;
+      for (const [launcher, nft] of Object.entries(store.nfts ?? {})) {
+        if (!nft.spent && !knownNftLaunchers.has(launcher) && nft.confirmed_block_index > notifBaseline) {
+          newNftCount += 1;
+          newNftBlock = Math.max(newNftBlock, nft.confirmed_block_index);
+        }
+      }
+      if (newNftCount > 0) {
+        void notify({
+          kind: "incoming-confirmed",
+          dedupId: `recv-nft-${newNftBlock}`,
+          title: newNftCount === 1 ? "NFT received" : "NFTs received",
+          message: `${newNftCount} NFT${newNftCount === 1 ? "" : "s"} arrived in your wallet.`,
+        });
+      }
+    }
 
     // Count "full sync" relative to whether each scan ran. If the throttle
     // skipped a section, the existing freshness is still valid, so treat
