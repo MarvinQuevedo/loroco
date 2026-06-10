@@ -164,16 +164,81 @@ try {
   });
 
   const ourPhs = new Set();
-  for (const ph of ctxInfo.hardened) ourPhs.add(strip(ph));
+  const ourPhList0x = [];
+  const addPh = (ph) => {
+    const s = strip(ph);
+    if (!ourPhs.has(s)) {
+      ourPhs.add(s);
+      ourPhList0x.push(`0x${s}`);
+    }
+  };
+  for (const ph of ctxInfo.hardened) addPh(ph);
   if (ctxInfo.masterPk) {
     const r = await popup.evaluate(
       (mpk) => chrome.runtime.sendMessage({ from: "popup", kind: "engine", method: "derive_addresses", params: { master_public_key: mpk, start: 0, count: 200, testnet: false } }),
       ctxInfo.masterPk,
     );
-    for (const a of r?.value?.addresses ?? []) ourPhs.add(strip(a.puzzle_hash));
+    for (const a of r?.value?.addresses ?? []) addPh(a.puzzle_hash);
   }
   const ourOutpoints = new Set(ctxInfo.outpoints.map((o) => o.split("|").map(strip).join("|")));
   log(c.green(`✓ wallet ready — ${ourPhs.size} owned PHs, ${ourOutpoints.size} unspent coins tracked`));
+
+  // ── diag: compare on-chain XCH (coinset) vs Loroco's local store ─────────
+  if (cmd === "diag") {
+    log(c.bold("\nXCH balance diagnostic — on-chain vs Loroco store\n"));
+    const readLocalXch = async () =>
+      await sw.evaluate(async (fp) => {
+        const store = (await chrome.storage.local.get(`coins.${fp}`))[`coins.${fp}`];
+        let t = 0n;
+        for (const cn of Object.values(store?.coins ?? {})) if (!cn.spent) t += BigInt(cn.amount);
+        const tele = (await chrome.storage.session.get("coinSyncTelemetry")).coinSyncTelemetry;
+        return { mojos: t.toString(), stage: tele?.stage, xchProg: tele?.stage_progress?.xch };
+      }, ctxInfo.fp);
+    // Force a full sync and wait for the XCH stage to actually run before judging.
+    log(c.dim("forcing coin sync, waiting up to 180s for the XCH scan to land…"));
+    await popup.evaluate(() => chrome.runtime.sendMessage({ from: "popup", kind: "force-coin-sync" })).catch(() => {});
+    const t0 = Date.now();
+    let local = await readLocalXch();
+    while (Date.now() - t0 < 180_000) {
+      local = await readLocalXch();
+      if (BigInt(local.mojos) > 0n) break;
+      process.stdout.write(c.dim(`. (${local.stage}/${local.xchProg?.done ?? 0}-${local.xchProg?.total ?? 0})`));
+      await wait(6000);
+    }
+    log("");
+    const localMojos = local.mojos;
+    // 2. On-chain via coinset, querying all our PHs in batches.
+    let chainMojos = 0n, chainCoins = 0, withCoins = [];
+    for (let i = 0; i < ourPhList0x.length; i += 200) {
+      const batch = ourPhList0x.slice(i, i + 200);
+      try {
+        const r = await rpc("get_coin_records_by_puzzle_hashes", { puzzle_hashes: batch, include_spent_coins: false });
+        for (const rec of r?.coin_records ?? []) {
+          if (rec.spent) continue;
+          chainMojos += BigInt(rec.coin.amount);
+          chainCoins += 1;
+          if (withCoins.length < 8) withCoins.push(`${short(rec.coin.puzzle_hash)} = ${mojosToXch(rec.coin.amount)} XCH`);
+        }
+      } catch (e) {
+        log(c.red(`  batch ${i} failed: ${e?.message || e}`));
+      }
+      await wait(400);
+    }
+    log(`  Loroco store XCH : ${c.cyan(mojosToXch(localMojos) + " XCH")}`);
+    log(`  On-chain XCH     : ${c.cyan(mojosToXch(chainMojos) + " XCH")} across ${chainCoins} coin(s)`);
+    if (withCoins.length) log(c.dim("    " + withCoins.join("\n    ")));
+    if (BigInt(localMojos) === 0n && chainMojos > 0n) {
+      log(c.red(`\n  ⚠ Loroco's store has 0 XCH but the chain has ${mojosToXch(chainMojos)} XCH at our PHs`));
+      log(c.red("    → real sync gap: the XCH scan missed these coins (or hasn't run yet)."));
+    } else if (chainMojos === 0n) {
+      log(c.yellow("\n  This wallet has NO unspent XCH on-chain at its derived PHs — likely a different wallet than the one in Sage."));
+    } else {
+      log(c.green("\n  ✓ Loroco's XCH matches the chain."));
+    }
+    await ctx.close();
+    process.exit(0);
+  }
+
   log(c.dim("mempool source: coinset REST poll (the WS only emits `peak`)\n"));
 
   // ── classify one mempool item against the wallet ─────────────────────────
@@ -202,6 +267,9 @@ try {
   // ── optional self-send (drives the popup UI) ─────────────────────────────
   let trackTxId = null;
   if (SEND) {
+    // A freshly-imported profile needs the XCH/CAT scan to land before the
+    // Send tab will let us spend. Force a sync and wait for the asset to show.
+    await waitForSync(popup, sw, ctxInfo.fp, SEND.kind);
     trackTxId = await doSelfSend(popup, SEND);
     if (trackTxId) log(c.bold(c.cyan(`\n▶ tracking self-send tx ${short(trackTxId)} …\n`)));
   }
@@ -300,6 +368,34 @@ try {
 } finally {
   await wait(500);
   await ctx.close();
+}
+
+// ── wait for a fresh import to sync the asset we're about to send ────────────
+async function waitForSync(popup, sw, fp, kind, timeoutMs = 180_000) {
+  const need = kind === "xch" ? "XCH" : kind === "cat" ? "a CAT" : "an NFT";
+  process.stdout.write(`\x1b[2mforcing sync, waiting for ${need} to populate`);
+  await popup.evaluate(() => chrome.runtime.sendMessage({ from: "popup", kind: "force-coin-sync" })).catch(() => {});
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    const have = await sw.evaluate(async ({ fp, kind }) => {
+      const store = (await chrome.storage.local.get(`coins.${fp}`))[`coins.${fp}`];
+      if (kind === "xch") {
+        let t = 0n;
+        for (const c of Object.values(store?.coins ?? {})) if (!c.spent) t += BigInt(c.amount);
+        return t > 0n;
+      }
+      if (kind === "cat") return Object.keys(store?.cats ?? {}).length > 0;
+      return Object.values(store?.nfts ?? {}).some((n) => !n.spent);
+    }, { fp, kind });
+    if (have) {
+      process.stdout.write(" ✓\x1b[0m\n");
+      return true;
+    }
+    process.stdout.write("\x1b[2m.\x1b[0m");
+    await new Promise((r) => setTimeout(r, 6000));
+  }
+  process.stdout.write("\x1b[33m (timed out)\x1b[0m\n");
+  return false;
 }
 
 // ── self-send via the popup UI ───────────────────────────────────────────────
