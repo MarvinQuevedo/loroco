@@ -1213,8 +1213,8 @@ button.sync-refresh:disabled {
 }
 
 .send-success-badge {
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
@@ -1223,8 +1223,8 @@ button.sync-refresh:disabled {
 }
 
 .send-success-badge svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   display: block;
 }
 
@@ -1239,33 +1239,40 @@ button.sync-refresh:disabled {
 }
 
 .send-success-eyebrow {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--text-mute);
+  letter-spacing: 0.1em;
+  color: var(--text-strong);
 }
 
 .send-success-amount {
   display: flex;
   align-items: baseline;
   justify-content: center;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
   margin: var(--space-1) 0 var(--space-3);
+  max-width: 100%;
+  padding: 0 var(--space-2);
 }
 
 .send-success-amount-num {
-  font-size: 40px;
+  /* Shrink the hero figure for long amounts so it never overflows the 380px
+     popup; big-and-bold for the common short case. */
+  font-size: clamp(26px, 11vw, 38px);
   font-weight: 700;
   letter-spacing: -0.03em;
-  line-height: 1;
+  line-height: 1.05;
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
 .send-success-amount-ticker {
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-mute);
   letter-spacing: 0.04em;
 }

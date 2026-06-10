@@ -8,7 +8,6 @@ import {
   getCoinSnapshot,
   getCoinSyncTelemetry,
   getCompatSettings,
-  getMempoolDebug,
   getNotifSettings,
   getSidecarSettings,
   getSyncState,
@@ -29,8 +28,6 @@ import {
   type CoinSyncTelemetry,
   type ConnectionRecord,
   type DexieCatMetadata,
-  type MempoolDebugEntry,
-  type MempoolDebugSnapshot,
   type NftView,
   type PendingApproval,
   type SendXchResult,
@@ -2449,8 +2446,7 @@ type SettingsModal =
   | "connections"
   | "sidecar"
   | "compat"
-  | "notifications"
-  | "offer";
+  | "notifications";
 
 function SettingsTab({
   wallet,
@@ -2570,16 +2566,6 @@ function SettingsTab({
         />
       </ul>
 
-      <h3>Tools</h3>
-      <ul className="settings-section-list">
-        <SettingsSectionRow
-          icon="🔎"
-          title="Inspect offer"
-          sub="Decode an offer1… string"
-          onClick={() => setModal("offer")}
-        />
-      </ul>
-
       <h3>Danger zone</h3>
       {!confirmingReset && (
         <button className="danger" onClick={() => setConfirmingReset(true)}>
@@ -2626,11 +2612,6 @@ function SettingsTab({
       {modal === "notifications" && (
         <Modal title="Notifications" onClose={closeModal}>
           <NotificationsSection />
-        </Modal>
-      )}
-      {modal === "offer" && (
-        <Modal title="Inspect offer" onClose={closeModal}>
-          <OfferInspector />
         </Modal>
       )}
     </div>
@@ -2805,244 +2786,10 @@ function StatusTab({ sync }: { sync: SyncState | null }) {
       <h3>Sync details</h3>
       <SyncDetailsPanel />
 
-      <h3>Mempool</h3>
-      <MempoolDebugPanel />
-
       <h3>Local peer</h3>
       <LocalPeerStatus />
     </div>
   );
-}
-
-function MempoolDebugPanel() {
-  const [snap, setSnap] = useState<MempoolDebugSnapshot | null>(null);
-  const [filter, setFilter] = useState<"all" | "mine">("all");
-  const [showRaw, setShowRaw] = useState(false);
-  const [, tick] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const s = await getMempoolDebug();
-        if (!cancelled) setSnap(s);
-      } catch {
-        // best-effort
-      }
-    };
-    void refresh();
-    const id = setInterval(refresh, 2000);
-    const rerender = setInterval(() => tick((n) => n + 1), 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-      clearInterval(rerender);
-    };
-  }, []);
-
-  if (!snap) {
-    return (
-      <div className="result">
-        <div>
-          <span className="muted">status</span>
-          <code>loading…</code>
-        </div>
-      </div>
-    );
-  }
-
-  const { stats, feed } = snap;
-  const filtered =
-    filter === "mine"
-      ? feed.filter((e) => e.mine === "incoming" || e.mine === "outgoing" || e.mine === "both")
-      : feed;
-
-  return (
-    <>
-      <div className="result">
-        <div>
-          <span className="muted">socket</span>
-          <code className={stats.socketOpen ? "" : "error"}>
-            {stats.socketState}
-          </code>
-        </div>
-        <div>
-          <span className="muted">messages</span>
-          <code>
-            {stats.messages.toLocaleString()}{" "}
-            <span className="muted small">· {stats.msgsPerSec.toFixed(1)}/s</span>
-          </code>
-        </div>
-        <div>
-          <span className="muted">last event</span>
-          <code>
-            {stats.lastEvent || "(none)"}{" "}
-            {stats.lastSeenAt > 0 && (
-              <span className="muted small">· {timeAgo(stats.lastSeenAt)}</span>
-            )}
-          </code>
-        </div>
-        <div>
-          <span className="muted">by type</span>
-          <code>
-            {Object.entries(stats.eventTypes)
-              .sort((a, b) => b[1] - a[1])
-              .map(([t, n]) => `${t}:${n}`)
-              .join(" · ") || "—"}
-          </code>
-        </div>
-        {stats.rawSamples.length > 0 && (
-          <div>
-            <span className="muted">raw samples</span>
-            <code>
-              <button
-                className="btn-small"
-                onClick={() => setShowRaw((v) => !v)}
-              >
-                {showRaw ? "hide" : `show (${stats.rawSamples.length})`}
-              </button>
-            </code>
-          </div>
-        )}
-        {showRaw && (
-          <div>
-            <pre
-              style={{
-                fontSize: 10,
-                maxHeight: 160,
-                overflow: "auto",
-                background: "var(--surface-2)",
-                padding: 6,
-                borderRadius: 6,
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-all",
-              }}
-            >
-              {stats.rawSamples.join("\n---\n")}
-            </pre>
-          </div>
-        )}
-      </div>
-
-      <div className="form-input-row" style={{ marginTop: 8 }}>
-        <button
-          className={filter === "all" ? "btn-small active" : "btn-small"}
-          onClick={() => setFilter("all")}
-        >
-          All ({feed.length})
-        </button>
-        <button
-          className={filter === "mine" ? "btn-small active" : "btn-small"}
-          onClick={() => setFilter("mine")}
-        >
-          Mine only
-        </button>
-      </div>
-
-      {filtered.length === 0 ? (
-        <p className="form-note">
-          No transactions captured yet. Tx will appear here as the WS receives
-          them (mainnet sees a few per minute on average).
-        </p>
-      ) : (
-        <ul className="mempool-feed">
-          {filtered.map((entry) => (
-            <MempoolFeedRow key={entry.tx_id} entry={entry} />
-          ))}
-        </ul>
-      )}
-    </>
-  );
-}
-
-function MempoolFeedRow({ entry }: { entry: MempoolDebugEntry }) {
-  const mineClass =
-    entry.mine === "incoming"
-      ? "mine-in"
-      : entry.mine === "outgoing"
-        ? "mine-out"
-        : entry.mine === "both"
-          ? "mine-both"
-          : entry.mine === "none"
-            ? "mine-none"
-            : "mine-unknown";
-  const mineLabel =
-    entry.mine === "incoming"
-      ? "INCOMING"
-      : entry.mine === "outgoing"
-        ? "OUTGOING"
-        : entry.mine === "both"
-          ? "SELF"
-          : entry.mine === "none"
-            ? "not mine"
-            : "no wallet";
-  return (
-    <li className={`mempool-feed-row ${mineClass}`} title={entry.tx_id}>
-      <div className="mempool-feed-head">
-        <span className={`mempool-mine-tag ${mineClass}`}>{mineLabel}</span>
-        <span className="mempool-shape muted small">{entry.shape}</span>
-        <span className="muted small">{timeAgo(entry.observed_at)}</span>
-      </div>
-      <div className="mempool-feed-body">
-        <code className="mempool-txid">
-          {entry.tx_id.slice(0, 10)}…{entry.tx_id.slice(-6)}
-        </code>
-        <span className="muted small">
-          +{entry.additions_count} / −{entry.removals_count} coins
-        </span>
-      </div>
-      <div className="mempool-feed-body">
-        <span className="muted small">added</span>{" "}
-        <code>{formatMojos(entry.total_added_mojos)}</code>
-        <span className="muted small" style={{ marginLeft: 8 }}>
-          removed
-        </span>{" "}
-        <code>{formatMojos(entry.total_removed_mojos)}</code>
-      </div>
-      {(entry.matched_in_phs.length > 0 ||
-        entry.matched_out_cat_assets.length > 0 ||
-        entry.matched_out_xch) && (
-        <div className="mempool-feed-body">
-          {entry.matched_in_phs.length > 0 && (
-            <span className="muted small">
-              in→ {entry.matched_in_phs[0]!.slice(0, 10)}…
-              {entry.matched_in_phs.length > 1
-                ? ` (+${entry.matched_in_phs.length - 1})`
-                : ""}
-            </span>
-          )}
-          {entry.matched_out_xch && (
-            <span className="muted small" style={{ marginLeft: 8 }}>
-              out: XCH
-            </span>
-          )}
-          {entry.matched_out_cat_assets.length > 0 && (
-            <span className="muted small" style={{ marginLeft: 8 }}>
-              out: CAT {entry.matched_out_cat_assets[0]!.slice(0, 8)}…
-              {entry.matched_out_cat_assets.length > 1
-                ? ` (+${entry.matched_out_cat_assets.length - 1})`
-                : ""}
-            </span>
-          )}
-        </div>
-      )}
-    </li>
-  );
-}
-
-function formatMojos(mojos: string): string {
-  try {
-    const n = BigInt(mojos);
-    if (n === 0n) return "0";
-    // Show XCH if > 1 billion mojos (i.e. > 0.001 XCH), otherwise raw mojos.
-    if (n >= 1_000_000_000n) {
-      const xch = Number(n) / 1_000_000_000_000;
-      return `${xch.toFixed(xch < 0.01 ? 6 : 4)} XCH`;
-    }
-    return `${n.toString()} mojos`;
-  } catch {
-    return mojos;
-  }
 }
 
 function LocalPeerStatus() {
@@ -3544,24 +3291,6 @@ function HomeTab({
   );
 }
 
-interface DecodedOffer {
-  offered: {
-    xch_mojos: string;
-    cats: Array<{ asset_id: string; amount: string }>;
-    nft_launcher_ids: string[];
-  };
-  requested: {
-    xch_mojos: string;
-    cats: Array<{ asset_id: string; amount: string }>;
-    nft_launcher_ids: string[];
-  };
-  coin_spends_count: number;
-  offered_royalties: Array<{
-    nft_launcher_id: string;
-    royalty_basis_points: number;
-  }>;
-}
-
 function SyncDetailsPanel() {
   const [telemetry, setTelemetry] = useState<CoinSyncTelemetry | null>(null);
   const [sync, setSync] = useState<SyncState | null>(null);
@@ -4051,97 +3780,6 @@ function ConnectionsList() {
   );
 }
 
-function OfferInspector() {
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<DecodedOffer | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const inspect = async () => {
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const r = await callEngine<DecodedOffer>("decode_offer", { offer: text.trim() });
-      setResult(r);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <>
-      <textarea
-        rows={3}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="offer1..."
-        spellCheck={false}
-      />
-      <button onClick={() => void inspect()} disabled={busy || !text.trim()}>
-        {busy ? "Decoding…" : "Decode offer"}
-      </button>
-      {error && <p className="error">{error}</p>}
-      {result && (
-        <div className="result">
-          {BigInt(result.offered.xch_mojos || "0") > 0n && (
-            <div>
-              <span className="muted">offered XCH</span>
-              <code>{mojosToXch(result.offered.xch_mojos)} XCH</code>
-            </div>
-          )}
-          {result.offered.cats.map((c) => (
-            <div key={c.asset_id}>
-              <span className="muted">offered CAT {shortHash(c.asset_id)}</span>
-              <code>{mojosToCatUnits(c.amount)} CAT</code>
-            </div>
-          ))}
-          {result.offered.nft_launcher_ids.map((l) => (
-            <div key={l}>
-              <span className="muted">offered NFT</span>
-              <code>{shortHash(l)}</code>
-            </div>
-          ))}
-          {BigInt(result.requested.xch_mojos || "0") > 0n && (
-            <div>
-              <span className="muted">requested XCH</span>
-              <code>{mojosToXch(result.requested.xch_mojos)} XCH</code>
-            </div>
-          )}
-          {result.requested.cats.map((c) => (
-            <div key={c.asset_id}>
-              <span className="muted">requested CAT {shortHash(c.asset_id)}</span>
-              <code>{mojosToCatUnits(c.amount)} CAT</code>
-            </div>
-          ))}
-          {result.requested.nft_launcher_ids.map((l) => (
-            <div key={l}>
-              <span className="muted">requested NFT</span>
-              <code>{shortHash(l)}</code>
-            </div>
-          ))}
-          {result.offered_royalties.length > 0 && (
-            <div>
-              <span className="muted">royalties</span>
-              <code>
-                {result.offered_royalties
-                  .map((r) => `${(r.royalty_basis_points / 100).toFixed(2)}%`)
-                  .join(", ")}
-              </code>
-            </div>
-          )}
-          <div>
-            <span className="muted">coin spends</span>
-            <code>{result.coin_spends_count}</code>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
 // NFT thumbnail that falls back to the "NFT" placeholder when the image is
 // missing OR fails to load — previously a broken URL collapsed the card to a
 // blank square (the onError just hid the <img>).
@@ -4615,6 +4253,7 @@ function ActivityTab({
             const ticker = r.asset_kind === "xch" ? "XCH" : meta?.code ?? "CAT";
             const decimals = r.asset_kind === "xch" ? 12 : meta?.decimals ?? 3;
             const amt = formatAmount(r.amount_mojos, decimals);
+            const amtCompact = formatAmountCompact(r.amount_mojos, decimals);
             const usd =
               r.asset_kind === "xch" && xchPrice
                 ? parseFloat(amt) * xchPrice
@@ -4631,9 +4270,9 @@ function ActivityTab({
                   <div className="muted small">block #{r.height.toLocaleString()}</div>
                 </div>
                 <div className="activity-amount">
-                  <div className={isIn ? "ok" : "warn"}>
+                  <div className={isIn ? "ok" : "warn"} title={`${isIn ? "+" : "−"}${amt} ${ticker}`}>
                     {isIn ? "+" : "−"}
-                    {amt}
+                    {amtCompact}
                   </div>
                   {usd != null && (
                     <div className="muted small">≈ ${formatUsd(usd)}</div>
@@ -4666,6 +4305,27 @@ function formatAmount(mojos: string, decimals: number): string {
   } catch {
     return mojos;
   }
+}
+
+/**
+ * Compact amount for tight layouts (Activity rows, the Send-success hero).
+ * Full precision blows the column out — "0.000000296124" is 14 glyphs. Keep
+ * the magnitude readable: a whole part trims to 4 decimals; a pure fraction
+ * keeps ~3 significant digits from the first non-zero, so dust still shows as
+ * "0.000000296" rather than rounding to "0.0000".
+ */
+function formatAmountCompact(mojos: string, decimals: number): string {
+  const full = formatAmount(mojos, decimals);
+  if (!full.includes(".")) return full;
+  const [whole, frac = ""] = full.split(".");
+  if (whole !== "0") {
+    const trimmed = frac.slice(0, 4).replace(/0+$/, "");
+    return trimmed ? `${whole}.${trimmed}` : whole;
+  }
+  const firstNonZero = frac.search(/[1-9]/);
+  if (firstNonZero === -1) return "0";
+  const sig = frac.slice(0, firstNonZero + 3).replace(/0+$/, "");
+  return sig ? `0.${sig}` : "0";
 }
 
 function normalizeId(id: string): string {
