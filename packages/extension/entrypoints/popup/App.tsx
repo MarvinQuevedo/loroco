@@ -1166,7 +1166,7 @@ function ApprovalSummary({
           </div>
           <div>
             <span className="muted">asset id</span>
-            <code>{isXch ? "(XCH)" : `${cd.symbol ? cd.symbol + " · " : ""}${String(assetId)}`}</code>
+            <code>{isXch ? "XCH (native)" : `${cd.symbol ? cd.symbol + " · " : ""}${String(assetId)}`}</code>
           </div>
           {fee != null && (
             <div>

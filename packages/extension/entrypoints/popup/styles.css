@@ -1991,12 +1991,19 @@ details > summary:hover {
 .activity-row {
   display: grid;
   grid-template-columns: 32px 1fr auto;
-  align-items: center;
+  /* Top-align so the primary number always sits on the title's baseline —
+     rows with a "≈ $" sub-line no longer make the amount jump vs rows without
+     one. The arrow re-centers itself below. */
+  align-items: start;
   gap: var(--space-3);
   padding: 10px var(--space-3);
   background: var(--surface);
   border-radius: var(--ozone-radius-md);
   border: 1px solid var(--border);
+}
+
+.activity-row .activity-arrow {
+  align-self: center;
 }
 
 .activity-arrow {
