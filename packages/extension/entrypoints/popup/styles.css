@@ -318,8 +318,9 @@ button:active:not(:disabled) {
 }
 
 button:disabled {
-  background: color-mix(in srgb, var(--text-mute) 30%, transparent);
+  background: var(--surface);
   color: var(--text-mute);
+  border: 1px solid var(--border);
   cursor: not-allowed;
 }
 
@@ -493,9 +494,9 @@ textarea {
 }
 
 .icon-btn.active {
-  background: var(--brand-green-lime);
-  color: #0e1113;
-  border-color: var(--brand-green);
+  background: color-mix(in srgb, var(--accent-green) 16%, transparent);
+  color: var(--accent-green-press);
+  border-color: color-mix(in srgb, var(--accent-green) 45%, var(--border));
 }
 
 .header-actions {
@@ -1672,8 +1673,8 @@ button.sync-refresh:disabled {
 }
 
 .scope-badge.full {
-  background: color-mix(in srgb, var(--ozone-primary) 18%, transparent);
-  color: var(--ozone-primary);
+  background: color-mix(in srgb, var(--accent-green) 20%, transparent);
+  color: var(--accent-green-press);
 }
 
 .scope-badge.read-only {
@@ -1774,7 +1775,7 @@ details > summary:hover {
   background: #fff;
   border-radius: var(--ozone-radius-md);
   color: #0e1113;
-  border: 2px solid var(--ozone-primary);
+  border: 1px solid var(--border);
 }
 
 .qr {
@@ -1966,6 +1967,15 @@ details > summary:hover {
   border-radius: var(--ozone-radius-sm);
 }
 
+/* When the NFT has no resolvable image, NftThumb renders a placeholder — keep
+   it a tidy centered square in the detail view rather than full-bleed. */
+.nft-detail-image .nft-placeholder {
+  width: 180px;
+  max-width: 100%;
+  font-size: 40px;
+  color: var(--text-mute);
+}
+
 /* ── activity list ───────────────────────────────────────────────────── */
 .activity-list {
   list-style: none;
@@ -2003,10 +2013,12 @@ details > summary:hover {
 
 .activity-arrow.ok {
   background: color-mix(in srgb, var(--accent-green) 20%, transparent);
+  color: var(--accent-green-press);
 }
 
 .activity-arrow.warn {
-  background: color-mix(in srgb, var(--accent-warn) 20%, transparent);
+  background: color-mix(in srgb, var(--text-mute) 16%, transparent);
+  color: var(--text);
 }
 
 .activity-meta {
@@ -2030,6 +2042,15 @@ details > summary:hover {
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;
+}
+
+/* Received reads as a gain (green); sent stays neutral — the leading − already
+   signals direction, and terracotta/red would fight the brand buttons. */
+.activity-amount .amt-in {
+  color: var(--accent-green);
+}
+.activity-amount .amt-out {
+  color: var(--text-strong);
 }
 
 /* ── sync details panel (Settings → Sync details) ───────────────────── */
@@ -2154,7 +2175,7 @@ button.connection-revoke {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px 16px 16px;
+  padding: 12px 16px 20px;
   display: flex;
   flex-direction: column;
   /* thin discreet scrollbar — Firefox + Chromium */
@@ -2326,6 +2347,7 @@ button.connection-revoke {
 
 .modal-body {
   padding: var(--space-4);
+  min-height: 96px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;

@@ -2498,7 +2498,7 @@ function SettingsTab({
               {w.fingerprint === wallet.fingerprint ? "●" : "○"}
             </span>
             <span className="wallet-row-label">
-              {w.label === `Wallet ${w.fingerprint}` ? ` ${w.fingerprint}` : w.label}
+              {w.label === `Wallet ${w.fingerprint}` ? "Wallet" : w.label}
             </span>
             <span className="wallet-row-fp muted">{w.fingerprint}</span>
           </button>
@@ -3212,7 +3212,7 @@ function HomeTab({
   // Pull XCH balance from the local coin store snapshot — it includes
   // hint-matched + hardened-derived coins that get_address_balance misses.
   const xchMojosStr = snapshot?.unspent_mojos ?? "0";
-  const xchDisplay = mojosToXch(xchMojosStr);
+  const xchDisplay = groupThousands(mojosToXch(xchMojosStr));
   const xchUnspentCount = snapshot?.unspent_count ?? balance?.unspent_coin_count ?? 0;
   const xchAmount = Number(BigInt(xchMojosStr)) / 1_000_000_000_000;
   const xchUsdValue = xchPrice ? xchAmount * xchPrice : null;
@@ -3251,20 +3251,7 @@ function HomeTab({
             const decimals = meta?.decimals ?? 3;
             return (
               <li key={c.asset_id} className="asset-row" title={c.asset_id}>
-                {meta?.image_url ? (
-                  <img
-                    src={meta.image_url}
-                    alt={name}
-                    className="asset-icon asset-icon-img"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = "none";
-                    }}
-                  />
-                ) : (
-                  <div className="asset-icon asset-icon-cat">
-                    {ticker.slice(0, 3).toUpperCase()}
-                  </div>
-                )}
+                <AssetIcon imageUrl={meta?.image_url} ticker={ticker} alt={name} />
                 <div className="asset-meta">
                   <div className="asset-name">{name}</div>
                   <div className="muted small">
@@ -3272,7 +3259,7 @@ function HomeTab({
                   </div>
                 </div>
                 <div className="asset-balance">
-                  <div>{formatCatAmount(c.total_unspent_mojos, decimals)}</div>
+                  <div>{groupThousands(formatCatAmount(c.total_unspent_mojos, decimals))}</div>
                   <div className="muted small">{ticker}</div>
                 </div>
               </li>
@@ -3789,6 +3776,24 @@ function NftThumb({ src, alt }: { src: string | null; alt: string }) {
   return <img src={src} alt={alt} onError={() => setFailed(true)} />;
 }
 
+// CAT/asset avatar: the token's logo, falling back to its ticker initials when
+// there's no image OR the image fails to load (previously a broken logo hid the
+// <img> and left an empty grey circle).
+function AssetIcon({ imageUrl, ticker, alt }: { imageUrl?: string; ticker: string; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  if (imageUrl && !failed) {
+    return (
+      <img
+        src={imageUrl}
+        alt={alt}
+        className="asset-icon asset-icon-img"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return <div className="asset-icon asset-icon-cat">{ticker.slice(0, 3).toUpperCase()}</div>;
+}
+
 function NftsTab({ wallet }: { wallet: StoredWallet }) {
   const [snapshot, setSnapshot] = useState<CoinSnapshot | null>(null);
   const [telemetry, setTelemetry] = useState<CoinSyncTelemetry | null>(null);
@@ -4032,11 +4037,9 @@ function NftDetail({
       <button className="ghost" onClick={onBack}>
         ← Back to NFTs
       </button>
-      {imgSrc && (
-        <div className="nft-detail-image">
-          <img src={imgSrc} alt={nft.launcher_id} />
-        </div>
-      )}
+      <div className="nft-detail-image">
+        <NftThumb src={imgSrc} alt={nft.metadata.edition_number ? `NFT #${nft.metadata.edition_number}` : "NFT"} />
+      </div>
       <ul className="status-list">
         <li>
           <span className="muted">launcher</span>
@@ -4253,7 +4256,7 @@ function ActivityTab({
             const ticker = r.asset_kind === "xch" ? "XCH" : meta?.code ?? "CAT";
             const decimals = r.asset_kind === "xch" ? 12 : meta?.decimals ?? 3;
             const amt = formatAmount(r.amount_mojos, decimals);
-            const amtCompact = formatAmountCompact(r.amount_mojos, decimals);
+            const amtCompact = formatAmountDisplay(r.amount_mojos, decimals);
             const usd =
               r.asset_kind === "xch" && xchPrice
                 ? parseFloat(amt) * xchPrice
@@ -4270,7 +4273,7 @@ function ActivityTab({
                   <div className="muted small">block #{r.height.toLocaleString()}</div>
                 </div>
                 <div className="activity-amount">
-                  <div className={isIn ? "ok" : "warn"} title={`${isIn ? "+" : "−"}${amt} ${ticker}`}>
+                  <div className={isIn ? "amt-in" : "amt-out"} title={`${isIn ? "+" : "−"}${amt} ${ticker}`}>
                     {isIn ? "+" : "−"}
                     {amtCompact}
                   </div>
@@ -4307,6 +4310,15 @@ function formatAmount(mojos: string, decimals: number): string {
   }
 }
 
+/** Insert thousands separators into the whole part of a decimal string. */
+function groupThousands(value: string): string {
+  const neg = value.startsWith("-");
+  const body = neg ? value.slice(1) : value;
+  const [whole, frac] = body.split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${neg ? "-" : ""}${frac != null ? `${grouped}.${frac}` : grouped}`;
+}
+
 /**
  * Compact amount for tight layouts (Activity rows, the Send-success hero).
  * Full precision blows the column out — "0.000000296124" is 14 glyphs. Keep
@@ -4326,6 +4338,11 @@ function formatAmountCompact(mojos: string, decimals: number): string {
   if (firstNonZero === -1) return "0";
   const sig = frac.slice(0, firstNonZero + 3).replace(/0+$/, "");
   return sig ? `0.${sig}` : "0";
+}
+
+/** Display-ready amount: compact decimals + thousands separators. */
+function formatAmountDisplay(mojos: string, decimals: number): string {
+  return groupThousands(formatAmountCompact(mojos, decimals));
 }
 
 function normalizeId(id: string): string {
