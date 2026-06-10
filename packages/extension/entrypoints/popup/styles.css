@@ -416,6 +416,30 @@ textarea {
   letter-spacing: 0.04em;
 }
 
+/* Amount label row with an inline "Max" affordance. */
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.field-max {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent-green);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.field-max:hover {
+  background: rgba(125, 178, 62, 0.14);
+  border-color: var(--accent-green);
+}
+
 .row {
   display: flex;
   gap: var(--space-2);

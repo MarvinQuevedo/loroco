@@ -317,6 +317,7 @@ export function App() {
             key={pending[0]!.id}
             request={pending[0]!}
             queueSize={pending.length}
+            fingerprint={view.wallet.fingerprint}
             onDecide={decide}
           />
         )}
@@ -384,10 +385,12 @@ function requestedScopeFromParams(params: unknown): "full" | "read-only" {
 function ApprovalScreen({
   request,
   queueSize,
+  fingerprint,
   onDecide,
 }: {
   request: PendingApproval;
   queueSize: number;
+  fingerprint: number | null;
   onDecide: (
     id: string,
     approved: boolean,
@@ -407,13 +410,20 @@ function ApprovalScreen({
   // Per-method override state. `createOffer` lets the user override the fee
   // a dApp proposed (Goby's combined-swap default of ~100M+ mojos is rarely
   // what the user wants — most XCH transfers need 0 or 5_000_000 mojos).
+  //
+  // The canonical fee is mojos (what the handler receives), but the user edits
+  // it in XCH — editing a 9-digit mojos string is hostile and inconsistent with
+  // every other amount in this dialog. `feeOverride` holds the editable XCH
+  // string; `feeOverrideMojos` is the BigInt-safe canonical we actually send.
   const initialFee =
     request.method === "createOffer" || request.method === "takeOffer"
       ? String(
           (request.params as { fee?: string | number } | null)?.fee ?? "0",
         )
       : null;
-  const [feeOverride, setFeeOverride] = useState<string | null>(initialFee);
+  const initialFeeXch = initialFee != null ? formatAmount(initialFee, 12) : null;
+  const [feeOverride, setFeeOverride] = useState<string | null>(initialFeeXch);
+  const feeOverrideMojos = feeOverride != null ? xchToMojosStr(feeOverride) : null;
   // #2 — connection scope. On a connect/requestAccounts approval the user
   // chooses whether the site gets full access (signing allowed, still
   // per-call approved) or read-only (it can see balances/assets but every
@@ -441,8 +451,8 @@ function ApprovalScreen({
     setBusy(approved ? "approve" : "reject");
     try {
       const overrides: Record<string, unknown> = {};
-      if (approved && feeOverride !== null && feeOverride !== initialFee) {
-        overrides.fee = feeOverride;
+      if (approved && feeOverrideMojos !== null && feeOverrideMojos !== initialFee) {
+        overrides.fee = feeOverrideMojos;
       }
       if (approved && isConnectRequest) {
         overrides.scope = scope;
@@ -471,6 +481,7 @@ function ApprovalScreen({
 
       <ApprovalSummary
         request={request}
+        fingerprint={fingerprint}
         onAnalysisReady={setAnalysisReady}
         onRiskAssessed={setRiskAckRequired}
       />
@@ -531,23 +542,25 @@ function ApprovalScreen({
 
       {feeOverride !== null && (
         <div className="fee-override">
-          <label htmlFor="fee-mojos" className="muted small">
-            Network fee — dApp suggested{" "}
-            <code>{fmtXch(initialFee ?? "0")}</code> ({initialFee} mojos):
+          <label htmlFor="fee-xch" className="muted small">
+            Network fee (XCH) — dApp suggested{" "}
+            <code>{fmtXch(initialFee ?? "0")}</code>:
           </label>
           <input
-            id="fee-mojos"
+            id="fee-xch"
             type="number"
             min="0"
-            step="1"
+            step="0.0001"
+            inputMode="decimal"
             value={feeOverride}
             onChange={(e) => setFeeOverride(e.target.value)}
             disabled={busy !== null}
           />
-          {feeOverride !== initialFee && (
+          {feeOverrideMojos !== initialFee && (
             <p className="muted small">
-              You're overriding the fee. The dApp may reject the offer if it
-              expected a higher fee — try the suggested value first if unsure.
+              You're overriding the fee (now <code>{fmtXch(feeOverrideMojos ?? "0")}</code>). The
+              dApp may reject the offer if it expected a higher fee — try the suggested value first
+              if unsure.
             </p>
           )}
         </div>
@@ -669,7 +682,13 @@ interface DecodedOfferLite {
   };
 }
 
-function TakeOfferSummary({ offer }: { offer: string }) {
+function TakeOfferSummary({
+  offer,
+  catDisplay,
+}: {
+  offer: string;
+  catDisplay: (assetId: string | null | undefined) => CatDisplay;
+}) {
   const [decoded, setDecoded] = useState<DecodedOfferLite | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -710,14 +729,14 @@ function TakeOfferSummary({ offer }: { offer: string }) {
     <div className="offer-summary">
       <div className="offer-side offer-receive">
         <span className="muted small">You receive</span>
-        <OfferAssetList side={decoded.offered} />
+        <OfferAssetList side={decoded.offered} catDisplay={catDisplay} />
       </div>
       <div className="offer-arrow" aria-hidden>↕</div>
       <div className="offer-side offer-pay">
         <span className="muted small">You pay</span>
-        <OfferAssetList side={decoded.requested} />
+        <OfferAssetList side={decoded.requested} catDisplay={catDisplay} />
       </div>
-      {decoded.offered_royalties.length > 0 && <RoyaltyLine decoded={decoded} />}
+      {decoded.offered_royalties.length > 0 && <RoyaltyLine decoded={decoded} catDisplay={catDisplay} />}
     </div>
   );
 }
@@ -730,7 +749,13 @@ function TakeOfferSummary({ offer }: { offer: string }) {
  * destination puzzle hash is shown and labelled "verified on-chain" so the
  * user can see funds go to the creator's real royalty address.
  */
-function RoyaltyLine({ decoded }: { decoded: DecodedOfferLite }) {
+function RoyaltyLine({
+  decoded,
+  catDisplay,
+}: {
+  decoded: DecodedOfferLite;
+  catDisplay: (assetId: string | null | undefined) => CatDisplay;
+}) {
   const pcts = decoded.offered_royalties
     .map((r) => `${(r.royalty_basis_points / 100).toFixed(2)}%`)
     .join(", ");
@@ -740,7 +765,8 @@ function RoyaltyLine({ decoded }: { decoded: DecodedOfferLite }) {
     if (BigInt(rp.xch_mojos) > 0n) amounts.push(fmtXch(rp.xch_mojos));
     for (const c of rp.cats) {
       if (BigInt(c.amount) > 0n) {
-        amounts.push(`${mojosToCatUnits(c.amount)} ${shortHash(c.asset_id)}`);
+        const cd = catDisplay(c.asset_id);
+        amounts.push(`${mojosToCatUnits(c.amount, cd.decimals)} ${cd.symbol ?? shortHash(c.asset_id)}`);
       }
     }
   }
@@ -775,8 +801,10 @@ function RoyaltyLine({ decoded }: { decoded: DecodedOfferLite }) {
 
 function OfferAssetList({
   side,
+  catDisplay,
 }: {
   side: DecodedOfferLite["offered"];
+  catDisplay: (assetId: string | null | undefined) => CatDisplay;
 }) {
   const xch = BigInt(side.xch_mojos);
   const items: string[] = [];
@@ -784,7 +812,8 @@ function OfferAssetList({
     items.push(fmtXch(xch.toString()));
   }
   for (const c of side.cats) {
-    items.push(`${mojosToCatUnits(c.amount)} ${shortHash(c.asset_id)}`);
+    const cd = catDisplay(c.asset_id);
+    items.push(`${mojosToCatUnits(c.amount, cd.decimals)} ${cd.symbol ?? shortHash(c.asset_id)}`);
   }
   for (const l of side.nft_launcher_ids) {
     items.push(`NFT ${shortHash(l)}`);
@@ -834,6 +863,7 @@ function bundleRequiresAck(a: CoinSpendAnalysis): boolean {
 
 function CoinSpendBreakdown({
   coinSpends,
+  catDisplay,
   onAnalysisReady,
   onRiskAssessed,
 }: {
@@ -842,6 +872,7 @@ function CoinSpendBreakdown({
     puzzle_reveal: string;
     solution: string;
   }>;
+  catDisplay?: (assetId: string | null | undefined) => CatDisplay;
   onAnalysisReady?: (ready: boolean) => void;
   onRiskAssessed?: (requiresAck: boolean) => void;
 }) {
@@ -939,9 +970,10 @@ function CoinSpendBreakdown({
     for (const o of s.outputs) {
       const amt = BigInt(o.amount);
       if (amt <= 0n) continue;
+      const cd = s.kind === "cat" && s.asset_id ? catDisplay?.(s.asset_id) : undefined;
       const label =
         s.kind === "cat" && s.asset_id
-          ? `${mojosToCatUnits(o.amount)} CAT ${shortHash(s.asset_id)}`
+          ? `${mojosToCatUnits(o.amount, cd?.decimals ?? 3)} ${cd?.symbol ?? "CAT"} ${shortHash(s.asset_id)}`
           : s.kind === "xch"
             ? `${mojosToXch(o.amount)} XCH`
             : `${o.amount} (unknown layer)`;
@@ -1045,14 +1077,21 @@ function CoinSpendBreakdown({
 
 function ApprovalSummary({
   request,
+  fingerprint,
   onAnalysisReady,
   onRiskAssessed,
 }: {
   request: PendingApproval;
+  fingerprint?: number | null;
   onAnalysisReady?: (ready: boolean) => void;
   onRiskAssessed?: (requiresAck: boolean) => void;
 }) {
   const params = request.params as Record<string, unknown> | null;
+  // Token metadata for the active wallet so CAT amounts render with the same
+  // precision + symbol the user sees on Home/Activity (not a generic 3-decimal
+  // "CAT"). Hook runs unconditionally before the switch.
+  const catMeta = useApprovalCatMeta(fingerprint ?? null);
+  const catDisplay = (assetId: string | null | undefined) => resolveCatDisplay(assetId, catMeta);
 
   switch (request.method) {
     case "connect":
@@ -1114,6 +1153,7 @@ function ApprovalSummary({
       const assetId = params?.assetId;
       const fee = params?.fee;
       const isXch = assetId == null || assetId === "";
+      const cd = catDisplay(isXch ? null : String(assetId));
       return (
         <div className="result">
           <div>
@@ -1122,11 +1162,11 @@ function ApprovalSummary({
           </div>
           <div>
             <span className="muted">amount</span>
-            <code>{amount != null ? (isXch ? fmtXch(String(amount)) : fmtCat(String(amount))) : ""}</code>
+            <code>{amount != null ? (isXch ? fmtXch(String(amount)) : fmtCat(String(amount), cd.symbol, cd.decimals)) : ""}</code>
           </div>
           <div>
             <span className="muted">asset id</span>
-            <code>{isXch ? "(XCH)" : String(assetId)}</code>
+            <code>{isXch ? "(XCH)" : `${cd.symbol ? cd.symbol + " · " : ""}${String(assetId)}`}</code>
           </div>
           {fee != null && (
             <div>
@@ -1142,7 +1182,7 @@ function ApprovalSummary({
       const offer = typeof params?.offer === "string" ? (params.offer as string) : "";
       // Fee row omitted — takeOffer renders the editable fee-override control
       // below this summary (see ApprovalScreen), so it would duplicate it.
-      return offer ? <TakeOfferSummary offer={offer} /> : null;
+      return offer ? <TakeOfferSummary offer={offer} catDisplay={catDisplay} /> : null;
     }
 
     case "walletWatchAsset": {
@@ -1209,6 +1249,7 @@ function ApprovalSummary({
           </p>
           <CoinSpendBreakdown
             coinSpends={cs}
+            catDisplay={catDisplay}
             onAnalysisReady={onAnalysisReady}
             onRiskAssessed={onRiskAssessed}
           />
@@ -1231,6 +1272,7 @@ function ApprovalSummary({
           </p>
           <CoinSpendBreakdown
             coinSpends={cs}
+            catDisplay={catDisplay}
             onAnalysisReady={onAnalysisReady}
             onRiskAssessed={onRiskAssessed}
           />
@@ -1241,8 +1283,11 @@ function ApprovalSummary({
     case "createOffer": {
       const offerAssets = (params?.offerAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
       const requestAssets = (params?.requestAssets as Array<{ assetId: string; amount: string }> | undefined) ?? [];
-      const fmtOfferAsset = (a: { assetId: string; amount: string }) =>
-        a.assetId === "" ? fmtXch(a.amount) : `${mojosToCatUnits(a.amount)} ${shortHash(a.assetId)}`;
+      const fmtOfferAsset = (a: { assetId: string; amount: string }) => {
+        if (a.assetId === "") return fmtXch(a.amount);
+        const cd = catDisplay(a.assetId);
+        return `${mojosToCatUnits(a.amount, cd.decimals)} ${cd.symbol ?? shortHash(a.assetId)}`;
+      };
       return (
         // The fee row is intentionally omitted here — createOffer renders the
         // editable fee-override control just below this summary, so showing it
@@ -1340,14 +1385,15 @@ function ApprovalSummary({
       const assetId = params?.assetId;
       const outputs = (params?.outputs as Array<{ address: string; amount: string | number }> | undefined) ?? [];
       const fee = params?.fee;
+      const cd = catDisplay(String(assetId ?? ""));
       return (
         <div className="result">
           <p className="muted small">
             Send a token (CAT) to {outputs.length} recipient{outputs.length === 1 ? "" : "s"}.
           </p>
-          <div><span className="muted">asset id</span><code>{String(assetId ?? "")}</code></div>
-          <OutputsList outputs={outputs} kind="cat" />
-          <SumRow outputs={outputs} kind="cat" />
+          <div><span className="muted">asset id</span><code>{`${cd.symbol ? cd.symbol + " · " : ""}${String(assetId ?? "")}`}</code></div>
+          <OutputsList outputs={outputs} kind="cat" assetSymbol={cd.symbol} decimals={cd.decimals} />
+          <SumRow outputs={outputs} kind="cat" assetSymbol={cd.symbol} decimals={cd.decimals} />
           {fee != null && (
             <div><span className="muted">network fee</span><code>{fmtXch(String(fee))}</code></div>
           )}
@@ -1371,12 +1417,15 @@ function ApprovalSummary({
               <OutputsList outputs={xchOutputs} kind="xch" />
             </>
           )}
-          {catOutputs.length > 0 && (
-            <>
-              <div><span className="muted">CAT asset id</span><code>{String(catBlock?.assetId ?? "")}</code></div>
-              <OutputsList outputs={catOutputs} kind="cat" />
-            </>
-          )}
+          {catOutputs.length > 0 && (() => {
+            const cd = catDisplay(String(catBlock?.assetId ?? ""));
+            return (
+              <>
+                <div><span className="muted">CAT asset id</span><code>{`${cd.symbol ? cd.symbol + " · " : ""}${String(catBlock?.assetId ?? "")}`}</code></div>
+                <OutputsList outputs={catOutputs} kind="cat" assetSymbol={cd.symbol} decimals={cd.decimals} />
+              </>
+            );
+          })()}
           {xchOutputs.length === 0 && catOutputs.length === 0 && (
             <p className="muted small">No outputs specified.</p>
           )}
@@ -1563,25 +1612,28 @@ function fmtOutputAmount(
   amount: string | number,
   kind: "xch" | "cat",
   assetSymbol?: string,
+  decimals = 3,
 ): string {
-  return kind === "xch" ? fmtXch(amount) : fmtCat(amount, assetSymbol);
+  return kind === "xch" ? fmtXch(amount) : fmtCat(amount, assetSymbol, decimals);
 }
 
 function OutputsList({
   outputs,
   kind,
   assetSymbol,
+  decimals = 3,
 }: {
   outputs: Array<{ address: string; amount: string | number }>;
   kind: "xch" | "cat";
   assetSymbol?: string;
+  decimals?: number;
 }) {
   if (outputs.length === 0) return <p className="muted small">No outputs.</p>;
   return (
     <ul className="detail-list">
       {outputs.map((o, i) => (
         <li key={i}>
-          <code>{fmtOutputAmount(o.amount, kind, assetSymbol)}</code> →{" "}
+          <code>{fmtOutputAmount(o.amount, kind, assetSymbol, decimals)}</code> →{" "}
           <code title={String(o.address)}>{shortHash(String(o.address))}</code>
         </li>
       ))}
@@ -1593,10 +1645,12 @@ function SumRow({
   outputs,
   kind,
   assetSymbol,
+  decimals = 3,
 }: {
   outputs: Array<{ address: string; amount: string | number }>;
   kind: "xch" | "cat";
   assetSymbol?: string;
+  decimals?: number;
 }) {
   let total = 0n;
   try {
@@ -1607,7 +1661,7 @@ function SumRow({
   return (
     <div>
       <span className="muted">total</span>
-      <code>{fmtOutputAmount(total.toString(), kind, assetSymbol)}</code>
+      <code>{fmtOutputAmount(total.toString(), kind, assetSymbol, decimals)}</code>
     </div>
   );
 }
@@ -3344,7 +3398,7 @@ function stageDisplay(stage: SyncStage): string {
 }
 
 function formatUsd(n: number): string {
-  if (!isFinite(n)) return "0.00";
+  if (!isFinite(n) || n === 0) return "0.00";
   if (n >= 1) return n.toFixed(2);
   if (n >= 0.01) return n.toFixed(4);
   return n.toFixed(6);
@@ -3995,6 +4049,15 @@ function OfferInspector() {
   );
 }
 
+// NFT thumbnail that falls back to the "NFT" placeholder when the image is
+// missing OR fails to load — previously a broken URL collapsed the card to a
+// blank square (the onError just hid the <img>).
+function NftThumb({ src, alt }: { src: string | null; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) return <div className="nft-placeholder">NFT</div>;
+  return <img src={src} alt={alt} onError={() => setFailed(true)} />;
+}
+
 function NftsTab({ wallet }: { wallet: StoredWallet }) {
   const [snapshot, setSnapshot] = useState<CoinSnapshot | null>(null);
   const [telemetry, setTelemetry] = useState<CoinSyncTelemetry | null>(null);
@@ -4108,17 +4171,7 @@ function NftsTab({ wallet }: { wallet: StoredWallet }) {
                 className="nft-card"
                 onClick={() => setSelected(n)}
               >
-                {imgSrc ? (
-                  <img
-                    src={imgSrc}
-                    alt={n.launcher_id}
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = "none";
-                    }}
-                  />
-                ) : (
-                  <div className="nft-placeholder">NFT</div>
-                )}
+                <NftThumb src={imgSrc} alt={n.launcher_id} />
                 <div className="nft-caption" title={n.launcher_id}>
                   #{(n.metadata.edition_number ?? 1).toString()}
                   {n.metadata.edition_total && n.metadata.edition_total > 1 ? (
@@ -4567,14 +4620,20 @@ function shortHash(hex: string): string {
  * CATs use 3 decimal places by convention (1 CAT = 1000 mojos). Render
  * with up to 3 decimals + trim trailing zeros.
  */
-function mojosToCatUnits(mojos: string): string {
+// CAT amounts are carried on-chain in the asset's smallest unit. The Chia CAT
+// default is 3 decimals (1 CAT = 1000), but a token's Dexie metadata can
+// declare a different precision — and the rest of the wallet (Home/Activity/
+// Send) already honours `meta.decimals`. The approval dialog MUST use the same
+// precision, otherwise the same coin reads e.g. "1 TOKEN" on Home but
+// "1000 CAT" in the confirmation popup (the bug: amounts looked like raw mojos).
+function mojosToCatUnits(mojos: string, decimals = 3): string {
   try {
     const m = BigInt(mojos);
-    const scale = 1_000n;
+    const scale = 10n ** BigInt(decimals);
     const whole = m / scale;
     const frac = m % scale;
     if (frac === 0n) return whole.toString();
-    const fracStr = frac.toString().padStart(3, "0").replace(/0+$/, "");
+    const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
     return `${whole}.${fracStr}`;
   } catch {
     return mojos;
@@ -4624,8 +4683,50 @@ function fmtXch(mojos: string | number | bigint): string {
 }
 
 /** Human CAT amount with unit (or a custom symbol): "1 CAT", "12.5 SBX". */
-function fmtCat(mojos: string | number | bigint, symbol?: string): string {
-  return `${mojosToCatUnits(String(mojos))} ${symbol || "CAT"}`;
+function fmtCat(mojos: string | number | bigint, symbol?: string, decimals = 3): string {
+  return `${mojosToCatUnits(String(mojos), decimals)} ${symbol || "CAT"}`;
+}
+
+// Resolve a CAT asset_id to its display precision + symbol from the active
+// wallet's Dexie metadata. Falls back to the Chia default (3 decimals, generic
+// "CAT") for tokens the wallet doesn't track yet — never throws, never blocks
+// the approval. The lookup mirrors the Home/Activity tabs (0x-prefixed and
+// stripped forms both checked) so the same coin reads identically everywhere.
+export interface CatDisplay {
+  decimals: number;
+  symbol?: string;
+}
+function resolveCatDisplay(
+  assetId: string | null | undefined,
+  meta: Record<string, DexieCatMetadata>,
+): CatDisplay {
+  if (!assetId) return { decimals: 3 };
+  const m = meta[assetId] ?? meta[normalizeId(assetId)] ?? meta[`0x${normalizeId(assetId)}`];
+  return { decimals: m?.decimals ?? 3, symbol: m?.code ?? undefined };
+}
+
+// Loads the active wallet's CAT metadata for the approval dialog. Empty until
+// the snapshot resolves; an empty map just means every CAT renders with the
+// safe 3-decimal / "CAT" default (current behaviour), so the dialog is never
+// blocked waiting on metadata.
+function useApprovalCatMeta(fingerprint: number | null): Record<string, DexieCatMetadata> {
+  const [meta, setMeta] = useState<Record<string, DexieCatMetadata>>({});
+  useEffect(() => {
+    if (fingerprint == null) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snap = await getCoinSnapshot(fingerprint);
+        if (!cancelled) setMeta(snap.cat_metadata ?? {});
+      } catch {
+        /* leave empty — formatters fall back to 3 decimals / "CAT" */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fingerprint]);
+  return meta;
 }
 
 type SendAssetKind = "xch" | "cat";
@@ -5079,7 +5180,26 @@ function SendTab({ wallet, balance }: { wallet: StoredWallet; balance: BalanceIn
       </label>
 
       <label className="field">
-        <span>Amount ({selectedAsset.ticker})</span>
+        <span className="field-label-row">
+          Amount ({selectedAsset.ticker})
+          {selectedAsset.available_mojos > 0n && (
+            <button
+              type="button"
+              className="field-max"
+              onClick={() => {
+                // XCH must leave room for the fee; CATs pay the fee in XCH so
+                // the whole CAT balance is spendable.
+                const max =
+                  selectedAsset.kind === "xch"
+                    ? selectedAsset.available_mojos - feeMojos
+                    : selectedAsset.available_mojos;
+                setAmount(formatAmount((max > 0n ? max : 0n).toString(), selectedAsset.decimals));
+              }}
+            >
+              Max
+            </button>
+          )}
+        </span>
         <input
           type="number"
           step="0.0001"
@@ -5122,6 +5242,21 @@ function scaleAmount(n: number, decimals: number): bigint {
   const [whole = "0", frac = ""] = s.split(".");
   const fracPadded = (frac + "0".repeat(decimals)).slice(0, decimals);
   return BigInt(whole) * BigInt(10) ** BigInt(decimals) + BigInt(fracPadded || "0");
+}
+
+// XCH decimal string → mojos string, BigInt-safe (no float round-trip). Used
+// by the approval fee-override so the canonical fee stays exact. Malformed
+// input collapses to "0" rather than throwing — the worst case is a 0 fee,
+// never a wrong large one.
+function xchToMojosStr(xch: string): string {
+  const t = (xch ?? "").trim();
+  if (t === "" || t === ".") return "0";
+  const neg = t.startsWith("-");
+  const [whole = "0", frac = ""] = t.replace(/^-/, "").split(".");
+  if (!/^\d*$/.test(whole) || !/^\d*$/.test(frac)) return "0";
+  const fracPadded = (frac + "000000000000").slice(0, 12);
+  const mojos = BigInt(whole || "0") * 1_000_000_000_000n + BigInt(fracPadded || "0");
+  return (neg ? -mojos : mojos).toString();
 }
 
 interface DerivedAddress {
