@@ -1,0 +1,9 @@
+/* Loroco UI Kit — brand fonts.
+ *
+ * Poppins (UI text, weights 400–700) + Nunito (wordmark only, 800/900),
+ * served from Google Fonts. Import this file once; if your dApp
+ * self-hosts fonts or has a strict CSP, skip this file and provide
+ * Poppins/Nunito yourself — the tokens fall back to system fonts.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Nunito:wght@800;900&display=swap");

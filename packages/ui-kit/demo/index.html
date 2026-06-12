@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Loroco UI Kit — demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="../assets/icon/icon-32.png" />
+<link rel="stylesheet" href="../css/loroco.css" />
+<style>
+  body { margin: 0; background: #e6e2d8; }
+  .demo-grid { display: grid; grid-template-columns: 1fr 1fr; min-height: 100vh; }
+  .demo-pane { padding: 32px; background: var(--loroco-bg); color: var(--loroco-text); }
+  .demo-section { margin: 0 0 28px; }
+  .demo-section > h3 {
+    margin: 0 0 12px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.1em; color: var(--loroco-text-mute);
+  }
+  .demo-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .demo-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+  .demo-swatch { width: 84px; }
+  .demo-swatch .demo-color { height: 44px; border-radius: 8px; border: 1px solid var(--loroco-border); }
+  .demo-swatch .demo-label { font-size: 10px; font-family: var(--loroco-font-mono); color: var(--loroco-text-mute); margin-top: 4px; }
+  .demo-icons { display: flex; flex-wrap: wrap; gap: 14px; color: var(--loroco-text-strong); }
+  .demo-icons figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; width: 56px; }
+  .demo-icons figcaption { font-size: 9px; font-family: var(--loroco-font-mono); color: var(--loroco-text-mute); }
+</style>
+</head>
+<body class="loroco">
+<div class="demo-grid">
+  <div class="demo-pane loroco-light" id="pane-light"></div>
+  <div class="demo-pane loroco-dark" id="pane-dark"></div>
+</div>
+
+<template id="pane-template">
+  <div class="demo-section">
+    <span class="loroco-lockup">
+      <img src="../assets/icon/icon-128.png" alt="" class="loroco-mark" />
+      <span class="loroco-word">loroco</span>
+    </span>
+  </div>
+
+  <div class="demo-section">
+    <h3>Typography</h3>
+    <h1 class="loroco-h1">Send 1.25 XCH</h1>
+    <h2 class="loroco-h2">Confirm transaction</h2>
+    <p class="loroco-body">Poppins 14px body — the wallet asks you to review every detail.</p>
+    <p class="loroco-muted">Muted 13px — secondary guidance text.</p>
+    <p class="loroco-mono">xch1qxw3…f0ksme · mono for addresses & amounts</p>
+  </div>
+
+  <div class="demo-section">
+    <h3>Palette</h3>
+    <div class="demo-swatches">
+      <div class="demo-swatch"><div class="demo-color" style="background:#c0633c"></div><div class="demo-label">terra #c0633c</div></div>
+      <div class="demo-swatch"><div class="demo-color" style="background:#e8854f"></div><div class="demo-label">terra-light</div></div>
+      <div class="demo-swatch"><div class="demo-color" style="background:#984220"></div><div class="demo-label">terra-deep</div></div>
+      <div class="demo-swatch"><div class="demo-color" style="background:#9fcb5e"></div><div class="demo-label">green-lime</div></div>
+      <div class="demo-swatch"><div class="demo-color" style="background:#7db23e"></div><div class="demo-label">green</div></div>
+      <div class="demo-swatch"><div class="demo-color" style="background:#faf3de"></div><div class="demo-label">cream</div></div>
+      <div class="demo-swatch"><div class="demo-color" style="background:#14b8a6"></div><div class="demo-label">warn</div></div>
+      <div class="demo-swatch"><div class="demo-color" style="background:#ff6767"></div><div class="demo-label">red</div></div>
+    </div>
+  </div>
+
+  <div class="demo-section">
+    <h3>Connect</h3>
+    <div class="demo-row">
+      <button class="loroco-connect-btn">
+        <img src="../assets/icon/icon-48.png" alt="" class="loroco-mark" />
+        Connect Loroco
+      </button>
+      <button class="loroco-connect-btn loroco-connect-btn--solid">
+        <img src="../assets/icon/icon-48.png" alt="" class="loroco-mark" />
+        Connect Loroco
+      </button>
+      <button class="loroco-chip"><span class="loroco-dot"></span>xch1qxw3kt2…f0ksme</button>
+    </div>
+  </div>
+
+  <div class="demo-section">
+    <h3>Buttons</h3>
+    <div class="demo-row">
+      <button class="loroco-btn">Approve</button>
+      <button class="loroco-btn loroco-btn--primary">Send</button>
+      <button class="loroco-btn loroco-btn--secondary">Cancel</button>
+      <button class="loroco-btn loroco-btn--danger">Revoke</button>
+      <button class="loroco-btn loroco-btn--ghost">Details</button>
+      <button class="loroco-btn" disabled>Syncing…</button>
+    </div>
+  </div>
+
+  <div class="demo-section">
+    <h3>Badges & input</h3>
+    <div class="demo-row" style="margin-bottom:12px">
+      <span class="loroco-badge">Connected</span>
+      <span class="loroco-badge loroco-badge--warn">Pending</span>
+      <span class="loroco-badge loroco-badge--err">Rejected</span>
+    </div>
+    <input class="loroco-input" placeholder="xch1… recipient address" />
+  </div>
+
+  <div class="demo-section">
+    <h3>Card + detail list</h3>
+    <div class="loroco-card">
+      <ul class="loroco-detail-list">
+        <li><span class="loroco-detail-label">To</span><span class="loroco-detail-value">xch1qxw3kt2lf9hl9aysxvyjyu05q7yyjm29uxw0fgw7q9rxjzvf0ksme8eqd2</span></li>
+        <li><span class="loroco-detail-label">Amount</span><span class="loroco-detail-value">1.25 XCH</span></li>
+        <li><span class="loroco-detail-label">Fee</span><span class="loroco-detail-value">0.0001 XCH</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="demo-section">
+    <h3>Icons</h3>
+    <div class="demo-icons" data-icons></div>
+  </div>
+
+  <div class="demo-section">
+    <a class="loroco-powered" href="#">
+      <img src="../assets/icon/icon-48.png" alt="" class="loroco-mark" />
+      <span>Powered by</span>
+      <span class="loroco-powered-name">loroco</span>
+    </a>
+  </div>
+</template>
+
+<script src="./icons-data.js"></script>
+<script>
+  const tpl = document.getElementById("pane-template");
+  for (const id of ["pane-light", "pane-dark"]) {
+    document.getElementById(id).append(tpl.content.cloneNode(true));
+  }
+  const icons = window.LOROCO_ICONS;
+  for (const host of document.querySelectorAll("[data-icons]")) {
+    for (const [name, els] of Object.entries(icons)) {
+      const fig = document.createElement("figure");
+      fig.innerHTML =
+        `<svg class="loroco-icon loroco-icon--lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+        `stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${els.join("")}</svg>` +
+        `<figcaption>${name}</figcaption>`;
+      host.append(fig);
+    }
+  }
+</script>
+</body>
+</html>

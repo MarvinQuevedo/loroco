@@ -1,0 +1,39 @@
+{
+  "name": "@loroco/ui-kit",
+  "version": "0.1.0",
+  "description": "Loroco wallet UI kit — brand assets, design tokens, typography, icons and optional React components for dApps integrating Loroco.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./react": "./src/react.tsx",
+    "./css/*": "./css/*",
+    "./icons/*": "./icons/*",
+    "./assets/*": "./assets/*"
+  },
+  "files": [
+    "src",
+    "css",
+    "icons",
+    "assets",
+    "README.md"
+  ],
+  "scripts": {
+    "build:icons": "node scripts/build-icons.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.3"
+  }
+}

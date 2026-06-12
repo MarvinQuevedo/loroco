@@ -1,0 +1,419 @@
+/* Loroco UI Kit — components.
+ *
+ * Every class is prefixed `loroco-` so nothing leaks into the host
+ * dApp. Visuals mirror the wallet popup 1:1 (same radii, weights,
+ * hover states) so wallet UI inside a dApp reads as Loroco.
+ *
+ * Requires tokens.css. Fonts.css recommended.
+ */
+
+/* ── Base scope ───────────────────────────────────────────────────── */
+.loroco {
+  font-family: var(--loroco-font);
+  font-size: 14px;
+  color: var(--loroco-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Typography helpers ───────────────────────────────────────────── */
+.loroco-h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--loroco-text-strong);
+}
+
+.loroco-h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--loroco-text-strong);
+}
+
+.loroco-body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.loroco-muted {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--loroco-text-mute);
+}
+
+.loroco-small {
+  font-size: 11px;
+}
+
+.loroco-mono {
+  font-family: var(--loroco-font-mono);
+  font-size: 12px;
+}
+
+/* ── Brand lockup (mark + wordmark) ───────────────────────────────── */
+.loroco-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--loroco-font-brand);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--loroco-wordmark);
+  user-select: none;
+}
+
+.loroco-lockup .loroco-mark {
+  display: block;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  filter: var(--loroco-mark-shadow);
+}
+
+.loroco-lockup .loroco-word {
+  font-size: 22px;
+  letter-spacing: -0.04em;
+}
+
+.loroco-lockup--sm .loroco-mark {
+  width: 28px;
+  height: 28px;
+}
+.loroco-lockup--sm .loroco-word {
+  font-size: 20px;
+}
+
+.loroco-lockup--stacked {
+  flex-direction: column;
+  gap: 14px;
+  align-items: center;
+}
+.loroco-lockup--stacked .loroco-mark {
+  width: 96px;
+  height: 96px;
+  filter: drop-shadow(0 8px 22px rgba(152, 66, 32, 0.28));
+}
+.loroco-lockup--stacked .loroco-word {
+  font-size: 40px;
+  letter-spacing: -0.05em;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────── */
+.loroco-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--loroco-font);
+  appearance: none;
+  border: none;
+  border-radius: var(--loroco-radius-md);
+  background: var(--loroco-action);
+  color: var(--loroco-action-text);
+  padding: 12px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+  min-height: 44px;
+  text-decoration: none;
+}
+
+.loroco-btn:hover:not(:disabled) {
+  background: var(--loroco-accent);
+}
+
+.loroco-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.loroco-btn:disabled {
+  background: var(--loroco-surface);
+  color: var(--loroco-text-mute);
+  border: 1px solid var(--loroco-border);
+  cursor: not-allowed;
+}
+
+.loroco-btn--primary {
+  background: var(--loroco-primary);
+  color: #fff;
+}
+.loroco-btn--primary:hover:not(:disabled) {
+  background: var(--loroco-primary-press);
+}
+
+.loroco-btn--secondary {
+  background: transparent;
+  color: var(--loroco-text-strong);
+  border: 1px solid var(--loroco-border);
+}
+.loroco-btn--secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--loroco-text) 5%, transparent);
+}
+
+.loroco-btn--ghost {
+  background: transparent;
+  color: var(--loroco-text-mute);
+  border: none;
+  min-height: auto;
+  padding: 6px 10px;
+}
+.loroco-btn--ghost:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--loroco-text) 5%, transparent);
+}
+
+.loroco-btn--danger {
+  background: var(--loroco-red);
+  color: #fff;
+}
+.loroco-btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--loroco-red) 85%, #000);
+}
+
+.loroco-btn--sm {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: var(--loroco-radius-sm);
+}
+
+/* ── Connect button ───────────────────────────────────────────────── */
+.loroco-connect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--loroco-font);
+  appearance: none;
+  border: 1px solid var(--loroco-border);
+  border-radius: var(--loroco-radius-md);
+  background: var(--loroco-surface);
+  color: var(--loroco-text-strong);
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  box-shadow: var(--loroco-shadow);
+  transition: border-color 0.15s, background 0.15s, transform 0.05s;
+}
+
+.loroco-connect-btn:hover:not(:disabled) {
+  border-color: var(--loroco-primary);
+  background: color-mix(in srgb, var(--loroco-primary) 6%, var(--loroco-surface));
+}
+
+.loroco-connect-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.loroco-connect-btn:disabled {
+  color: var(--loroco-text-mute);
+  cursor: not-allowed;
+}
+
+.loroco-connect-btn .loroco-mark {
+  width: 22px;
+  height: 22px;
+  display: block;
+  object-fit: contain;
+}
+
+.loroco-connect-btn--solid {
+  background: var(--loroco-primary);
+  border-color: var(--loroco-primary);
+  color: #fff;
+}
+.loroco-connect-btn--solid:hover:not(:disabled) {
+  background: var(--loroco-primary-press);
+  border-color: var(--loroco-primary-press);
+}
+
+/* ── Address / wallet chip ────────────────────────────────────────── */
+.loroco-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--loroco-border);
+  border-radius: var(--loroco-radius-pill);
+  background: var(--loroco-surface);
+  font-family: var(--loroco-font-mono);
+  font-size: 11px;
+  color: var(--loroco-text-strong);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.loroco-chip:hover {
+  border-color: var(--loroco-primary);
+}
+
+.loroco-chip .loroco-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--loroco-accent);
+  flex: 0 0 auto;
+}
+
+.loroco-chip .loroco-dot--warn {
+  background: var(--loroco-warn);
+}
+.loroco-chip .loroco-dot--err {
+  background: var(--loroco-red);
+}
+
+/* ── Status badge ─────────────────────────────────────────────────── */
+.loroco-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: var(--loroco-radius-pill);
+  background: color-mix(in srgb, var(--loroco-accent) 16%, transparent);
+  color: var(--loroco-accent-press);
+}
+
+.loroco-badge--warn {
+  background: color-mix(in srgb, var(--loroco-warn) 16%, transparent);
+  color: var(--loroco-warn-deep);
+}
+
+.loroco-badge--err {
+  background: color-mix(in srgb, var(--loroco-red) 16%, transparent);
+  color: var(--loroco-red);
+}
+
+.loroco-dark .loroco-badge,
+.loroco-dark .loroco-badge--warn {
+  color: var(--loroco-text);
+}
+
+/* ── Card ─────────────────────────────────────────────────────────── */
+.loroco-card {
+  background: var(--loroco-surface);
+  border: 1px solid var(--loroco-border);
+  border-radius: var(--loroco-radius-md);
+  box-shadow: var(--loroco-shadow);
+  padding: var(--loroco-space-4);
+}
+
+.loroco-card--lg {
+  border-radius: var(--loroco-radius-lg);
+}
+
+/* ── Detail list (key/value rows, like the approval popup) ────────── */
+.loroco-detail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--loroco-space-2);
+}
+
+.loroco-detail-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--loroco-surface);
+  border: 1px solid var(--loroco-border);
+  border-radius: var(--loroco-radius-sm);
+}
+
+.loroco-detail-list .loroco-detail-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--loroco-text-mute);
+}
+
+.loroco-detail-list .loroco-detail-value {
+  font-family: var(--loroco-font-mono);
+  font-size: 12px;
+  color: var(--loroco-text-strong);
+  word-break: break-all;
+}
+
+/* ── Input ────────────────────────────────────────────────────────── */
+.loroco-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--loroco-font);
+  font-size: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--loroco-border);
+  border-radius: var(--loroco-radius-md);
+  background: var(--loroco-surface);
+  color: var(--loroco-text-strong);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.loroco-input:focus {
+  border-color: var(--loroco-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--loroco-primary) 18%, transparent);
+}
+
+.loroco-input::placeholder {
+  color: var(--loroco-text-mute);
+}
+
+/* ── Icons ────────────────────────────────────────────────────────── */
+.loroco-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  vertical-align: -0.2em;
+  flex: 0 0 auto;
+}
+
+.loroco-icon--sm {
+  width: 16px;
+  height: 16px;
+}
+
+.loroco-icon--lg {
+  width: 24px;
+  height: 24px;
+}
+
+/* ── "Powered by Loroco" attribution ──────────────────────────────── */
+.loroco-powered {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--loroco-font);
+  font-size: 11px;
+  color: var(--loroco-text-mute);
+  text-decoration: none;
+}
+
+.loroco-powered .loroco-mark {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+}
+
+.loroco-powered .loroco-powered-name {
+  font-family: var(--loroco-font-brand);
+  font-weight: 900;
+  font-size: 12px;
+  letter-spacing: -0.03em;
+  color: var(--loroco-wordmark);
+}
+
+.loroco-powered:hover .loroco-powered-name {
+  text-decoration: underline;
+}

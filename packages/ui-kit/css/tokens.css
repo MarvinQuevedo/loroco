@@ -1,0 +1,121 @@
+/* Loroco UI Kit — design tokens.
+ *
+ * Same palette/radii/spacing the wallet popup uses
+ * (packages/extension/entrypoints/popup/styles.css), namespaced with
+ * `--loroco-*` so they never collide with a host dApp's own variables.
+ *
+ * Theming:
+ *   - Default: follows `prefers-color-scheme`.
+ *   - Force a theme on any subtree with `.loroco-light` / `.loroco-dark`.
+ */
+
+:root {
+  /* ── Brand palette ─────────────────────────────────────────────── */
+  --loroco-terra-light: #e8854f;
+  --loroco-terra: #c0633c; /* principal */
+  --loroco-terra-deep: #984220;
+  --loroco-terra-dark: #8e3608;
+  --loroco-green-lime: #9fcb5e;
+  --loroco-green: #7db23e; /* acento (corazón de la flor) */
+  --loroco-green-mid: #4f7322;
+  --loroco-green-deep: #3d5520;
+  --loroco-cream: #faf3de; /* pétalos */
+  --loroco-beige: #eadcc2;
+  --loroco-charcoal: #2a2a2a;
+
+  /* ── Semantic accents ──────────────────────────────────────────── */
+  --loroco-primary: var(--loroco-terra);
+  --loroco-primary-press: var(--loroco-terra-deep);
+  --loroco-accent: var(--loroco-green);
+  --loroco-accent-press: var(--loroco-green-mid);
+  --loroco-action: var(--loroco-green-lime); /* default button fill */
+  --loroco-action-text: #0e1113;
+  --loroco-warn: #14b8a6;
+  --loroco-warn-deep: #0f8a7d;
+  --loroco-red: #ff6767;
+  --loroco-gold: #ffc400;
+
+  /* ── Radii ─────────────────────────────────────────────────────── */
+  --loroco-radius-sm: 6px;
+  --loroco-radius-md: 12px;
+  --loroco-radius-lg: 20px;
+  --loroco-radius-xl: 28px;
+  --loroco-radius-pill: 999px;
+
+  /* ── Spacing scale ─────────────────────────────────────────────── */
+  --loroco-space-1: 4px;
+  --loroco-space-2: 8px;
+  --loroco-space-3: 12px;
+  --loroco-space-4: 16px;
+  --loroco-space-5: 20px;
+  --loroco-space-6: 24px;
+  --loroco-space-8: 32px;
+
+  /* ── Typography ────────────────────────────────────────────────── */
+  --loroco-font: "Poppins", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    system-ui, sans-serif;
+  --loroco-font-brand: "Nunito", "Poppins", system-ui, sans-serif;
+  --loroco-font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ── Resolved theme tokens — light (default) ─────────────────────── */
+:root,
+.loroco-light {
+  --loroco-bg: #f2f2f2;
+  --loroco-surface: #fefefe;
+  --loroco-surface-2: #fefefe;
+  --loroco-text: #23262f;
+  --loroco-text-strong: #17262a;
+  --loroco-text-mute: #969aa0;
+  --loroco-hint: #6b7280;
+  --loroco-border: #d8dce0;
+  --loroco-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --loroco-wordmark: var(--loroco-terra);
+  --loroco-mark-shadow: drop-shadow(0 2px 6px rgba(152, 66, 32, 0.18));
+}
+
+/* ── Resolved theme tokens — dark ────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --loroco-bg: #101018;
+    --loroco-surface: #1a1a22;
+    --loroco-surface-2: #25252e;
+    --loroco-text: #ffffff;
+    --loroco-text-strong: #ffffff;
+    --loroco-text-mute: #bac7ce;
+    --loroco-hint: #969aa0;
+    --loroco-border: #2c2c36;
+    --loroco-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
+    --loroco-wordmark: #f5e8d6;
+    --loroco-mark-shadow: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.45));
+  }
+}
+
+.loroco-dark {
+  --loroco-bg: #101018;
+  --loroco-surface: #1a1a22;
+  --loroco-surface-2: #25252e;
+  --loroco-text: #ffffff;
+  --loroco-text-strong: #ffffff;
+  --loroco-text-mute: #bac7ce;
+  --loroco-hint: #969aa0;
+  --loroco-border: #2c2c36;
+  --loroco-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
+  --loroco-wordmark: #f5e8d6;
+  --loroco-mark-shadow: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.45));
+}
+
+/* `.loroco-light` must also win when nested inside `.loroco-dark`. */
+.loroco-light {
+  --loroco-bg: #f2f2f2;
+  --loroco-surface: #fefefe;
+  --loroco-surface-2: #fefefe;
+  --loroco-text: #23262f;
+  --loroco-text-strong: #17262a;
+  --loroco-text-mute: #969aa0;
+  --loroco-hint: #6b7280;
+  --loroco-border: #d8dce0;
+  --loroco-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --loroco-wordmark: var(--loroco-terra);
+  --loroco-mark-shadow: drop-shadow(0 2px 6px rgba(152, 66, 32, 0.18));
+}
