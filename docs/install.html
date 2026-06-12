@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Install — Loroco</title>
+<meta name="description" content="Three ways to install Loroco: the Chrome Web Store, a release ZIP loaded manually, or a build from source. Step-by-step instructions for Chrome, Brave, Edge and Firefox.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+<script src="theme.js"></script>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="Loroco"><span class="word">loroco</span></a>
+    <div class="nav-links">
+      <a href="index.html">Overview</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="methods.html">RPC Methods</a>
+      <a href="developers.html">Developers</a>
+      <a href="security.html">Security</a>
+      <a class="nav-install active" href="install.html">Install</a>
+      <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
+    </div>
+    <button class="nav-theme" type="button" aria-label="Toggle dark theme" title="Toggle dark theme">
+      <span class="theme-moon" aria-hidden="true">&#127769;</span>
+      <span class="theme-sun" aria-hidden="true">&#9728;&#65039;</span>
+    </button>
+  </div>
+</nav>
+
+<section class="hero" style="padding:64px 0 48px">
+  <div class="wrap">
+    <span class="eyebrow">Install</span>
+    <h1>Get Loroco in your browser</h1>
+    <p class="lead">There are three ways to install Loroco: the <strong>Chrome Web Store</strong> (one click,
+      auto-updates), a <strong>release ZIP</strong> loaded manually (no store account needed, works on any
+      Chromium browser), or a <strong>build from source</strong> (full control, always the latest code).</p>
+  </div>
+</section>
+
+<!-- Option 1: Web Store -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Option 1 · Recommended</span>
+    <h2>Chrome Web Store</h2>
+    <p class="lead">The easiest path. One click, and Chrome keeps the extension updated automatically.</p>
+    <div class="btn-row" style="margin-top:20px">
+      <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/jkpbdpldleedflbgpemgpigdhnlmaklp" target="_blank" rel="noopener">Add to Chrome →</a>
+    </div>
+    <p class="muted" style="margin-top:16px">Works on Chrome, Brave, Edge, Opera, Vivaldi and any other
+      Chromium-based browser that supports Web Store installs.</p>
+  </div>
+</section>
+
+<!-- Option 2: ZIP -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Option 2 · No store needed</span>
+    <h2>Install from a release ZIP</h2>
+    <p class="lead">Every release ships a ZIP of the built extension. You can load it manually in any
+      Chromium browser without touching the Web Store — useful if the store is unavailable in your region,
+      you want a specific version, or you simply prefer not to use it.</p>
+
+    <ol style="line-height:1.9; color:var(--ink-soft); margin-top:20px">
+      <li>Download <code>ozoneextension-&lt;version&gt;-chrome.zip</code> from the
+        <a href="https://github.com/MarvinQuevedo/loroco/releases">GitHub Releases page</a>.</li>
+      <li><strong>Unzip it</strong> into a folder you'll keep permanently — e.g.
+        <code>~/Apps/loroco/</code>. Chrome loads the extension <em>from this folder</em>; if you delete or
+        move it later, the extension breaks.</li>
+      <li>Open <code>chrome://extensions/</code> (Brave: <code>brave://extensions/</code>,
+        Edge: <code>edge://extensions/</code>).</li>
+      <li>Enable <strong>Developer mode</strong> — the toggle in the top-right corner.</li>
+      <li>Click <strong>Load unpacked</strong> and select the unzipped folder — the one that contains
+        <code>manifest.json</code>.</li>
+      <li>Loroco appears in the list. Pin it via the puzzle-piece icon next to the address bar, then click
+        it to create or import a wallet.</li>
+    </ol>
+
+    <div class="note warn" style="margin-top:24px">
+      <span class="label">ZIPs can't be loaded directly</span><br>
+      Chrome has no "install from ZIP" button — <strong>Load unpacked</strong> only accepts an extracted
+      folder. If the file picker won't let you select anything, you're probably pointing it at the
+      <code>.zip</code> itself or at a parent folder; pick the folder that directly contains
+      <code>manifest.json</code>.
+    </div>
+
+    <h3 style="margin-top:36px">Updating a manual install</h3>
+    <p>Manually-loaded extensions <strong>do not auto-update</strong>. To update:</p>
+    <ol style="line-height:1.9; color:var(--ink-soft)">
+      <li>Download the new release ZIP.</li>
+      <li>Extract it <strong>into the same folder</strong>, replacing the old files.</li>
+      <li>On <code>chrome://extensions/</code>, hit the reload icon (↻) on the Loroco card.</li>
+    </ol>
+    <div class="note danger">
+      <span class="label">Keep the same folder — your wallet data depends on it</span><br>
+      For unpacked extensions, Chrome derives the extension ID from the folder's path. Load a new version
+      from a <em>different</em> folder and Chrome treats it as a <em>different extension</em> — fresh ID,
+      fresh storage, and your wallet looks empty. Nothing is lost on-chain (your keys come from your
+      mnemonic), but you'd have to re-import the wallet from the recovery phrase. Replacing files
+      <strong>in place</strong> and reloading keeps the ID, the connections and the synced state intact.
+    </div>
+
+    <div class="note info" style="margin-top:20px">
+      <span class="label">"Developer mode" banner</span><br>
+      Chrome shows a "Disable developer mode extensions" warning on startup for any manually-loaded
+      extension. That's expected for every unpacked install — dismiss it. It does not mean the extension is
+      unsafe; it means it didn't come through the store's signing pipeline.
+    </div>
+  </div>
+</section>
+
+<!-- Option 3: Source -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Option 3 · From source</span>
+    <h2>Build it yourself</h2>
+    <p class="lead">If you have the toolchain (Node 22+, pnpm, Rust + <code>wasm-pack</code> — see the
+      <a href="developers.html">developer guide</a> for first-time setup), the build is two commands:</p>
+<pre><code><span class="tok-f">git</span> clone --recurse-submodules https://github.com/MarvinQuevedo/loroco.git
+<span class="tok-f">cd</span> loroco
+<span class="tok-f">pnpm</span> install
+<span class="tok-f">pnpm</span> build          <span class="tok-c"># full build: WASM engine + extension (~1 min)</span></code></pre>
+    <p>Then load it exactly like the ZIP install above — <code>chrome://extensions/</code> → Developer mode →
+      <strong>Load unpacked</strong> → select:</p>
+<pre><code>packages/extension/.output/chrome-mv3/</code></pre>
+    <p>Or produce your own distributable ZIP with <code>pnpm zip</code>
+      (written to <code>packages/extension/.output/</code>).</p>
+  </div>
+</section>
+
+<!-- Firefox -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Experimental</span>
+    <h2>Firefox</h2>
+    <p class="lead">A Firefox MV3 build exists but is experimental. Permanent installs require the add-on to
+      be signed by Mozilla; until Loroco ships on AMO, you can load it as a <em>temporary</em> add-on:</p>
+    <ol style="line-height:1.9; color:var(--ink-soft)">
+      <li>Build it: <code>pnpm build:firefox</code> (or <code>pnpm zip:firefox</code> for a ZIP).</li>
+      <li>Open <code>about:debugging#/runtime/this-firefox</code>.</li>
+      <li>Click <strong>Load Temporary Add-on…</strong> and select
+        <code>packages/extension/.output/firefox-mv3/manifest.json</code>.</li>
+    </ol>
+    <div class="note warn">
+      <span class="label">Temporary means temporary</span><br>
+      Firefox removes temporary add-ons when the browser restarts — you'll need to load it again (your
+      wallet can be re-imported from the mnemonic). Treat the Firefox build as a developer preview, not a
+      daily driver.
+    </div>
+  </div>
+</section>
+
+<!-- Safety -->
+<section class="section">
+  <div class="wrap">
+    <span class="eyebrow">Stay safe</span>
+    <h2>Before you trust any wallet download</h2>
+    <ul class="checks">
+      <li>Download ZIPs <strong>only</strong> from
+        <a href="https://github.com/MarvinQuevedo/loroco/releases">github.com/MarvinQuevedo/loroco/releases</a> —
+        never from a link a website or DM hands you.</li>
+      <li>Loroco asks for your mnemonic in exactly one place: the <em>Import wallet</em> screen inside the
+        extension popup. No website, dApp, or "support" chat ever needs it.</li>
+      <li>After installing, the extension requests no special browser permissions beyond what's in the
+        manifest — if an "update" suddenly asks for more, stop and check the release notes.</li>
+      <li>Building from source is the strongest guarantee: the code you read is the code you run.</li>
+    </ul>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>Loroco — Chia browser-extension wallet.</div>
+    <div><a href="https://github.com/MarvinQuevedo/loroco">github.com/MarvinQuevedo/loroco</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

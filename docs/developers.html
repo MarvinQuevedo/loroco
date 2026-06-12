@@ -20,7 +20,7 @@
       <a href="methods.html">RPC Methods</a>
       <a href="developers.html" class="active">Developers</a>
       <a href="security.html">Security</a>
-      <a class="nav-install" href="https://chromewebstore.google.com/detail/jkpbdpldleedflbgpemgpigdhnlmaklp" target="_blank" rel="noopener">Install ↗</a>
+      <a class="nav-install" href="install.html">Install</a>
       <a class="nav-gh" href="https://github.com/MarvinQuevedo/loroco">GitHub ↗</a>
     </div>
     <button class="nav-theme" type="button" aria-label="Toggle dark theme" title="Toggle dark theme">
@@ -247,7 +247,8 @@
         <tr><td><code>pnpm chrome</code></td><td>Open Chrome with the existing build (no rebuild). Uses a per-repo profile at <code>./.chrome-profile/</code>.</td></tr>
         <tr><td><code>pnpm build:fast</code></td><td>Build the extension only — does not touch wasm. ~2 s.</td></tr>
         <tr><td><code>pnpm build</code></td><td>Full build: rebuild wasm + rebuild extension. ~1 min cold.</td></tr>
-        <tr><td><code>pnpm zip</code></td><td>Produce <code>.output/chrome-mv3.zip</code> for distribution.</td></tr>
+        <tr><td><code>pnpm zip</code></td><td>Produce <code>.output/ozoneextension-&lt;version&gt;-chrome.zip</code> for distribution.</td></tr>
+        <tr><td><code>pnpm build:release</code></td><td>Full build + zip, then commit the version bump, tag <code>v&lt;version&gt;</code>, push, and publish a GitHub Release with the zip attached.</td></tr>
         <tr><td><code>pnpm typecheck</code></td><td>Run <code>tsc --noEmit</code> across all workspace packages.</td></tr>
       </tbody>
     </table>
@@ -257,6 +258,7 @@
       <code>chrome://extensions/</code> → enable Developer mode → <strong>Load unpacked</strong> → pick
       <code>packages/extension/.output/chrome-mv3/</code>. Stable Chrome 148+ ignores <code>--load-extension</code>;
       the dev scripts use Chrome for Testing with <code>--disable-features=DisableLoadExtensionCommandLineSwitch</code>.
+      Full step-by-step (including release-ZIP installs and update caveats) on the <a href="install.html">Install page</a>.
     </div>
   </div>
 </section>
